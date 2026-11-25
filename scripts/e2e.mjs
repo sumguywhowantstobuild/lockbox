@@ -318,7 +318,7 @@ export async function runSpecs(ctx) {
     }
     const label = `s${String(at + 1)}`;
     // the app of the suite before must be gone before its state is put back
-    if (!(await lockboxGone(15))) throw new Error("Lockbox was still running after the last spec");
+    if (!(await lockboxGone(15))) throw new Error("Petalock was still running after the last spec");
     await ctx.freshState(label);
     const vaultFolder = join(ctx.runRoot, `vaults-${label}`);
     const filesFolder = join(ctx.runRoot, `files-${label}`);
@@ -419,9 +419,9 @@ export async function runE2e({ env = process.env, specs = [], edgedriver, stateO
   try {
     running = (steps.isRunning ?? state.isLockboxRunning)();
   } catch {
-    return refused("could not check whether Lockbox is running");
+    return refused("could not check whether Petalock is running");
   }
-  if (running !== false) return refused("Lockbox is running; close it first (a launch would hand over to it)");
+  if (running !== false) return refused("Petalock is running; close it first (a launch would hand over to it)");
 
   let tools;
   try {
@@ -502,7 +502,7 @@ export async function runE2e({ env = process.env, specs = [], edgedriver, stateO
     const done = undo === "back" ? state.swapBack(swap.name, stateOptions) : state.recover(stateOptions);
     for (const line of done.lines) say(`swap: ${line}`);
     // Nothing the swap parked is deleted: what was written into the substituted folders (by the app, or by a person who
-    // opened Lockbox meanwhile) stays where swap back put it. The run names them in one line.
+    // opened Petalock meanwhile) stays where swap back put it. The run names them in one line.
     const kept = state.LOCATION_KEYS.map((key) => `${locations[key]}.test-${swap.name}`).filter((folder) => existsSync(folder));
     if (kept.length > 0) say(`swap: the test state of this run is kept, not deleted, beside the real folders; delete it by hand when you are done: ${kept.join("; ")}`);
     if (state.status(stateOptions).inProgress) throw new Error("a swap is still in progress");

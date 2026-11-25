@@ -90,7 +90,7 @@ fn carry_on_off_this_thread(shell: &Weak<Shell>) {
     }
     let shell = Weak::clone(shell);
     let _ = thread::Builder::new()
-        .name("lockbox-carry-on".into())
+        .name("petalock-carry-on".into())
         .spawn(move || {
             if let Some(shell) = shell.upgrade() {
                 shell.carry_on_close();
@@ -111,7 +111,7 @@ pub(crate) enum Checked {
 pub struct Shell {
     pub sessions: Arc<Sessions>,
     pub settings: Arc<SettingsStore>,
-    /// Lockbox's clipboard copies, cleared after the delay, at a lock of their vault and at app close.
+    /// Petalock's clipboard copies, cleared after the delay, at a lock of their vault and at app close.
     pub clipboard: Clipboard,
     /// Locks the vaults on idle, Windows' signals, vanished folders and app exit.
     pub autolock: AutoLock,
@@ -355,7 +355,7 @@ impl Shell {
     pub(crate) fn run_in_background(self: &Arc<Self>, work: fn(&Shell)) {
         let shell = Arc::clone(self);
         let started = thread::Builder::new()
-            .name("lockbox-window".into())
+            .name("petalock-window".into())
             .spawn(move || work(&shell));
         if started.is_err() {
             work(self);
@@ -554,7 +554,7 @@ impl Shell {
         self.finish_explanation(&mut explaining);
     }
 
-    /// The window is shown again (Open Lockbox, a second launch, the save shortcut): unlocks are accepted again, and a
+    /// The window is shown again (Open Petalock, a second launch, the save shortcut): unlocks are accepted again, and a
     /// close still waiting to hide will not ([`lock_and_hide`](Self::lock_and_hide)).
     pub fn window_shown(&self) {
         let mut shows = lock(&self.window_shows);
@@ -581,7 +581,7 @@ impl Shell {
         self.lock_all();
         if self.settings.mark_close_explained().is_err() {
             // No detail: the settings file's path and the error are not logged (R5).
-            eprintln!("Lockbox: the first-close note could not be saved");
+            eprintln!("Petalock: the first-close note could not be saved");
         }
         self.notify(&Notice::FirstClose { explain: false });
         self.hide_unless_shown_since(sealed_at);
@@ -680,7 +680,7 @@ impl Shell {
     /// The checks every readable output passes before anything is made: a decrypted copy (Save a copy), a readable file
     /// (the recovery key's PDF, a `.env`) and a folder's files saved together. The output journal must be readable
     /// ([`Outputs::usable`]); the destination `dest` (a file's path: for a folder, any name in it, which is never
-    /// made) is made canonical and refused inside Lockbox's own state folder ([`output_destination`](Self::output_destination));
+    /// made) is made canonical and refused inside Petalock's own state folder ([`output_destination`](Self::output_destination));
     /// and refused in or below a vault's folder ([`refuse_vault_folder`]). Then, unless `cloud_confirmed`, the cloud
     /// question: a folder a cloud provider syncs is [`Checked::Cloud`] and nothing is made until the user says yes.
     ///
@@ -822,7 +822,7 @@ mod tests {
         ts.shell.sessions.list().iter().map(|s| s.state).collect()
     }
 
-    /// Two unlocked vaults and a Lockbox copy on the clipboard, which a close must clear.
+    /// Two unlocked vaults and a Petalock copy on the clipboard, which a close must clear.
     fn two_vaults_and_a_copy(ts: &TestShell) -> [(crate::session::SessionId, u64); 2] {
         let vaults = [ts.open_vault("Family"), ts.open_vault("Work")];
         let (session, generation) = vaults[0];
@@ -1172,7 +1172,7 @@ mod tests {
     }
 
     /// Greptile's race on PR 4: the close waits for a slow lock hook, and in that wait the window is brought back (Open
-    /// Lockbox in the tray, or the save shortcut), which lifts the gate. The reopen is the later wish and wins: the
+    /// Petalock in the tray, or the save shortcut), which lifts the gate. The reopen is the later wish and wins: the
     /// older close does not hide the window, so no vault can be unlocked in a window that then hides. The close's own
     /// lock still ran: what was open before the reopen is locked.
     #[test]

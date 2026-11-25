@@ -408,7 +408,7 @@ export function writeClipboard(text) {
 // ---- the keyboard -------------------------------------------------------------------------------------------------
 
 /**
- * Presses the save shortcut (Ctrl+Shift+L, the default) as real keyboard input: Windows gives it to Lockbox wherever its
+ * Presses the save shortcut (Ctrl+Shift+L, the default) as real keyboard input: Windows gives it to Petalock wherever its
  * window is. Only for steps `clipboardSteps` allows: it is this PC's keyboard.
  */
 export function pressSaveShortcut() {
@@ -420,7 +420,7 @@ export function pressSaveShortcut() {
 // ---- the idle clock -----------------------------------------------------------------------------------------------
 
 /**
- * Lockbox locks when Windows says the session has had no keyboard or mouse input for the auto-lock time, however
+ * Petalock locks when Windows says the session has had no keyboard or mouse input for the auto-lock time, however
  * recently the vault was unlocked (it reads GetLastInputInfo). On a PC nobody has touched for minutes, and on CI's
  * runner, an unlocked vault would lock within one tick of the 5-second timer. WebDriver's events are not input to Windows,
  * so a run starts the idle clock from zero by sending one mouse event that moves nothing (no key, no click, no move).

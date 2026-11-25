@@ -577,7 +577,7 @@ mod tests {
         };
         f.vault.new_item(login, "Bank", None).unwrap();
         let (item, file) = f.file_item(b"hello world");
-        let backup = f.backup("a.lockbox-backup");
+        let backup = f.backup("a.petalock-backup");
 
         let ro = open_backup(&backup).unwrap();
         assert_eq!(ro.name(), "Family");
@@ -624,7 +624,7 @@ mod tests {
     #[test]
     fn a_backup_says_when_it_was_made_and_a_folder_does_not() {
         let f = Fixture::new();
-        let backup = f.backup("a.lockbox-backup");
+        let backup = f.backup("a.petalock-backup");
         let made = crate::vault::source::verify_backup(
             &backup,
             Credential::Password(PW),
@@ -648,7 +648,7 @@ mod tests {
         let mut f = Fixture::new();
         f.vault.new_item(ItemKind::Note, "note", None).unwrap();
         let (item, file) = f.file_item(&vec![5u8; 3 * MIB + 9]);
-        let backup = f.backup("a.lockbox-backup");
+        let backup = f.backup("a.petalock-backup");
         let items_dir = f.vault.dir().join("items");
         let items_bytes: u64 = fs::read_dir(&items_dir)
             .unwrap()
@@ -715,7 +715,7 @@ mod tests {
                 .new_item_with_notes(ItemKind::Note, &title, None, notes)
                 .unwrap();
         }
-        let backup = f.backup("a.lockbox-backup");
+        let backup = f.backup("a.petalock-backup");
         let copy = f.parent.path().join("copy");
         copy_folder(f.vault.dir(), &copy);
 
@@ -786,7 +786,7 @@ mod tests {
     fn live_and_readonly_side_by_side() {
         let mut f = Fixture::new();
         let (item, file) = f.file_item(b"shared contents");
-        let backup = f.backup("a.lockbox-backup");
+        let backup = f.backup("a.petalock-backup");
         let copy = f.parent.path().join("copy");
         copy_folder(f.vault.dir(), &copy);
 
@@ -823,10 +823,10 @@ mod tests {
     fn export_over_the_backup_refused() {
         let mut f = Fixture::new();
         let (item, file) = f.file_item(b"data");
-        let backup = f.backup("a.lockbox-backup");
+        let backup = f.backup("a.petalock-backup");
         let ro = open_backup(&backup).unwrap();
         let before = fs::read(&backup).unwrap();
-        let roundabout = f.out().join("..").join("out").join("a.lockbox-backup");
+        let roundabout = f.out().join("..").join("out").join("a.petalock-backup");
         // The same file in other capitals is the same file on Windows only.
         let capitals = cfg!(windows).then(|| backup.to_str().unwrap().to_uppercase().into());
         let aliases: Vec<PathBuf> = [backup.clone(), roundabout]
@@ -854,7 +854,7 @@ mod tests {
             );
         }
         assert_eq!(fs::read(&backup).unwrap(), before);
-        assert_eq!(names(&f.out()), ["a.lockbox-backup"]);
+        assert_eq!(names(&f.out()), ["a.petalock-backup"]);
         assert!(
             journal.recorded.borrow().is_empty(),
             "refused before any output"
@@ -878,8 +878,8 @@ mod tests {
     fn export_over_a_hard_link_of_the_backup_refused() {
         let mut f = Fixture::new();
         let (item, file) = f.file_item(b"data");
-        let backup = f.backup("a.lockbox-backup");
-        let link = f.out().join("alias.lockbox-backup");
+        let backup = f.backup("a.petalock-backup");
+        let link = f.out().join("alias.petalock-backup");
         fs::hard_link(&backup, &link).unwrap();
         let ro = open_backup(&backup).unwrap();
         let before = fs::read(&backup).unwrap();
@@ -903,7 +903,7 @@ mod tests {
         assert!(journal.recorded.borrow().is_empty(), "no temp was created");
         assert_eq!(
             names(&f.out()),
-            ["a.lockbox-backup", "alias.lockbox-backup"]
+            ["a.petalock-backup", "alias.petalock-backup"]
         );
     }
 
@@ -1000,7 +1000,7 @@ mod tests {
     fn export_into_a_vault_folder_refused() {
         let mut f = Fixture::new();
         let (item, file) = f.file_item(b"plaintext");
-        let backup = f.backup("a.lockbox-backup");
+        let backup = f.backup("a.petalock-backup");
         let copy = f.parent.path().join("copy");
         copy_folder(f.vault.dir(), &copy);
         let live = f.vault.dir().to_path_buf();
@@ -1078,7 +1078,7 @@ mod tests {
     fn tampered_blob_export_refused() {
         let mut f = Fixture::new();
         let (item, file) = f.file_item(&vec![1u8; 2 * MIB]);
-        let backup = f.backup("a.lockbox-backup");
+        let backup = f.backup("a.petalock-backup");
         let copy = f.parent.path().join("copy");
         copy_folder(f.vault.dir(), &copy);
         let mode = ManifestMode::Rehash { key: Some(f.key()) };
@@ -1105,7 +1105,7 @@ mod tests {
                 "{result:?}"
             );
             assert_eq!(fs::read(&dest).unwrap(), b"OLD", "destination untouched");
-            assert_eq!(names(&f.out()), ["a.lockbox-backup", "copy.bin"]);
+            assert_eq!(names(&f.out()), ["a.petalock-backup", "copy.bin"]);
             let recorded = journal.recorded.borrow();
             assert_eq!(recorded.len(), 1);
             assert!(
@@ -1119,7 +1119,7 @@ mod tests {
     fn wrong_credential_refused() {
         let mut f = Fixture::new();
         f.file_item(b"x");
-        let backup = f.backup("a.lockbox-backup");
+        let backup = f.backup("a.petalock-backup");
         let copy = f.parent.path().join("copy");
         copy_folder(f.vault.dir(), &copy);
         let stranger = RecoverySecret::generate();
@@ -1144,7 +1144,7 @@ mod tests {
     fn recovery_key_opens_backup() {
         let mut f = Fixture::new();
         f.file_item(b"x");
-        let backup = f.backup("a.lockbox-backup");
+        let backup = f.backup("a.petalock-backup");
         let copy = f.parent.path().join("copy");
         copy_folder(f.vault.dir(), &copy);
         let cancel = CancelToken::new();
@@ -1161,7 +1161,7 @@ mod tests {
         let _disarm = Disarm;
         let mut f = Fixture::new();
         f.file_item(b"x");
-        let backup = f.backup("a.lockbox-backup");
+        let backup = f.backup("a.petalock-backup");
         let copy = f.parent.path().join("copy");
         copy_folder(f.vault.dir(), &copy);
         let backup_open = |token: &CancelToken| {
@@ -1244,7 +1244,7 @@ mod tests {
         for n in 0..3u8 {
             f.file_item(&[n; 8]);
         }
-        let backup = f.backup("a.lockbox-backup");
+        let backup = f.backup("a.petalock-backup");
         let copy = f.parent.path().join("copy");
         copy_folder(f.vault.dir(), &copy);
         let cancelled = CancelToken::new();
@@ -1270,7 +1270,7 @@ mod tests {
         for n in 0..3u8 {
             f.file_item(&[n; 8]);
         }
-        let backup = f.backup("a.lockbox-backup");
+        let backup = f.backup("a.petalock-backup");
         let copy = f.parent.path().join("copy");
         copy_folder(f.vault.dir(), &copy);
         let backup_open = |token: &CancelToken| {
@@ -1299,7 +1299,7 @@ mod tests {
     fn backup_with_a_bad_header_mac_is_refused() {
         let mut f = Fixture::new();
         f.file_item(b"x");
-        let backup = f.backup("a.lockbox-backup");
+        let backup = f.backup("a.petalock-backup");
         let mode = ManifestMode::Rehash { key: Some(f.key()) };
         let rename = |m: &mut BTreeMap<String, Vec<u8>>| {
             let header = m.get_mut(HEADER_FILE).unwrap();
@@ -1337,7 +1337,7 @@ mod tests {
         let mut f = Fixture::new();
         f.vault.new_item(ItemKind::Note, "one", None).unwrap();
         f.vault.new_item(ItemKind::Note, "two", None).unwrap();
-        let backup = f.backup("a.lockbox-backup");
+        let backup = f.backup("a.petalock-backup");
         let copy = f.parent.path().join("copy");
         copy_folder(f.vault.dir(), &copy);
         let mode = ManifestMode::Rehash { key: Some(f.key()) };
@@ -1483,7 +1483,7 @@ mod tests {
                 .replace_attachment(&item, &small, &replacement, &cancel, &NoProgress);
         replaced.unwrap();
         f.vault.trash_item(&item).unwrap();
-        let backup = f.backup("a.lockbox-backup");
+        let backup = f.backup("a.petalock-backup");
         let ro = open_backup(&backup).unwrap();
         let from = ro.get_item(&item).unwrap();
         assert!(from.revision > 0 && from.trashed_at.is_some());
@@ -1539,7 +1539,7 @@ mod tests {
             .new_item(ItemKind::Collection, "Work", None)
             .unwrap();
         let note = f.vault.new_item(ItemKind::Note, "n", Some(c)).unwrap();
-        let backup = f.backup("a.lockbox-backup");
+        let backup = f.backup("a.petalock-backup");
         let ro = open_backup(&backup).unwrap();
         let cancel = CancelToken::new();
 
@@ -1600,7 +1600,7 @@ mod tests {
 
         // A backup made after the folder was deleted holds the note trashed with it; the copy is not trashed, and goes
         // with nothing.
-        let later = f.backup("b.lockbox-backup");
+        let later = f.backup("b.petalock-backup");
         let ro = open_backup(&later).unwrap();
         let from = ro.get_item(&note).unwrap();
         assert!(from.trashed_at.is_some() && from.trashed_with == Some(c));
@@ -1669,7 +1669,7 @@ mod tests {
             .new_item(ItemKind::Collection, "Work", None)
             .unwrap();
         let (item, _, _) = two_file_login(&mut f);
-        let backup = f.backup("a.lockbox-backup");
+        let backup = f.backup("a.petalock-backup");
         let ro = open_backup(&backup).unwrap();
         let (_parent, mut live) = live_vault();
         let before = files_listing(&live);
@@ -1741,7 +1741,7 @@ mod tests {
         let _disarm = Disarm;
         let mut f = Fixture::new();
         let (item, _, big) = two_file_login(&mut f);
-        let backup = f.backup("a.lockbox-backup");
+        let backup = f.backup("a.petalock-backup");
         let good = open_backup(&backup).unwrap();
         let tampered = tampered_folder(&f, &big);
         let (_parent, mut live) = live_vault();
@@ -1818,7 +1818,7 @@ mod tests {
         let _disarm = Disarm;
         let mut f = Fixture::new();
         let (item, _) = f.file_item(b"copied file");
-        let backup = f.backup("a.lockbox-backup");
+        let backup = f.backup("a.petalock-backup");
         let ro = open_backup(&backup).unwrap();
         let (_parent, mut live) = live_vault();
         let old_file = f.out().join("old.bin");
@@ -1863,7 +1863,7 @@ mod tests {
         let _disarm = Disarm;
         let mut f = Fixture::new();
         let (item, _, _) = two_file_login(&mut f);
-        let backup = f.backup("a.lockbox-backup");
+        let backup = f.backup("a.petalock-backup");
         let ro = open_backup(&backup).unwrap();
         let (_parent, mut live) = live_vault();
         let before = files_listing(&live);
@@ -1890,7 +1890,7 @@ mod tests {
         let _disarm = Disarm;
         let mut f = Fixture::new();
         let (item, small, big) = two_file_login(&mut f);
-        let backup = f.backup("a.lockbox-backup");
+        let backup = f.backup("a.petalock-backup");
         let ro = open_backup(&backup).unwrap();
         let (_parent, mut live) = live_vault();
         failpoint::arm("items.after_write");
@@ -1915,7 +1915,7 @@ mod tests {
         let _disarm = Disarm;
         let mut f = Fixture::new();
         let (item, _, _) = two_file_login(&mut f);
-        let backup = f.backup("a.lockbox-backup");
+        let backup = f.backup("a.petalock-backup");
         let ro = open_backup(&backup).unwrap();
         let (_parent, mut live) = live_vault();
         let items = live.dir().join("items");
@@ -1941,7 +1941,7 @@ mod tests {
         let _disarm = Disarm;
         let mut f = Fixture::new();
         let (item, _) = f.file_item(&vec![5u8; 5 * MIB]);
-        let backup = f.backup("a.lockbox-backup");
+        let backup = f.backup("a.petalock-backup");
         let ro = open_backup(&backup).unwrap();
         let (_parent, mut live) = live_vault();
         let before = files_listing(&live);
@@ -1993,7 +1993,7 @@ mod tests {
         let _disarm = Disarm;
         let mut f = Fixture::new();
         let (item, small, big) = two_file_login(&mut f);
-        let backup = f.backup("a.lockbox-backup");
+        let backup = f.backup("a.petalock-backup");
         let ro = open_backup(&backup).unwrap();
         let (_parent, mut live) = live_vault();
         live.new_item(ItemKind::Note, "already here", None).unwrap();
@@ -2078,7 +2078,7 @@ mod tests {
         let _disarm = Disarm;
         let mut f = Fixture::new();
         let (item, _) = f.file_item(&vec![5u8; 3 * MIB]);
-        let backup = f.backup("a.lockbox-backup");
+        let backup = f.backup("a.petalock-backup");
         let ro = open_backup(&backup).unwrap();
         let (_parent, mut live) = live_vault();
         let before = files_listing(&live);
@@ -2100,7 +2100,7 @@ mod tests {
         let mut f = Fixture::new();
         let (item, _, _) = two_file_login(&mut f);
         let note = f.vault.new_item(ItemKind::Note, "plain", None).unwrap();
-        let backup = f.backup("a.lockbox-backup");
+        let backup = f.backup("a.petalock-backup");
         let ro = open_backup(&backup).unwrap();
         let (_parent, mut live) = live_vault();
         let before = files_listing(&live);
@@ -2129,7 +2129,7 @@ mod tests {
     fn copy_from_same_vault_backup_works() {
         let mut f = Fixture::new();
         let (item, small, big) = two_file_login(&mut f);
-        let backup = f.backup("a.lockbox-backup");
+        let backup = f.backup("a.petalock-backup");
         let ro = open_backup(&backup).unwrap();
         let new = f
             .vault
@@ -2178,7 +2178,7 @@ mod tests {
         for id in gone {
             fs::remove_file(f.blob_file(id)).unwrap();
         }
-        let backup = f.backup("lost.lockbox-backup");
+        let backup = f.backup("lost.petalock-backup");
         let folder = f.parent.path().join("Family.before-restore");
         copy_folder(f.vault.dir(), &folder);
         (backup, folder)
@@ -2201,7 +2201,7 @@ mod tests {
         let mut f = Fixture::new();
         let (item, [_, gone, _]) = three_file_login(&mut f);
         let note = f.vault.new_item(ItemKind::Note, "no files", None).unwrap();
-        let whole = f.backup("whole.lockbox-backup");
+        let whole = f.backup("whole.petalock-backup");
         let (backup, folder) = lose(&f, &[gone]);
 
         // Nothing is missing from a backup made before the file was lost.
@@ -2502,7 +2502,7 @@ mod tests {
 
         // With nothing missing, nothing is left out.
         let note = f.vault.new_item(ItemKind::Note, "no files", None).unwrap();
-        let backup = f.backup("later.lockbox-backup");
+        let backup = f.backup("later.petalock-backup");
         let ro = open_backup(&backup).unwrap();
         let (_parent, mut live) = live_vault();
         let copied = live
@@ -2579,7 +2579,7 @@ mod tests {
         let (item, file) = f.file_item(&data);
         // The only plaintext copy on disk was the file attached from; it is gone.
         fs::remove_file(f.parent.path().join("src.bin")).unwrap();
-        let backup = f.backup("a.lockbox-backup");
+        let backup = f.backup("a.petalock-backup");
         let ro = open_backup(&backup).unwrap();
         let (live_parent, mut live) = live_vault();
         let roots = vec![
@@ -2640,7 +2640,7 @@ mod tests {
                 &NoProgress,
             )
             .unwrap();
-        let backup = out.join("a.lockbox-backup");
+        let backup = out.join("a.petalock-backup");
         f.vault
             .backup(&backup, &journal, &cancel, &NoProgress)
             .unwrap();
@@ -2708,7 +2708,7 @@ mod tests {
     fn a_read_only_vault_saves_without_replacing() {
         let mut f = Fixture::new();
         let (item, file) = f.file_item(b"hello world");
-        let backup = f.backup("a.lockbox-backup");
+        let backup = f.backup("a.petalock-backup");
         let folder = f.parent.path().join("Family.before-restore");
         copy_folder(f.vault.dir(), &folder);
         let out = f.parent.path().join("saves");

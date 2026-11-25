@@ -30,7 +30,7 @@ const WHAT_TO_DO_FIRST =
   "What to do first: add a login, or a key, a note or a file. Once it holds things you'd miss, make a backup from Settings.";
 
 /** What Help says when the launcher could not start the browser (the shell's `core` `io` refusal with `what` "guide"). */
-const HELP_NOT_OPENED = "Lockbox couldn't open the guide. Check that this PC has a web browser, then try again.";
+const HELP_NOT_OPENED = "Petalock couldn't open the guide. Check that this PC has a web browser, then try again.";
 const BROWSER_REFUSAL = { code: "core", kind: "io", what: "guide" };
 
 /** The app unlocked through its lock screen, as a person does it. */

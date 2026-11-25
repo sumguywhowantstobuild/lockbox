@@ -668,7 +668,7 @@ impl Shell {
         self.change_item(session, generation, id, Vault::purge_item)
     }
 
-    /// The items in the trash for `days` days or more, for "Delete permanently?" (spec §6.1). Lists only: Lockbox
+    /// The items in the trash for `days` days or more, for "Delete permanently?" (spec §6.1). Lists only: Petalock
     /// never purges by itself.
     pub fn old_trash(
         &self,
@@ -2022,7 +2022,7 @@ mod tests {
             r"C:\x.exe",
             "mailto:a@b",
         ];
-        // An edit only saves web addresses now, so the others are put in the way an older Lockbox or another program could
+        // An edit only saves web addresses now, so the others are put in the way an older Petalock or another program could
         // have left them: straight through the engine. `open_url` must refuse them whatever wrote them.
         let urls: Vec<String> = links.iter().map(|link| link.to_string()).collect();
         ts.shell

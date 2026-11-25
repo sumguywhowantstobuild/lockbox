@@ -45,9 +45,9 @@ const NO_KEY_EXCEPTION = "The one exception is a backup that opens with details 
 /** 28d's second sentence about what is not changed: the vault's older copies open with the old password. */
 const OLD_COPIES_NEED_OLD_PASSWORD = "Older copies of this vault still open with the old password.";
 
-/** The question about details changed outside Lockbox, in Ask 3's words (its first sentence, and the way out put as the choices this question has). */
+/** The question about details changed outside Petalock, in Ask 3's words (its first sentence, and the way out put as the choices this question has). */
 const CHANGED_DESCRIPTION =
-  "Its name, or other details kept beside your items, don't match what Lockbox last saved. If you edited that file yourself, accept them and go on. If you didn't, say No and check your PC first; restoring a backup you trust is the safer way back.";
+  "Its name, or other details kept beside your items, don't match what Petalock last saved. If you edited that file yourself, accept them and go on. If you didn't, say No and check your PC first; restoring a backup you trust is the safer way back.";
 
 /** What the polite place says once the new password is set, and the dark side's line on 28e (the session's words). */
 const SAID_DONE = "Your new password is set.";
@@ -63,7 +63,7 @@ function viewOf(flow: Flow): string {
  * - **28a:** the recovery key's box, Continue and Back (the lock screen again), and "I don't have my recovery key". **28b** is the same screen with what was wrong
  *   said under the box (a typo, a word that is no listed word, a wrong count, a key that doesn't open this vault), the key still in it and the focus on it.
  * - **28c:** no key: plainly, nobody can get in, unless a backup opens with details the person still has, with Restore a backup.
- * - **The question** about details changed outside Lockbox, over 28a, when the key's vault says so: No lets the key go, Yes goes on to the new password.
+ * - **The question** about details changed outside Petalock, over 28a, when the key's vault says so: No lets the key go, Yes goes on to the new password.
  * - **28d:** the new password twice (with its count), what existing backups and older copies still need, and the limit in spec 5.3.
  * - **28e:** the password is set and the vault is open under this step: a fresh backup is offered.
  */
@@ -345,14 +345,14 @@ function Steps({ flow }: { flow: Flow }) {
 }
 
 /**
- * The question about details changed outside Lockbox, over 28a, in Ask 3's shape: a dialog that holds focus, since it is a security question; Escape and a click
+ * The question about details changed outside Petalock, over 28a, in Ask 3's shape: a dialog that holds focus, since it is a security question; Escape and a click
  * outside are no yes, only a button answers. No, the safe answer, has the focus first: it lets the key go. Yes goes on to the new password, and goes to the
  * shell with it.
  */
 function ChangedDetails({ open, name }: { open: boolean; name: string }) {
   const no = useRef<HTMLButtonElement>(null);
   return (
-    <Dialog open={open} onOpenChange={() => undefined} title={`${name}'s details were changed outside Lockbox.`} description={CHANGED_DESCRIPTION} initialFocus={no}>
+    <Dialog open={open} onOpenChange={() => undefined} title={`${name}'s details were changed outside Petalock.`} description={CHANGED_DESCRIPTION} initialFocus={no}>
       <Button ref={no} onClick={backToForgotKey}>
         No
       </Button>

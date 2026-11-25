@@ -64,9 +64,9 @@ export async function attach() {
     listeners: app.tcpListeners(),
   });
   if (env.LOCKBOX_E2E_OFFSCREEN === "1") await browser.setWindowRect(-4000, -4000, null, null);
-  // Lockbox's idle lock counts the session's input, not the app's: restart that clock (see the function)
+  // Petalock's idle lock counts the session's input, not the app's: restart that clock (see the function)
   app.restartIdleClock();
-  await see("heading", "Welcome to Lockbox", 60_000);
+  await see("heading", "Welcome to Petalock", 60_000);
   assert.equal(existsSync(env.LOCKBOX_E2E_DEFAULT_VAULTS), false, "the default vault folder does not exist before the spec");
   assert.deepEqual(readdirSync(env.LOCKBOX_E2E_VAULT_FOLDER), [], "the vault folder the run made starts empty");
   assert.ok(attached.pid > 0);

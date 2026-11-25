@@ -1,4 +1,4 @@
-//! The vault list (spec §6.10): the folders of the vaults Lockbox knows, in `vaults.json` in the state folder.
+//! The vault list (spec §6.10): the folders of the vaults Petalock knows, in `vaults.json` in the state folder.
 //! Locations and names only, no secrets: `{ "version": 2, "list": <u64>, "last_id": <u32>, "vaults": [ { "id": <u32>,
 //! "path": "<absolute>", "name": "<last-known name>" } ] }`; a row's `name` is optional (a row never named has none, and
 //! so has every row an older build wrote) and is the vault's name from its header, kept so a row whose folder is gone
@@ -955,7 +955,7 @@ mod tests {
         );
     }
 
-    /// A name that is taken by something else (a file Lockbox did not make, even a folder) is never replaced: the
+    /// A name that is taken by something else (a file Petalock did not make, even a folder) is never replaced: the
     /// move goes on to the next name.
     #[test]
     fn a_taken_name_is_never_replaced() {
@@ -1240,7 +1240,7 @@ mod tests {
         })
     }
 
-    /// Changes the vault's name in both header files, outside Lockbox.
+    /// Changes the vault's name in both header files, outside Petalock.
     fn rename_outside(dir: &Path, name: &str) {
         let mut header = parse_header(&fs::read(dir.join(HEADER_FILE)).unwrap()).unwrap();
         header.name = name.to_owned();

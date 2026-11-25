@@ -29,7 +29,7 @@ use crate::session::{LockHook, Notice, Notifier, SessionId, Sessions};
 /// Longest name of an opened or saved copy, in characters (spec §7.2: length capped).
 pub(crate) const MAX_NAME_CHARS: usize = 100;
 
-/// What Lockbox calls a stored file that has no usable name.
+/// What Petalock calls a stored file that has no usable name.
 const NO_NAME: &str = "file";
 
 /// The file types that ask first, whatever Windows says about them (spec §7.2), judged on the last extension. Windows'
@@ -258,7 +258,7 @@ impl Drop for WorkerDone {
 }
 
 impl OpenFolders {
-    /// `root`: the state folder's `open\`, as Lockbox computes it.
+    /// `root`: the state folder's `open\`, as Petalock computes it.
     pub fn new(root: PathBuf, outputs: Arc<Outputs>, notifier: Arc<dyn Notifier>) -> OpenFolders {
         OpenFolders {
             root,
@@ -484,7 +484,7 @@ impl OpenFolders {
         let done = WorkerDone(Arc::clone(self));
         let (folders, sessions) = (Arc::clone(self), Weak::clone(sessions));
         let _ = thread::Builder::new()
-            .name("lockbox-open-cleanup".into())
+            .name("petalock-open-cleanup".into())
             .spawn(move || {
                 let _done = done;
                 #[cfg(test)]
@@ -978,7 +978,7 @@ mod tests {
         assert!(cut.ends_with(".exe") && is_executable(&cut), "{cut}");
     }
 
-    /// Windows' own opinion counts, for a type that is not on Lockbox's list.
+    /// Windows' own opinion counts, for a type that is not on Petalock's list.
     #[test]
     fn windows_opinion_counts() {
         assert!(win::is_dangerous_type(".exe"));
@@ -1013,7 +1013,7 @@ mod tests {
     }
 
     /// The copy is in a new folder, whole, read-only and not hidden when it launches, the journal lists its folder as
-    /// Lockbox spells it, and no lock is held during the launch: the vault can be written, and a publish can pass.
+    /// Petalock spells it, and no lock is held during the launch: the vault can be written, and a publish can pass.
     #[test]
     fn opened_copy_is_read_only_and_launched_after_unlock() {
         let ts = TestShell::new();
@@ -1046,7 +1046,7 @@ mod tests {
         assert_eq!(
             ts.journal(),
             [folder.to_path_buf()],
-            "the folder, as Lockbox spells it"
+            "the folder, as Petalock spells it"
         );
         let busy = ts.events.busy();
         assert!(busy.contains(&(Some(s), vec!["open"])), "{busy:?}");
@@ -1721,7 +1721,7 @@ mod tests {
         (folder, copy)
     }
 
-    /// A real folder with Lockbox's name in `open\` that no entry lists (a damaged journal was set aside): gone at the
+    /// A real folder with Petalock's name in `open\` that no entry lists (a damaged journal was set aside): gone at the
     /// next launch, told, and no journal is written for it.
     #[test]
     fn leftover_without_a_journal_entry_is_removed_at_launch() {
@@ -1761,7 +1761,7 @@ mod tests {
         );
     }
 
-    /// Only a real folder with exactly Lockbox's name is a leftover. A file with that name, a wrongly named folder and
+    /// Only a real folder with exactly Petalock's name is a leftover. A file with that name, a wrongly named folder and
     /// a link with that name stay, with what the link leads to, and none is told as a copy.
     #[cfg(windows)]
     #[test]
@@ -1797,7 +1797,7 @@ mod tests {
         assert_eq!(ts.shell.open_folders.retry(), RemoveReport::default());
     }
 
-    /// `open\` itself a link: what is behind it is not Lockbox's, whatever it is called.
+    /// `open\` itself a link: what is behind it is not Petalock's, whatever it is called.
     #[cfg(windows)]
     #[test]
     fn nothing_is_listed_behind_a_linked_open_folder() {

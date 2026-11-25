@@ -81,7 +81,7 @@ pub struct UnlockReport {
     /// `vault.json` could not be used, so the vault opened from `vault.json.bak`
     /// (which may still need the previous password).
     pub used_backup_header: bool,
-    /// The header was changed outside Lockbox; see [`Vault::accept_header`].
+    /// The header was changed outside Petalock; see [`Vault::accept_header`].
     pub header_mac_mismatch: bool,
     /// The other header copy needed repair but writing it failed (disk full, read-only
     /// media). The vault is open anyway; the next unlock retries the repair.
@@ -92,7 +92,7 @@ pub struct UnlockReport {
 /// What a read-only look at a vault's headers with a recovery key found ([`Vault::check_recovery_key`]). No `Debug`: the
 /// name is the user's own.
 pub struct RecoveryCheck {
-    /// The header that opened failed its MAC: it was changed outside Lockbox (see [`UnlockReport`]).
+    /// The header that opened failed its MAC: it was changed outside Petalock (see [`UnlockReport`]).
     pub header_mac_mismatch: bool,
     /// The vault's name, from the header that opened.
     pub name: String,
@@ -123,7 +123,7 @@ struct HeaderGuard {
     /// the other file's, possibly good, one). `accept_header` is the exception: it keeps
     /// each file's own copy of that slot.
     unverified: Option<Unverified>,
-    /// A header write failed and `vault.json` now holds a header Lockbox cannot vouch for.
+    /// A header write failed and `vault.json` now holds a header Petalock cannot vouch for.
     uncertain: bool,
 }
 
@@ -456,7 +456,7 @@ impl Vault {
         Ok(())
     }
 
-    /// Accepts a header changed outside Lockbox (after [`UnlockReport::header_mac_mismatch`]):
+    /// Accepts a header changed outside Petalock (after [`UnlockReport::header_mac_mismatch`]):
     /// signs the current header again and saves it. Call only after the user agreed.
     ///
     /// If the unlock left a key slot unchecked (the two copies differ in it), each file gets
@@ -510,7 +510,7 @@ impl Vault {
     /// `primary`) and makes `header` the live one. If it fails part-way, `vault.json` is read
     /// back: it is accepted only when it holds `primary` (the write landed) or the header
     /// from before. Anything else, or a failed read-back, blocks every later header write on
-    /// this `Vault`, so a header whose state Lockbox cannot establish is never copied over a
+    /// this `Vault`, so a header whose state Petalock cannot establish is never copied over a
     /// good one. While a slot is unverified (each file holds its own version of it), any
     /// failed write blocks without a read-back: the saved per-file slots cannot be kept in
     /// step with a half-written pair, and reopening re-reads both files. (When the open
@@ -585,7 +585,7 @@ impl Vault {
 
 /// Removes folders named exactly `.creating-` plus 32 lowercase hex characters: the
 /// staging folders of vaults whose creation never finished. Nothing else is touched.
-// shortcut: two Lockbox instances creating vaults in the same parent at the same moment could
+// shortcut: two Petalock instances creating vaults in the same parent at the same moment could
 // remove each other's staging folder; upgrade if concurrent creation ever becomes possible.
 fn remove_stale_staging(parent: &Path) -> Result<()> {
     for entry in fs::read_dir(parent)? {
@@ -964,7 +964,7 @@ mod tests {
     /// Final review, Important 3: a write that fails on an unverified disk state must not
     /// let a later change spread that state. Unlock falls back to a good `.bak` (primary
     /// password slot damaged), the repair fails, then the password change fails before it
-    /// writes anything: `vault.json` holds a header Lockbox cannot vouch for.
+    /// writes anything: `vault.json` holds a header Petalock cannot vouch for.
     #[test]
     fn failed_write_on_an_unknown_header_blocks_later_header_writes() {
         let parent = TempDir::new();
@@ -1534,7 +1534,7 @@ mod tests {
         assert_eq!(vault.name(), "Work and home");
     }
 
-    /// The name is changed in `vault.json` only, outside Lockbox, and the vault opened with its password: Ask 3 is
+    /// The name is changed in `vault.json` only, outside Petalock, and the vault opened with its password: Ask 3 is
     /// pending.
     fn unlocked_after_an_outside_name_change(dir: &Path) -> Vault {
         let mut header = header_on_disk(dir, HEADER_FILE);
@@ -1698,21 +1698,21 @@ mod tests {
         assert!(Vault::unlock_with_password(&dir, PW).is_ok());
     }
 
-    /// The MAC still covers the name after a rename: a name changed outside Lockbox, on a vault Lockbox renamed, is
+    /// The MAC still covers the name after a rename: a name changed outside Petalock, on a vault Petalock renamed, is
     /// still Ask 3 at the next unlock (so the rename did not weaken what the MAC checks).
     #[test]
     fn a_name_changed_outside_lockbox_still_shows_ask_3() {
         let parent = TempDir::new();
         let mut vault = Vault::create(parent.path(), "Family", PW).unwrap().vault;
         let dir = vault.dir().to_path_buf();
-        vault.rename("Renamed in Lockbox").unwrap();
+        vault.rename("Renamed in Petalock").unwrap();
         drop(vault);
         let (vault, report) = Vault::unlock_with_password(&dir, PW).unwrap();
         assert!(!report.header_mac_mismatch);
-        assert_eq!(vault.name(), "Renamed in Lockbox");
+        assert_eq!(vault.name(), "Renamed in Petalock");
         drop(vault);
 
-        // Outside Lockbox, in both files, the name is changed again.
+        // Outside Petalock, in both files, the name is changed again.
         let mut header = header_on_disk(&dir, HEADER_FILE);
         header.name = "Changed outside".to_owned();
         for file in [HEADER_FILE, HEADER_BACKUP] {

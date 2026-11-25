@@ -258,7 +258,7 @@ pub struct EmptiedView {
     pub trash_changed: bool,
 }
 
-/// The printers Lockbox can print to (`list_printers`), by the names Windows shows, and the default one when it is
+/// The printers Petalock can print to (`list_printers`), by the names Windows shows, and the default one when it is
 /// among them. Printers that write a file through a save box of their own are left out. No vault data.
 #[derive(Serialize)]
 pub struct PrinterList {
@@ -276,7 +276,7 @@ pub struct NewKeyView {
 }
 
 /// What `recover_check` found: the key opens the vault's recovery slot (`Checked`), or opens it through a header that
-/// was changed outside Lockbox, which the page asks about before it goes on (`HeaderChanged`, spec §5.2).
+/// was changed outside Petalock, which the page asks about before it goes on (`HeaderChanged`, spec §5.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecoveryCheckKind {

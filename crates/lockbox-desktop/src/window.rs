@@ -10,8 +10,11 @@ use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Controller;
 
 use crate::shell::Shell;
 
-/// The window's label; the capability grants Lockbox's commands to this window only.
+/// The window's label; the capability grants Petalock's commands to this window only.
 pub const MAIN: &str = "main";
+
+/// The window's title, which Windows shows in the title bar, the taskbar and Alt+Tab.
+pub const WINDOW_TITLE: &str = "Petalock";
 
 /// Origins the window may show: the app's own content, plus the Vite dev server in `cargo tauri dev` builds (its
 /// port is pinned in `tauri.conf.json` `devUrl` and `ui/vite.config.ts`).
@@ -51,7 +54,7 @@ static EXTERNAL_DROP_OFF: AtomicBool = AtomicBool::new(false);
 /// the real window by review and by hand.)
 pub fn main_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<WebviewWindow<R>> {
     WebviewWindowBuilder::new(app, MAIN, WebviewUrl::App("index.html".into()))
-        .title("Lockbox")
+        .title(WINDOW_TITLE)
         .inner_size(WINDOW_SIZE.0, WINDOW_SIZE.1)
         .min_inner_size(MIN_WINDOW_SIZE.0, MIN_WINDOW_SIZE.1)
         .visible(false)
@@ -120,7 +123,7 @@ pub fn show_when_locked_down(
 fn lock_down(steps: &impl WindowSteps, capture_protected: bool) -> Result<(), StayedHidden> {
     let capture = steps.protect_from_capture(capture_protected);
     if cfg!(debug_assertions) && capture.is_err() {
-        eprintln!("Lockbox debug: the window could not be asked for capture protection");
+        eprintln!("Petalock debug: the window could not be asked for capture protection");
     }
     // Both are tried, so one failing does not hide that the other did too.
     let drop_off = steps.turn_off_external_drop();
@@ -230,7 +233,7 @@ pub fn browser_keys_are_off() -> bool {
     BROWSER_KEYS_OFF.load(Ordering::SeqCst)
 }
 
-/// Shows the main window again and brings it forward: a second copy of the app was started, or "Open Lockbox" was chosen
+/// Shows the main window again and brings it forward: a second copy of the app was started, or "Open Petalock" was chosen
 /// in the tray. The same steps as the first show ([`show_when_locked_down`]), so the window's protections are confirmed
 /// again before it can be seen: a window that stays hidden is not shown, restored or focused.
 ///
@@ -247,7 +250,7 @@ pub fn bring_forward(steps: &impl WindowSteps, shell: &Shell) -> Result<(), Stay
     Ok(())
 }
 
-/// [`bring_forward`] on the real window (the one way back from the tray, for the second launch and "Open Lockbox").
+/// [`bring_forward`] on the real window (the one way back from the tray, for the second launch and "Open Petalock").
 /// Call it on the main thread, as [`start_main_window`] must be. Nothing happens when the window is gone, or when it
 /// stays hidden (the person can still Quit from the tray).
 pub fn bring_to_front<R: Runtime>(app: &AppHandle<R>) {
@@ -344,7 +347,7 @@ mod tests {
         }
     }
 
-    /// A second launch, and the tray's "Open Lockbox", bring a hidden window back through the same steps as the first
+    /// A second launch, and the tray's "Open Petalock", bring a hidden window back through the same steps as the first
     /// show: capture protection, no file drops and no browser keys first, and only then the show, the restore from the
     /// taskbar and the focus.
     #[test]
@@ -396,7 +399,7 @@ mod tests {
         }
     }
 
-    /// While the window is hidden no unlock is accepted. Showing it again (Open Lockbox, a second launch) lifts that
+    /// While the window is hidden no unlock is accepted. Showing it again (Open Petalock, a second launch) lifts that
     /// once the window is shown, and not before: a window that stays hidden keeps refusing.
     #[test]
     fn showing_the_window_again_lifts_the_refusal_of_unlocks() {
@@ -556,7 +559,7 @@ mod tests {
             assert_eq!(ts.window.hides(), 0);
             assert!(unlock_is_refused(&ts, "Hidden"), "a hidden window unlocked");
 
-            // The window is brought forward (Open Lockbox): shown, and unlocks are accepted again.
+            // The window is brought forward (Open Petalock): shown, and unlocks are accepted again.
             let later = FakeSteps::default();
             assert_eq!(bring_forward(&later, &ts.shell), Ok(()));
             assert_eq!(

@@ -9,7 +9,7 @@
 - SHA-256: `addd35536511597a02fa0a9ff1e5284677b8883b83e986e43f15a3db996b903e`
 - Licence: Creative Commons Attribution 3.0 United States (CC BY 3.0 US), https://creativecommons.org/licenses/by/3.0/us/
 
-Used by the passphrase generator (`crates/lockbox-core/src/generator.rs`). The list is used as published; Lockbox does not modify it. This credit is required by the licence.
+Used by the passphrase generator (`crates/lockbox-core/src/generator.rs`). The list is used as published; Petalock does not modify it. This credit is required by the licence.
 
 ## BIP39 English word list (the recovery key's words)
 
@@ -39,7 +39,7 @@ Used by the passphrase generator (`crates/lockbox-core/src/generator.rs`). The l
 > OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 Used by the recovery key (`crates/lockbox-core/src/recovery.rs`): its 24 words are written from this list. The list is
-used as published; Lockbox does not modify it.
+used as published; Petalock does not modify it.
 
 ## Libraries the desktop app uses directly
 

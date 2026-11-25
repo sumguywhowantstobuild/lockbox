@@ -188,7 +188,7 @@ pub enum OpenStep<X> {
 /// opening closure ran, or its question.
 pub type OpenAnswer<X> = Outcome<Tagged<(SessionInfo, Option<X>)>>;
 
-/// One session as the UI lists it. For a backup, `name` is the backup file's name without `.lockbox-backup`; for the
+/// One session as the UI lists it. For a backup, `name` is the backup file's name without `.petalock-backup`; for the
 /// others, the vault's own.
 #[derive(Clone, Serialize)]
 pub struct SessionInfo {
@@ -233,7 +233,7 @@ impl SessionKind {
     }
 }
 
-/// A backup session's name: its file's name without the `.lockbox-backup` ending (any case). A name without that
+/// A backup session's name: its file's name without the `.petalock-backup` ending (any case). A name without that
 /// ending, or with nothing before it, stays whole.
 fn backup_name(file: &Path) -> String {
     let name = file.file_name().unwrap_or_default().to_string_lossy();
@@ -339,7 +339,7 @@ fn spawn_hook_thread(list: Arc<RwLock<Vec<LockHook>>>) -> io::Result<mpsc::Sende
     }
     let (queue, jobs) = mpsc::channel::<HookJob>();
     thread::Builder::new()
-        .name("lockbox-lock-hooks".into())
+        .name("petalock-lock-hooks".into())
         .spawn(move || {
             for job in jobs {
                 job.run(&list);
@@ -2175,7 +2175,7 @@ mod tests {
         let older = parent.path().join("Family.before-restore");
         copy_folder(&dir, &older);
         let (copy, _) = open_read_only(&sessions, &older);
-        let file = parent.path().join("Task 14 check.lockbox-backup");
+        let file = parent.path().join("Task 14 check.petalock-backup");
         fs::write(&file, b"stands in for a backup").unwrap();
         let location = Location::backup(&file).unwrap();
         let opened = Opened::ReadOnly(open_read_only_vault(&dir));
@@ -2217,23 +2217,23 @@ mod tests {
         );
     }
 
-    /// A backup session's name is the file's name without `.lockbox-backup`, in any case; a name without that ending, or
+    /// A backup session's name is the file's name without `.petalock-backup`, in any case; a name without that ending, or
     /// with nothing before it, stays whole; only the one ending goes.
     #[test]
     fn a_backups_name_is_its_file_name_without_the_extension() {
         for (file, name) in [
             (
-                "Task 14 check 2026-11-17.lockbox-backup",
+                "Task 14 check 2026-11-17.petalock-backup",
                 "Task 14 check 2026-11-17",
             ),
-            ("FAMILY.LOCKBOX-BACKUP", "FAMILY"),
-            ("a.Lockbox-Backup", "a"),
-            ("héllo wörld.lockbox-backup", "héllo wörld"),
-            ("a.lockbox-backup.lockbox-backup", "a.lockbox-backup"),
+            ("FAMILY.PETALOCK-BACKUP", "FAMILY"),
+            ("a.Petalock-Backup", "a"),
+            ("héllo wörld.petalock-backup", "héllo wörld"),
+            ("a.petalock-backup.petalock-backup", "a.petalock-backup"),
             ("no extension", "no extension"),
             ("x.zip", "x.zip"),
-            ("x.lockbox-backups", "x.lockbox-backups"),
-            (".lockbox-backup", ".lockbox-backup"),
+            ("x.petalock-backups", "x.petalock-backups"),
+            (".petalock-backup", ".petalock-backup"),
         ] {
             assert_eq!(backup_name(Path::new(file)), name, "{file}");
         }
@@ -2245,7 +2245,7 @@ mod tests {
         let (_, sessions) = sessions();
         let vault = create(parent.path());
         let dir = vault.dir().to_path_buf();
-        let backup = parent.path().join("Family.lockbox-backup");
+        let backup = parent.path().join("Family.petalock-backup");
         vault
             .backup(&backup, &NoJournal, &CancelToken::new(), &NoProgress)
             .unwrap();
@@ -2317,7 +2317,7 @@ mod tests {
         let (_, sessions) = sessions();
         let (first, first_generation, _) = open_writable(&sessions, parent.path());
         let (second, ..) = open_writable(&sessions, parent.path());
-        let backup = Location::Backup(parent.path().join("Spare.lockbox-backup"));
+        let backup = Location::Backup(parent.path().join("Spare.petalock-backup"));
         let vault = open_read_only_vault(&create_closed(parent.path()));
         let (copy, _) = open_as(&sessions, backup, Opened::ReadOnly(vault));
         assert_eq!(name_of(&sessions, copy), "Spare");

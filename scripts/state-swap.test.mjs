@@ -62,7 +62,7 @@ function makeWorld({ absent = [], kept = [] } = {}) {
     }
   }
   // beside the vaults folder in the profile: the one place every terminal sees alike (a packaged app's AppData is private)
-  const journal = join(env.USERPROFILE, "Lockbox Vaults.swap-journal.json");
+  const journal = join(env.USERPROFILE, "Petalock Vaults.swap-journal.json");
   const links = [];
   const world = {
     root,
@@ -238,10 +238,12 @@ test("default locations are the four real places, from Windows' folders, and mat
   assert.deepEqual(Object.keys(found), ["state", "appLocal", "appRoaming", "vaults"]);
   const config = JSON.parse(readFileSync(new URL("../crates/lockbox-desktop/tauri.conf.json", import.meta.url), "utf8"));
   assert.ok(typeof config.identifier === "string" && config.identifier.length > 0);
-  assert.equal(found.state, join(env.LOCALAPPDATA, "Lockbox"));
+  assert.equal(found.state, join(env.LOCALAPPDATA, "Petalock"));
   assert.equal(found.appLocal, join(env.LOCALAPPDATA, config.identifier));
   assert.equal(found.appRoaming, join(env.APPDATA, config.identifier));
-  assert.equal(found.vaults, join(env.USERPROFILE, "Lockbox Vaults"));
+  assert.equal(found.vaults, join(env.USERPROFILE, "Petalock Vaults"));
+  // The folders the swap sets aside are the new product's: the identifier ends in petalock, never lockbox.
+  assert.equal(config.identifier, "io.github.sumguywhowantstobuild.petalock");
   assert.deepEqual(state.locationsFrom(lookup()), found);
   if (process.platform === "win32") {
     const shouty = Object.fromEntries(Object.entries(env).map(([k, v]) => [k, v.toUpperCase()]));
@@ -325,7 +327,7 @@ test("swap_refuses_while_lockbox_runs", () =>
     assertSame(before, snapshot(world.root), "round trip afterwards");
   }));
 
-test("recover with no journal says nothing to recover and changes nothing, even while Lockbox runs", () =>
+test("recover with no journal says nothing to recover and changes nothing, even while Petalock runs", () =>
   withWorld({}, (world) => {
     const before = snapshot(world.root);
     const result = world.recover({ isRunning: () => true });
@@ -333,7 +335,7 @@ test("recover with no journal says nothing to recover and changes nothing, even 
     assertSame(before, snapshot(world.root), "after recover with no journal");
   }));
 
-test("the real check for a running Lockbox reads tasklist's answer", () => {
+test("the real check for a running Petalock reads tasklist's answer", () => {
   assert.equal(state.parseTasklist('"lockbox-desktop.exe","4242","Console","1","90,000 K"\r\n'), true);
   assert.equal(state.parseTasklist('"LOCKBOX-DESKTOP.EXE","4242","Console","1","90,000 K"'), true);
   assert.equal(state.parseTasklist("INFO: No tasks are running which match the specified criteria.\r\n"), false);
@@ -407,12 +409,12 @@ test("a kept test state that is a link, or a folder already at an aside name, is
 test("locations that nest, a missing parent, a taken sentinel name and a journal inside a location are refused", () => {
   withWorld({}, (world) => {
     const before = snapshot(world.root);
-    const inner = { ...world.locations, vaults: join(world.locations.state, "Lockbox Vaults") };
+    const inner = { ...world.locations, vaults: join(world.locations.state, "Petalock Vaults") };
     refusedWith(() => state.swapIn(RUN, world.options({ locations: inner })), /inside the other/);
     refusedWith(() => state.swapIn(RUN, world.options({ locations: { state: world.locations.state } })), /exactly/);
     refusedWith(() => state.swapIn(RUN, world.options({ locations: { ...world.locations, vaults: "relative" } })), /full path/);
     refusedWith(() => state.swapIn(RUN, world.options({ journal: join(world.locations.state, "journal.json") })), /journal would sit inside state/);
-    const orphan = { ...world.locations, vaults: join(world.root, "no-such-parent", "Lockbox Vaults") };
+    const orphan = { ...world.locations, vaults: join(world.root, "no-such-parent", "Petalock Vaults") };
     refusedWith(() => state.swapIn(RUN, world.options({ locations: orphan })), /does not exist/);
     assertSame(before, snapshot(world.root), "after refused layouts");
   });
@@ -484,22 +486,22 @@ test("the journal and the lock sit beside the vaults folder in the profile by de
       isRunning: () => false,
       afterStep: (step) => {
         if (step === "journal written") {
-          assert.ok(existsSync(join(world.env.USERPROFILE, "Lockbox Vaults.swap-journal.json.lock")), "the lock is beside the journal");
+          assert.ok(existsSync(join(world.env.USERPROFILE, "Petalock Vaults.swap-journal.json.lock")), "the lock is beside the journal");
         }
       },
     };
     state.swapIn(RUN, options);
-    assert.ok(existsSync(join(world.env.USERPROFILE, "Lockbox Vaults.swap-journal.json")));
-    assert.ok(!existsSync(join(world.env.LOCALAPPDATA, "Lockbox.swap-journal.json")), "nothing in AppData");
-    assert.ok(!existsSync(join(world.env.USERPROFILE, "Lockbox Vaults.swap-journal.json.lock")));
+    assert.ok(existsSync(join(world.env.USERPROFILE, "Petalock Vaults.swap-journal.json")));
+    assert.ok(!existsSync(join(world.env.LOCALAPPDATA, "Petalock.swap-journal.json")), "nothing in AppData");
+    assert.ok(!existsSync(join(world.env.USERPROFILE, "Petalock Vaults.swap-journal.json.lock")));
     state.swapBack(RUN, options);
-    assert.ok(!existsSync(join(world.env.USERPROFILE, "Lockbox Vaults.swap-journal.json")));
+    assert.ok(!existsSync(join(world.env.USERPROFILE, "Petalock Vaults.swap-journal.json")));
   }));
 
 test("a vaults folder that puts the default journal inside another location is refused", () =>
   withWorld({}, (world) => {
     const before = snapshot(world.root);
-    const inside = { ...world.locations, vaults: join(world.locations.appLocal, "Lockbox Vaults") };
+    const inside = { ...world.locations, vaults: join(world.locations.appLocal, "Petalock Vaults") };
     refusedWith(() => state.swapIn(RUN, { locations: inside, isRunning: () => false }), /journal would sit inside appLocal/);
     assertSame(before, snapshot(world.root), "the layout is refused");
   }));
@@ -774,7 +776,7 @@ test("an unrelated file at the old temp name of the journal is never overwritten
     world.recover();
     unchanged("after recover");
     // nothing of this tool's was left beside it
-    assert.deepEqual(readdirSync(world.env.USERPROFILE).filter((n) => n.includes("swap-journal")), ["Lockbox Vaults.swap-journal.json.tmp"]);
+    assert.deepEqual(readdirSync(world.env.USERPROFILE).filter((n) => n.includes("swap-journal")), ["Petalock Vaults.swap-journal.json.tmp"]);
 
     // a link at that name must not be followed either (a file link needs a privilege some machines don't grant)
     const target = join(world.root, "elsewhere.txt");
@@ -888,7 +890,7 @@ test("a recover started while swap in is moving folders is refused and leaves th
     assertSame(before, snapshot(world.root), "everything back");
   }));
 
-// ---- Lockbox starting during a swap -------------------------------------------------------------------------------
+// ---- Petalock starting during a swap -------------------------------------------------------------------------------
 
 /** A running check that answers false for its first `from - 1` calls and true from call number `from` on. */
 function runningFrom(from) {
@@ -900,7 +902,7 @@ function runningFrom(from) {
   return check;
 }
 
-test("Lockbox appearing during swap in stops it with the journal kept, and recover puts everything back", () => {
+test("Petalock appearing during swap in stops it with the journal kept, and recover puts everything back", () => {
   // call 1 is the first check; calls 2 to 5 come just before each of the four locations
   for (let from = 2; from <= 5; from += 1) {
     withWorld({ absent: ["appRoaming"], kept: ["state"] }, (world) => {
@@ -911,7 +913,7 @@ test("Lockbox appearing during swap in stops it with the journal kept, and recov
       assert.ok(existsSync(world.journal), "the journal is kept");
       assert.ok(!existsSync(lockFile(world)));
       world.recover();
-      assertSame(before, snapshot(world.root), `recovered after Lockbox appeared at check ${from}`);
+      assertSame(before, snapshot(world.root), `recovered after Petalock appeared at check ${from}`);
     });
   }
   withWorld({}, (world) => {
@@ -921,7 +923,7 @@ test("Lockbox appearing during swap in stops it with the journal kept, and recov
   });
 });
 
-test("Lockbox appearing during swap back or recover stops it with the journal kept", () => {
+test("Petalock appearing during swap back or recover stops it with the journal kept", () => {
   for (const operation of ["swap back", "recover"]) {
     for (let from = 2; from <= 5; from += 1) {
       withWorld({ absent: ["appRoaming"] }, (world) => {
@@ -952,7 +954,7 @@ test("locations that overlap through a junction on the way are refused before an
     symlinkSync(world.locations.state, via, "junction");
     world.links.push(via);
     const before = snapshot(world.root);
-    const locations = { ...world.locations, vaults: join(via, "Lockbox Vaults") };
+    const locations = { ...world.locations, vaults: join(via, "Petalock Vaults") };
     refusedWith(() => state.swapIn(RUN, world.options({ locations })), /vaults and state are the same place or one is inside/);
     assertSame(before, snapshot(world.root), "vaults through a junction into state");
     assert.ok(!existsSync(world.journal));

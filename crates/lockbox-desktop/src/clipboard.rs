@@ -23,7 +23,7 @@ use crate::settings::SettingsStore;
 /// 5 ms apart), so a program holding the clipboard costs a try every quarter second, never a blocked thread.
 pub const CLEAR_RETRY: Duration = Duration::from_millis(250);
 
-/// The clipboard copy Lockbox made last, while it may still be on the clipboard.
+/// The clipboard copy Petalock made last, while it may still be on the clipboard.
 #[derive(Debug, Clone, Copy)]
 struct Owned {
     /// The copy's tag: while the clipboard holds it, the copy is still there.
@@ -113,11 +113,11 @@ impl Shared {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClearNow {
-    /// Lockbox's copy was on the clipboard and is gone now.
+    /// Petalock's copy was on the clipboard and is gone now.
     Cleared,
-    /// There was nothing of Lockbox's to clear: already cleared, or something else copied since.
+    /// There was nothing of Petalock's to clear: already cleared, or something else copied since.
     Gone,
-    /// Another program holds the clipboard; Lockbox keeps trying on its own.
+    /// Another program holds the clipboard; Petalock keeps trying on its own.
     Busy,
 }
 
@@ -125,7 +125,7 @@ pub enum ClearNow {
 /// once closing has started.
 pub type CloseDeadline = Arc<dyn Fn() -> Option<Instant> + Send + Sync>;
 
-/// Lockbox's clipboard copies (spec §7.3).
+/// Petalock's clipboard copies (spec §7.3).
 pub struct Clipboard {
     shared: Arc<Shared>,
     settings: Arc<SettingsStore>,
@@ -243,7 +243,7 @@ impl Clipboard {
         Ok(())
     }
 
-    /// 2c's Clear now: clears Lockbox's last copy here and now, while the clipboard still holds it, under the same rule
+    /// 2c's Clear now: clears Petalock's last copy here and now, while the clipboard still holds it, under the same rule
     /// as its timer (whatever the user copied since is left alone). `Gone` when there is no copy to clear (the timer
     /// or a lock got there first, or something else was copied since); `Busy` when another program holds the
     /// clipboard: the copy stays recorded and the timer keeps trying, as for a busy timer clear.
@@ -274,7 +274,7 @@ impl Clipboard {
         *lock(&self.after_write) = Some(hook);
     }
 
-    /// Tests only: the session whose copy Lockbox still counts as on the clipboard.
+    /// Tests only: the session whose copy Petalock still counts as on the clipboard.
     #[cfg(test)]
     pub(crate) fn owner(&self) -> Option<SessionId> {
         lock(&self.shared.owned).map(|owned| owned.session)
@@ -392,7 +392,7 @@ mod tests {
         assert_eq!(ts.clipboard.text(), None, "not cleared at 10 s");
     }
 
-    /// Review Focus 3: the user copies something else after Lockbox's copy. Neither the timer nor a lock touches it.
+    /// Review Focus 3: the user copies something else after Petalock's copy. Neither the timer nor a lock touches it.
     #[test]
     fn user_copy_after_ours_is_kept() {
         let ts = TestShell::new();
@@ -430,7 +430,7 @@ mod tests {
         assert_eq!(ts.shell.clipboard.owner(), None);
     }
 
-    /// Stage 7 (2026-11-13, the group 2 walk): 2c's Clear now takes Lockbox's copy off at once, and the copy's timer
+    /// Stage 7 (2026-11-13, the group 2 walk, when the app was still called Lockbox): 2c's Clear now takes Lockbox's copy off at once, and the copy's timer
     /// then has nothing left to do.
     #[test]
     fn clear_now_takes_our_copy_off_at_once() {
@@ -450,7 +450,7 @@ mod tests {
         assert_eq!(ts.clipboard.text().as_deref(), Some("mine"));
     }
 
-    /// Clear now follows the timer's rule: whatever the user copied after Lockbox's copy is left alone.
+    /// Clear now follows the timer's rule: whatever the user copied after Petalock's copy is left alone.
     #[test]
     fn clear_now_leaves_a_later_copy_alone() {
         let ts = TestShell::new();
@@ -805,7 +805,7 @@ mod tests {
         assert_eq!(ts.clipboard.text(), None, "the earlier copy was forgotten");
     }
 
-    /// Fix round 1 (1, 7): another program copies the instant Lockbox's write closes the clipboard. Neither the timer,
+    /// Fix round 1 (1, 7): another program copies the instant Petalock's write closes the clipboard. Neither the timer,
     /// nor a lock, nor app close ever clears it.
     #[test]
     fn copy_right_after_the_write_is_never_cleared() {

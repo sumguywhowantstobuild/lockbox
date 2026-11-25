@@ -29,11 +29,11 @@ beforeEach(() => {
   listen.mockReset();
 });
 
-const ASK3_TITLE = "My vault's details were changed outside Lockbox.";
+const ASK3_TITLE = "My vault's details were changed outside Petalock.";
 const ASK3_BODY =
-  "Its name, or other details kept beside your items, don't match what Lockbox last saved. Moving a vault or restoring a backup doesn't cause this. If you edited that file yourself, accept it. If you didn't, lock it and check your PC first; restoring a backup you trust is the safer way back. Backups stay off until you accept.";
+  "Its name, or other details kept beside your items, don't match what Petalock last saved. Moving a vault or restoring a backup doesn't cause this. If you edited that file yourself, accept it. If you didn't, lock it and check your PC first; restoring a backup you trust is the safer way back. Backups stay off until you accept.";
 const ASK11 =
-  "Lockbox lost track of some opened files. Its record of files you opened is damaged, so it can't clean them up. Until you set the record aside, backing up, Save a copy and Open stay off.";
+  "Petalock lost track of some opened files. Its record of files you opened is damaged, so it can't clean them up. Until you set the record aside, backing up, Save a copy and Open stay off.";
 const SWEEP_UNREADABLE = { kind: "output_sweep", removed: 0, kept: 0, unreadable: true };
 
 function vault(extra: Partial<FakeVault> = {}): FakeVault {
@@ -240,7 +240,7 @@ test("ask4_counts_unreadable_items_and_closes", async () => {
   const { container } = start([vault({ unreadable: 3 })]);
   await unlockIt();
   const words =
-    "3 items in this vault can't be read. Everything else works. They may be damaged, so Lockbox left all stored files where they are until this is sorted.";
+    "3 items in this vault can't be read. Everything else works. They may be damaged, so Petalock left all stored files where they are until this is sorted.";
   expect(await screen.findByText(words)).toBeTruthy();
   // A banner, not a dialog: nothing holds focus. It has Close, Restore a backup and Open a backup.
   expect(screen.queryByRole("dialog")).toBeNull();
@@ -273,7 +273,7 @@ test("ask4_one_item_reads_as_one", async () => {
   await unlockIt();
   expect(
     await screen.findByText(
-      "1 item in this vault can't be read. Everything else works. It may be damaged, so Lockbox left all stored files where they are until this is sorted.",
+      "1 item in this vault can't be read. Everything else works. It may be damaged, so Petalock left all stored files where they are until this is sorted.",
     ),
   ).toBeTruthy();
 });
@@ -388,7 +388,7 @@ test("ask10_names_the_provider", async () => {
     listen.mockReset();
     const { container, unmount } = start([vault({ cloud: provider })]);
     await unlockIt();
-    const words = `${said} syncs My vault's folder. Lockbox doesn't support vaults in cloud folders. To stop this message, move the vault to a folder on this PC.`;
+    const words = `${said} syncs My vault's folder. Petalock doesn't support vaults in cloud folders. To stop this message, move the vault to a folder on this PC.`;
     expect(await screen.findByText(words), provider).toBeTruthy();
     // The provider is named by its everyday name, never the shell's own spelling.
     expect(container.textContent).not.toContain("GoogleDrive");
@@ -415,7 +415,7 @@ test("ask10_shows_its_vaults_folder_in_explorer", async () => {
   shell.explorerFailsNext();
   fireEvent.click(screen.getByRole("button", { name: "Show in Explorer" }));
   const alert = await screen.findByRole("alert");
-  expect(alert.textContent).toBe("Lockbox couldn't reach that folder or file. Check that the drive is connected, then try again.");
+  expect(alert.textContent).toBe("Petalock couldn't reach that folder or file. Check that the drive is connected, then try again.");
   expect(alert.closest(".ask")?.textContent).toContain("OneDrive syncs My vault's folder.");
 });
 
@@ -464,8 +464,8 @@ test("ask13_newer_vault_has_no_buttons", async () => {
   const { container } = start([vault({ newer: true })]);
   await unlockIt();
   const alert = await screen.findByRole("alert");
-  expect(alert.textContent).toBe("Update Lockbox to open this vault. A newer version made it.");
-  expect(messageFor(NEWER_VAULT)).toEqual({ title: "Update Lockbox to open this vault.", body: "A newer version made it." });
+  expect(alert.textContent).toBe("Update Petalock to open this vault. A newer version made it.");
+  expect(messageFor(NEWER_VAULT)).toEqual({ title: "Update Petalock to open this vault.", body: "A newer version made it." });
   // The design gives it no button: the lock screen's own Unlock and its Forgot password?, Restore a backup and Open a backup links are the only ones.
   expect(buttonNames()).toEqual(["Unlock", "Forgot password?", "Restore a backup", "Add existing vault folder", "Open a backup"]);
   await expectNoAxe(container);
@@ -479,7 +479,7 @@ test("ask16_says_the_change_was_saved", async () => {
   act(() => {
     sayOnLockScreen({ code: "locked_after_change", what: "password", vault: 7 }, 7);
   });
-  const words = "Your new password was saved, but the vault locked before Lockbox could say so. Unlock with the new one.";
+  const words = "Your new password was saved, but the vault locked before Petalock could say so. Unlock with the new one.";
   expect(await screen.findByText(words)).toBeTruthy();
   expect(buttonNames()).toEqual(["Unlock", "Forgot password?", "Restore a backup", "Add existing vault folder", "Open a backup"]);
   await expectNoAxe(container);
@@ -513,7 +513,7 @@ test("an_unavailable_vault_in_the_list_is_marked", async () => {
 
 test("restore_finished_at_launch_says_unlock_with_that_password", async () => {
   const { container } = start([vault()], [{ kind: "restore", state: "recovered", how: "finished", vault: { id: 7, name: "My vault" } }]);
-  const words = "Lockbox finished restoring My vault. Unlock with the password from when that backup was made.";
+  const words = "Petalock finished restoring My vault. Unlock with the password from when that backup was made.";
   expect(await screen.findByText(words)).toBeTruthy();
   // The notice has its own Unlock, above the lock screen's (which stays off until a password is typed), beside Restore a backup.
   expect(buttonNames()).toEqual(["Unlock", "Unlock", "Forgot password?", "Restore a backup", "Add existing vault folder", "Open a backup"]);
@@ -532,7 +532,7 @@ test("restore_finished_at_launch_says_unlock_with_that_password", async () => {
 
 test("restore_finished_at_launch_says_unlock_with_that_password: its Unlock selects the restored vault among several", async () => {
   start([vault(), { id: 8, name: "Restored vault", items: sampleItems() }], [{ kind: "restore", state: "recovered", how: "finished", vault: { id: 8, name: "Restored vault" } }]);
-  expect(await screen.findByText("Lockbox finished restoring Restored vault. Unlock with the password from when that backup was made.")).toBeTruthy();
+  expect(await screen.findByText("Petalock finished restoring Restored vault. Unlock with the password from when that backup was made.")).toBeTruthy();
   expect(screen.getByRole<HTMLInputElement>("radio", { name: /My vault/ }).checked).toBe(true);
   fireEvent.click(screen.getAllByRole("button", { name: "Unlock" })[0] as HTMLElement);
   await waitFor(() => {
@@ -543,7 +543,7 @@ test("restore_finished_at_launch_says_unlock_with_that_password: its Unlock sele
 
 test("restore_finished_at_launch_says_unlock_with_that_password: a vault the notice can't name is 'a vault', and Unlock only closes it", async () => {
   start([vault()], [{ kind: "restore", state: "recovered", how: "finished", vault: null }]);
-  expect(await screen.findByText("Lockbox finished restoring a vault. Unlock with the password from when that backup was made.")).toBeTruthy();
+  expect(await screen.findByText("Petalock finished restoring a vault. Unlock with the password from when that backup was made.")).toBeTruthy();
   fireEvent.click(screen.getAllByRole("button", { name: "Unlock" })[0] as HTMLElement);
   expect(screen.queryByText(/finished restoring/)).toBeNull();
   expect(screen.getByLabelText("Password for My vault")).toBeTruthy();
@@ -571,7 +571,7 @@ test("damaged_vault_list_shows_its_own_screen_with_the_way_out", async () => {
       : (real(cmd, args) as Promise<unknown>),
   );
   // Ask 12 is its own first-run style screen (`setup/LostList.test.tsx` has its words and its button's work), not the lock screen's dead end.
-  await screen.findByRole("heading", { level: 1, name: "Lockbox lost its list of vaults" });
+  await screen.findByRole("heading", { level: 1, name: "Petalock lost its list of vaults" });
   expect(buttonNames()).toEqual(["Start a new list"]);
   expect(screen.queryByRole("alert")).toBeNull();
   await expectNoAxe(container);
@@ -602,7 +602,7 @@ test("each_ask_passes_axe", async () => {
       run: async () => {
         start([vault()], [SWEEP_UNREADABLE, { kind: "restore", state: "recovered", how: "finished" }]);
         await screen.findByText(ASK11);
-        await screen.findByText(/^Lockbox finished restoring a vault/);
+        await screen.findByText(/^Petalock finished restoring a vault/);
       },
     },
     {

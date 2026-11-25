@@ -1147,9 +1147,9 @@ fn security_config_is_pinned() {
     let config = read_json("tauri.conf.json");
     assert_eq!(
         config["identifier"],
-        "io.github.sumguywhowantstobuild.lockbox"
+        "io.github.sumguywhowantstobuild.petalock"
     );
-    assert_eq!(config["productName"], "Lockbox");
+    assert_eq!(config["productName"], "Petalock");
     assert_eq!(config["app"]["withGlobalTauri"], false);
     assert_eq!(config["app"]["windows"], json!([]));
     assert_eq!(

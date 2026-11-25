@@ -697,7 +697,7 @@ pub(crate) mod testkit {
         manifest: Option<&[u8]>,
     ) -> Vec<u8> {
         let dir = TempDir::new();
-        let path = dir.path().join("a.lockbox-backup");
+        let path = dir.path().join("a.petalock-backup");
         let mut file = File::create(&path).unwrap();
         file.write_all(prefix).unwrap();
         let mut w = ArchiveWriter::new(file);
@@ -960,7 +960,7 @@ mod tests {
 
     fn open_bytes(bytes: &[u8]) -> Result<()> {
         let dir = TempDir::new();
-        let path = dir.path().join("b.lockbox-backup");
+        let path = dir.path().join("b.petalock-backup");
         std::fs::write(&path, bytes).unwrap();
         BackupArchive::open(&path, &CancelToken::new()).map(drop)
     }
@@ -1023,7 +1023,7 @@ mod tests {
     #[test]
     fn round_trip() {
         let dir = TempDir::new();
-        let path = dir.path().join("r.lockbox-backup");
+        let path = dir.path().join("r.petalock-backup");
         let p = payload();
         let cancel = CancelToken::new();
         let mut w = ArchiveWriter::new(File::create(&path).unwrap());
@@ -1372,7 +1372,7 @@ mod tests {
         assert_eq!(&b[len - 22 + 12..len - 22 + 16], &[0xFF; 4]);
         assert_eq!(&b[len - 98..len - 94], &[0x50, 0x4B, 0x06, 0x06]);
         let dir = TempDir::new();
-        let path = dir.path().join("z.lockbox-backup");
+        let path = dir.path().join("z.petalock-backup");
         std::fs::write(&path, &b).unwrap();
         let archive = BackupArchive::open(&path, &CancelToken::new()).unwrap();
         for (name, bytes) in payload() {
@@ -1391,7 +1391,7 @@ mod tests {
     #[test]
     fn aborted_entry_leaves_no_tail() {
         let dir = TempDir::new();
-        let path = dir.path().join("a.lockbox-backup");
+        let path = dir.path().join("a.petalock-backup");
         let cancel = CancelToken::new();
         let p = payload();
         let mut w = ArchiveWriter::new(File::create(&path).unwrap());
@@ -1484,7 +1484,7 @@ mod tests {
     #[test]
     fn archive_held_against_writers() {
         let dir = TempDir::new();
-        let path = dir.path().join("h.lockbox-backup");
+        let path = dir.path().join("h.petalock-backup");
         std::fs::write(&path, base()).unwrap();
         let archive = BackupArchive::open(&path, &CancelToken::new()).unwrap();
         assert!(std::fs::OpenOptions::new().write(true).open(&path).is_err());
@@ -1496,7 +1496,7 @@ mod tests {
     #[test]
     fn is_same_file_compares_the_files_themselves() {
         let dir = TempDir::new();
-        let path = dir.path().join("s.lockbox-backup");
+        let path = dir.path().join("s.petalock-backup");
         std::fs::write(&path, base()).unwrap();
         std::fs::write(dir.path().join("other"), b"x").unwrap();
         let archive = BackupArchive::open(&path, &CancelToken::new()).unwrap();
@@ -1505,7 +1505,7 @@ mod tests {
         std::fs::hard_link(&path, &link).unwrap();
         assert!(archive.is_same_file(&link).unwrap());
         assert!(!archive.is_same_file(dir.path()).unwrap(), "a folder");
-        let roundabout = dir.path().join("sub").join("..").join("s.lockbox-backup");
+        let roundabout = dir.path().join("sub").join("..").join("s.petalock-backup");
         std::fs::create_dir(dir.path().join("sub")).unwrap();
         assert!(archive.is_same_file(&roundabout).unwrap());
         assert!(!archive.is_same_file(&dir.path().join("other")).unwrap());
@@ -1559,7 +1559,7 @@ mod tests {
         let pieces = count_steps(MANIFEST_PIECE);
         failpoint::arm_cancel(MANIFEST_PIECE, token.clone());
         let dir = TempDir::new();
-        let path = dir.path().join("m.lockbox-backup");
+        let path = dir.path().join("m.petalock-backup");
         std::fs::write(&path, &bytes).unwrap();
         let result = BackupArchive::open(&path, &token);
         failpoint::disarm_all();
@@ -1621,7 +1621,7 @@ mod tests {
     #[test]
     fn open_cancel() {
         let dir = TempDir::new();
-        let path = dir.path().join("c.lockbox-backup");
+        let path = dir.path().join("c.petalock-backup");
         std::fs::write(&path, base()).unwrap();
         let cancel = CancelToken::new();
         cancel.cancel();
@@ -1634,7 +1634,7 @@ mod tests {
     #[test]
     fn rewrite_backup_modes() {
         let dir = TempDir::new();
-        let path = dir.path().join("w.lockbox-backup");
+        let path = dir.path().join("w.petalock-backup");
         let key = crate::secret::Key32::from_bytes([9; 32]);
         std::fs::write(&path, build_backup(&refs(&payload()), Some(&key))).unwrap();
         let edit = |m: &mut std::collections::BTreeMap<String, Vec<u8>>| {
@@ -1693,7 +1693,7 @@ mod tests {
         #[test]
         fn the_valid_archive_opens() {
             let dir = TempDir::new();
-            let path = dir.path().join("a.lockbox-backup");
+            let path = dir.path().join("a.petalock-backup");
             std::fs::write(&path, &*VALID).unwrap();
             let archive = BackupArchive::open(&path, &CancelToken::new()).unwrap();
             assert_eq!(archive.entries().len(), 2);
@@ -1705,7 +1705,7 @@ mod tests {
             #[test]
             fn archive_open_never_panics(bytes in archive_bytes()) {
                 let dir = TempDir::new();
-                let path = dir.path().join("a.lockbox-backup");
+                let path = dir.path().join("a.petalock-backup");
                 std::fs::write(&path, &bytes).unwrap();
                 if let Err(error) = BackupArchive::open(&path, &CancelToken::new()) {
                     assert_text_is_fixed(&error, &bytes)?;

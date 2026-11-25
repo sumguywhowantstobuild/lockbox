@@ -1,4 +1,4 @@
-//! Making a backup (spec 6.7): one `.lockbox-backup` file holding `vault.json`, every
+//! Making a backup (spec 6.7): one `.petalock-backup` file holding `vault.json`, every
 //! current item and the blobs those items attach, each blob authenticated as it is copied.
 //! The file is built hidden beside the destination, re-read and checked against its
 //! manifest, and only then renamed over the destination (spec 7.2, verify then publish).
@@ -164,7 +164,7 @@ impl BackupPlan<'_> {
         // Every early return below, and a panic, leaves the clean-up to `temp`.
         let mut temp = OutputTemp::create(
             folder,
-            ".lockbox-backup-partial",
+            ".petalock-backup-partial",
             journal,
             "backup.after_record",
         )?;
@@ -464,7 +464,7 @@ mod tests {
             );
             assert_eq!(calls[0].1, calls[1].1);
             let name = calls[0].1.file_name().unwrap().to_string_lossy();
-            assert!(name.ends_with(".lockbox-backup-partial"), "{name}");
+            assert!(name.ends_with(".petalock-backup-partial"), "{name}");
         }
     }
 
@@ -552,7 +552,7 @@ mod tests {
         vault.new_item(login, "b", None).unwrap();
         let (id, empty) = file_item(&parent, &mut vault, b"");
         let large = attach(&parent, &mut vault, &id, &vec![7u8; 3 * MIB + 7]);
-        let dest = parent.path().join("v.lockbox-backup");
+        let dest = parent.path().join("v.petalock-backup");
 
         let report = vault
             .backup(&dest, &NoJournal, &CancelToken::new(), &NoProgress)
@@ -612,7 +612,7 @@ mod tests {
         )
         .unwrap();
         assert!(blob_file(&vault, &retired).exists());
-        let dest = parent.path().join("v.lockbox-backup");
+        let dest = parent.path().join("v.petalock-backup");
         let expected = sorted(vec![
             HEADER_FILE.to_owned(),
             item_entry(&keep),
@@ -651,7 +651,7 @@ mod tests {
         let (id, bad) = file_item(&parent, &mut vault, &vec![1u8; 2 * MIB]);
         let good = attach(&parent, &mut vault, &id, b"good");
         flip(&blob_file(&vault, &bad), MIB + 100);
-        let dest = parent.path().join("v.lockbox-backup");
+        let dest = parent.path().join("v.petalock-backup");
 
         let report = vault
             .backup(&dest, &NoJournal, &CancelToken::new(), &NoProgress)
@@ -675,7 +675,7 @@ mod tests {
         let (parent, mut vault) = new_vault();
         let (id, file) = file_item(&parent, &mut vault, b"gone");
         fs::remove_file(blob_file(&vault, &file)).unwrap();
-        let dest = parent.path().join("v.lockbox-backup");
+        let dest = parent.path().join("v.petalock-backup");
 
         let report = vault
             .backup(&dest, &NoJournal, &CancelToken::new(), &NoProgress)
@@ -703,7 +703,7 @@ mod tests {
         assert_eq!(forged.revision, vault.get_item(&swapped).unwrap().revision);
         let sealed = seal_item(&forged, &vault.header.vault_id, &vault.vault_key).unwrap();
         fs::write(vault.item_path(&swapped), sealed).unwrap();
-        let dest = parent.path().join("v.lockbox-backup");
+        let dest = parent.path().join("v.petalock-backup");
 
         let report = vault
             .backup(&dest, &NoJournal, &CancelToken::new(), &NoProgress)
@@ -737,7 +737,7 @@ mod tests {
         let out = out_dir(&parent);
         let journal = Recorder::default();
         let what = refused(vault.backup(
-            &out.join("v.lockbox-backup"),
+            &out.join("v.petalock-backup"),
             &journal,
             &CancelToken::new(),
             &NoProgress,
@@ -784,7 +784,7 @@ mod tests {
         let out = out_dir(&parent);
         let journal = Recorder::default();
         let what = refused(vault.backup(
-            &out.join("v.lockbox-backup"),
+            &out.join("v.petalock-backup"),
             &journal,
             &CancelToken::new(),
             &NoProgress,
@@ -803,7 +803,7 @@ mod tests {
         file_item(&parent, &mut vault, b"x");
         let report = vault
             .backup(
-                &parent.path().join("ok.lockbox-backup"),
+                &parent.path().join("ok.petalock-backup"),
                 &NoJournal,
                 &CancelToken::new(),
                 &NoProgress,
@@ -815,7 +815,7 @@ mod tests {
         let out = out_dir(&parent);
         let journal = Recorder::default();
         let result = vault.backup(
-            &out.join("v.lockbox-backup"),
+            &out.join("v.petalock-backup"),
             &journal,
             &CancelToken::new(),
             &NoProgress,
@@ -836,13 +836,13 @@ mod tests {
         let before = names(vault.dir());
         let journal = Recorder::default();
         let inside = [
-            vault.dir().join("v.lockbox-backup"),
-            vault.dir().join("files").join("v.lockbox-backup"),
+            vault.dir().join("v.petalock-backup"),
+            vault.dir().join("files").join("v.petalock-backup"),
             vault
                 .dir()
                 .join("items")
                 .join("..")
-                .join("v.lockbox-backup"),
+                .join("v.petalock-backup"),
         ];
         for dest in &inside {
             assert_eq!(
@@ -861,7 +861,7 @@ mod tests {
         let note = vault.new_item(ItemKind::Note, "a", None).unwrap();
         let (id, file) = file_item(&parent, &mut vault, &[5u8; 10_000]);
         let out = out_dir(&parent);
-        let dest = out.join("v.lockbox-backup");
+        let dest = out.join("v.petalock-backup");
         fs::write(&dest, b"OLD").unwrap();
         let journal = Recorder::default();
 
@@ -898,7 +898,7 @@ mod tests {
         let result = vault.backup(&dest, &journal, &CancelToken::new(), &NoProgress);
         assert!(matches!(result, Err(CoreError::FileSystemLimit { .. })));
 
-        assert_eq!(names(&out), ["v.lockbox-backup"]);
+        assert_eq!(names(&out), ["v.petalock-backup"]);
         assert_eq!(fs::read(&dest).unwrap(), b"OLD");
         assert!(journal.0.borrow().is_empty());
 
@@ -908,7 +908,7 @@ mod tests {
             .backup(&dest, &journal, &CancelToken::new(), &NoProgress)
             .unwrap();
         assert_eq!((report.items, report.files), (2, 1));
-        assert_eq!(names(&out), ["v.lockbox-backup"]);
+        assert_eq!(names(&out), ["v.petalock-backup"]);
     }
 
     /// Review Focus 3: an existing backup stays byte-identical until the new one verified.
@@ -917,7 +917,7 @@ mod tests {
         let _cleanup = Cleanup;
         let (parent, vault) = new_vault();
         let out = out_dir(&parent);
-        let dest = out.join("v.lockbox-backup");
+        let dest = out.join("v.petalock-backup");
         fs::write(&dest, b"OLD").unwrap();
 
         let journal = Recorder::default();
@@ -926,14 +926,14 @@ mod tests {
         failpoint::disarm_all();
         assert!(matches!(result, Err(CoreError::Io(_))));
         assert_eq!(fs::read(&dest).unwrap(), b"OLD");
-        assert_eq!(names(&out), ["v.lockbox-backup"], "no temp left");
+        assert_eq!(names(&out), ["v.petalock-backup"], "no temp left");
         journal.assert_recorded_then_cleared();
 
         vault
             .backup(&dest, &NoJournal, &CancelToken::new(), &NoProgress)
             .unwrap();
         assert_eq!(entry_names(&dest), [HEADER_FILE]);
-        assert_eq!(names(&out), ["v.lockbox-backup"]);
+        assert_eq!(names(&out), ["v.petalock-backup"]);
         #[cfg(windows)]
         {
             use std::os::windows::fs::MetadataExt;
@@ -947,11 +947,11 @@ mod tests {
     fn unusable_destination_refused_up_front() {
         let (parent, vault) = new_vault();
         let out = out_dir(&parent);
-        let folder = out.join("folder.lockbox-backup");
+        let folder = out.join("folder.petalock-backup");
         fs::create_dir(&folder).unwrap();
         // Windows cannot replace a read-only file, so only there is it an unusable destination.
         let read_only = cfg!(windows).then(|| {
-            let path = out.join("ro.lockbox-backup");
+            let path = out.join("ro.petalock-backup");
             fs::write(&path, b"OLD").unwrap();
             let mut perms = fs::metadata(&path).unwrap().permissions();
             perms.set_readonly(true);
@@ -984,7 +984,12 @@ mod tests {
         failpoint::arm_cancel("tee.after_chunk", token.clone());
         let journal = Recorder::default();
 
-        let result = vault.backup(&out.join("v.lockbox-backup"), &journal, &token, &NoProgress);
+        let result = vault.backup(
+            &out.join("v.petalock-backup"),
+            &journal,
+            &token,
+            &NoProgress,
+        );
         assert!(matches!(result, Err(CoreError::Cancelled)));
         assert!(names(&out).is_empty(), "no temp left");
         journal.assert_recorded_then_cleared();
@@ -1000,7 +1005,12 @@ mod tests {
         token.cancel();
         let journal = Recorder::default();
 
-        let result = vault.backup(&out.join("v.lockbox-backup"), &journal, &token, &NoProgress);
+        let result = vault.backup(
+            &out.join("v.petalock-backup"),
+            &journal,
+            &token,
+            &NoProgress,
+        );
         assert!(matches!(result, Err(CoreError::Cancelled)));
         assert!(names(&out).is_empty());
         assert!(journal.0.borrow().is_empty(), "no temp was ever named");
@@ -1017,7 +1027,12 @@ mod tests {
         failpoint::arm_cancel("manifest.mac_piece", token.clone());
         let journal = Recorder::default();
 
-        let result = vault.backup(&out.join("v.lockbox-backup"), &journal, &token, &NoProgress);
+        let result = vault.backup(
+            &out.join("v.petalock-backup"),
+            &journal,
+            &token,
+            &NoProgress,
+        );
         assert!(matches!(result, Err(CoreError::Cancelled)));
         assert!(names(&out).is_empty(), "no temp left");
         journal.assert_recorded_then_cleared();
@@ -1030,7 +1045,7 @@ mod tests {
         let (parent, mut vault) = new_vault();
         file_item(&parent, &mut vault, b"x");
         let out = out_dir(&parent);
-        let dest = out.join("v.lockbox-backup");
+        let dest = out.join("v.petalock-backup");
         for (failpoint_name, what) in [
             ("backup.corrupt_temp", "backup: entry hash"),
             ("backup.corrupt_manifest", "backup: manifest readback"),
@@ -1050,7 +1065,7 @@ mod tests {
                 );
                 if old {
                     assert_eq!(fs::read(&dest).unwrap(), b"OLD");
-                    assert_eq!(names(&out), ["v.lockbox-backup"], "no temp left");
+                    assert_eq!(names(&out), ["v.petalock-backup"], "no temp left");
                     fs::remove_file(&dest).unwrap();
                 } else {
                     assert!(names(&out).is_empty(), "nothing published, no temp left");
@@ -1071,7 +1086,7 @@ mod tests {
         let (parent, mut vault) = new_vault();
         file_item(&parent, &mut vault, &[5u8; 10_000]);
         let out = out_dir(&parent);
-        let dest = out.join("v.lockbox-backup");
+        let dest = out.join("v.petalock-backup");
         let cancel = CancelToken::new();
 
         // No room: the same numbers `backup` refuses with.
@@ -1099,7 +1114,7 @@ mod tests {
         set_volume_override(None);
 
         // A destination inside the vault, and one that could never be replaced.
-        let inside = vault.dir().join("v.lockbox-backup");
+        let inside = vault.dir().join("v.petalock-backup");
         let refusal = vault.backup_check(&inside, &cancel).map(|_| ());
         assert!(matches!(
             refusal,
@@ -1107,7 +1122,7 @@ mod tests {
                 what: "destination inside vault"
             })
         ));
-        let folder = out.join("folder.lockbox-backup");
+        let folder = out.join("folder.petalock-backup");
         fs::create_dir(&folder).unwrap();
         let refusal = vault.backup_check(&folder, &cancel).map(|_| ());
         assert!(matches!(
@@ -1148,7 +1163,7 @@ mod tests {
         fs::write(&header, good).unwrap();
 
         // Nothing was written by any of it.
-        assert_eq!(names(&out), ["folder.lockbox-backup"]);
+        assert_eq!(names(&out), ["folder.petalock-backup"]);
         assert!(!dest.exists());
     }
 
@@ -1165,7 +1180,7 @@ mod tests {
         let (vault, _) = Vault::unlock_with_password(&dir, PW).unwrap();
         let out = out_dir(&parent);
         let refusal = vault
-            .backup_check(&out.join("v.lockbox-backup"), &CancelToken::new())
+            .backup_check(&out.join("v.petalock-backup"), &CancelToken::new())
             .map(|_| ());
         // Matched through a binding: a `what:` literal here would read, to the page's message check, as a new refusal
         // the page must word, and the backup command never sends it raw (the shell gives it its own words).
@@ -1184,7 +1199,7 @@ mod tests {
         vault.new_item(ItemKind::Note, "a", None).unwrap();
         file_item(&parent, &mut vault, &[5u8; 10_000]);
         let out = out_dir(&parent);
-        let (dest, plain) = (out.join("a.lockbox-backup"), out.join("b.lockbox-backup"));
+        let (dest, plain) = (out.join("a.petalock-backup"), out.join("b.petalock-backup"));
         let journal = Recorder::default();
         let cancel = CancelToken::new();
 
@@ -1224,7 +1239,7 @@ mod tests {
     #[test]
     fn backup_progress_counts_entries_and_files() {
         let (parent, vault, _, _) = vault_with_files();
-        let dest = parent.path().join("v.lockbox-backup");
+        let dest = parent.path().join("v.petalock-backup");
         let recorder = ProgressRecorder::default();
 
         let report = vault
@@ -1254,7 +1269,7 @@ mod tests {
     fn backup_progress_ends_at_the_total_when_a_file_is_missing() {
         let (parent, vault, id, large) = vault_with_files();
         fs::remove_file(blob_file(&vault, &large)).unwrap();
-        let dest = parent.path().join("v.lockbox-backup");
+        let dest = parent.path().join("v.petalock-backup");
         let recorder = ProgressRecorder::default();
 
         let report = vault
@@ -1274,7 +1289,7 @@ mod tests {
         let listener = CancelAtFirst(cancel.clone(), ProgressRecorder::default());
 
         let result = vault.backup(
-            &out.join("v.lockbox-backup"),
+            &out.join("v.petalock-backup"),
             &NoJournal,
             &cancel,
             &listener,
@@ -1315,7 +1330,7 @@ mod tests {
     fn cancelling_one_job_leaves_the_other_running() {
         let (parent, vault, id, large) = vault_with_files();
         let out = out_dir(&parent);
-        let (copy_dest, backup_dest) = (out.join("copy.bin"), out.join("v.lockbox-backup"));
+        let (copy_dest, backup_dest) = (out.join("copy.bin"), out.join("v.petalock-backup"));
         let session = CancelToken::new();
         let (copy_token, backup_token) = (session.child(), session.child());
         let copy_stopped = AtomicBool::new(false);
@@ -1346,7 +1361,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(summary.files, 3);
-        assert_eq!(names(&out), ["v.lockbox-backup"], "no temp left");
+        assert_eq!(names(&out), ["v.petalock-backup"], "no temp left");
     }
 
     /// The session's own token, cancelled part way through a backup and part way through an
@@ -1360,7 +1375,7 @@ mod tests {
         let backup_token = session.child();
         let lock = CancelAtFirst(session.clone(), ProgressRecorder::default());
         let result = vault.backup(
-            &out.join("v.lockbox-backup"),
+            &out.join("v.petalock-backup"),
             &NoJournal,
             &backup_token,
             &lock,

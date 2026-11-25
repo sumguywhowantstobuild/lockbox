@@ -109,7 +109,7 @@ export function UnlockStep({ step }: { step: UnlockStepOf }) {
     >
       <header className="field">
         <Pattern points={vaultLook(position, false).points} className="rose" />
-        <p className="mark">Lockbox</p>
+        <p className="mark">Petalock</p>
         <p className="say">Your items stay encrypted until you enter the password.</p>
       </header>
       <main className="plate">
@@ -334,7 +334,7 @@ export function LockScreen() {
       {/* The page's banner: its line says what the save step holds, so a screen reader moving by landmarks must reach it. */}
       <header className="field">
         <Pattern points={vaultLook(position, false).points} className="rose" />
-        <p className="mark">Lockbox</p>
+        <p className="mark">Petalock</p>
         <p className="say">
           {capture === null
             ? "Your items stay encrypted until you enter the password."

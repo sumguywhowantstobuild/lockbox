@@ -55,7 +55,7 @@ function typeInto(label: string | RegExp, value: string): void {
 
 /** From the first screen to the filled-in form. */
 async function toTheForm() {
-  await screen.findByRole("heading", { level: 1, name: "Welcome to Lockbox" });
+  await screen.findByRole("heading", { level: 1, name: "Welcome to Petalock" });
   click("Create a vault");
   await screen.findByRole("heading", { level: 1, name: "Create your vault" });
 }
@@ -138,7 +138,7 @@ function commandsSent(): string[] {
 
 test("no_vaults_goes_to_welcome", async () => {
   const { container } = start([]);
-  expect(await screen.findByRole("heading", { level: 1, name: "Welcome to Lockbox" })).toBeTruthy();
+  expect(await screen.findByRole("heading", { level: 1, name: "Welcome to Petalock" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "Create a vault" })).toBeTruthy();
   // 21a's second way in, in the design's words: a vault or a backup (Task 9 opens 26a with it).
   expect(screen.getByRole("button", { name: "I already have a vault or a backup" })).toBeTruthy();
@@ -154,7 +154,7 @@ test("no_vaults_goes_to_welcome", async () => {
 test("i_already_have_a_vault_adds_one_and_goes_to_the_lock_screen", async () => {
   start([]);
   shell.offerExisting({ id: 40, name: "Old vault", items: sampleItems() });
-  await screen.findByRole("heading", { level: 1, name: "Welcome to Lockbox" });
+  await screen.findByRole("heading", { level: 1, name: "Welcome to Petalock" });
   click("I already have a vault or a backup");
   await screen.findByRole("heading", { level: 1, name: "What do you have?" });
   click("A vault folder");
@@ -166,7 +166,7 @@ test("i_already_have_a_vault_adds_one_and_goes_to_the_lock_screen", async () => 
 
 test("a_folder_that_is_not_a_vault_says_so_on_the_second_way_in", async () => {
   const { container } = start([]);
-  await screen.findByRole("heading", { level: 1, name: "Welcome to Lockbox" });
+  await screen.findByRole("heading", { level: 1, name: "Welcome to Petalock" });
   click("I already have a vault or a backup");
   await screen.findByRole("heading", { level: 1, name: "What do you have?" });
   click("A vault folder");
@@ -405,7 +405,7 @@ test("key_heading_says_not_a_wallet_phrase", async () => {
   const { container } = start([]);
   // On the new vault's key (21c) ...
   await toTheKey();
-  const headed = screen.getByRole("heading", { level: 2, name: "Lockbox recovery key, not a crypto wallet phrase" });
+  const headed = screen.getByRole("heading", { level: 2, name: "Petalock recovery key, not a crypto wallet phrase" });
   // ... above the words it is about.
   expect(headed.compareDocumentPosition(document.querySelector(".fu-key") as Element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   // The plain warnings are still there beside it.
@@ -420,7 +420,7 @@ test("key_heading_is_also_on_the_new_key_of_an_unfinished_step", async () => {
   fireEvent.change(field, { target: { value: PASSWORD } });
   fireEvent.submit((field as HTMLInputElement).form as HTMLFormElement);
   await screen.findByRole("heading", { level: 1, name: "Finish your recovery key" });
-  expect(screen.getByRole("heading", { level: 2, name: "Lockbox recovery key, not a crypto wallet phrase" })).toBeTruthy();
+  expect(screen.getByRole("heading", { level: 2, name: "Petalock recovery key, not a crypto wallet phrase" })).toBeTruthy();
   expect(document.querySelectorAll(".fu-key li")).toHaveLength(24);
 });
 
@@ -756,7 +756,7 @@ test("a_new_key_that_could_not_be_made_says_so_and_can_be_asked_again", async ()
   fireEvent.change(field, { target: { value: PASSWORD } });
   fireEvent.submit((field as HTMLInputElement).form as HTMLFormElement);
   const alert = await screen.findByRole("alert");
-  expect(alert.textContent).toBe("Lockbox couldn't save a note it needs before making the key, so it made none. Try again.");
+  expect(alert.textContent).toBe("Petalock couldn't save a note it needs before making the key, so it made none. Try again.");
   expect(screen.getByRole("heading", { level: 1, name: "Finish your recovery key" })).toBeTruthy();
   expect(container.textContent).not.toContain("vault state");
   expect(screen.queryByRole("heading", { level: 1, name: "All items" })).toBeNull();
@@ -780,7 +780,7 @@ test("a_vault_that_could_not_be_marked_is_not_made", async () => {
   fill();
   click("Create vault");
   const alert = await screen.findByRole("alert");
-  expect(alert.textContent).toBe("Lockbox couldn't save a note it needs before making the key, so it made none. Try again.");
+  expect(alert.textContent).toBe("Petalock couldn't save a note it needs before making the key, so it made none. Try again.");
   expect(screen.getByRole("heading", { level: 1, name: "Create your vault" })).toBeTruthy();
   expect(shell.keyOf(1)).toBeUndefined();
   await expectNoAxe(container);
@@ -826,7 +826,7 @@ test("cloud_folder_asks_before_creating", async () => {
   click("Create vault");
   // The question, and nothing made: no key, no vault, no mark.
   expect(await screen.findByRole("heading", { level: 1, name: "This folder is synced to the cloud" })).toBeTruthy();
-  expect(screen.getByText(/Lockbox doesn't support vaults in cloud folders/)).toBeTruthy();
+  expect(screen.getByText(/Petalock doesn't support vaults in cloud folders/)).toBeTruthy();
   // Stage 7 (group 3, 2026-11-14): still step 1 of the two, and the answers sit as drawn, Continue anyway beside Cancel, with
   // Choose another on its own line under the sentence that offers it.
   expect(screen.getByText("Step 1 of 2")).toBeTruthy();
@@ -869,7 +869,7 @@ test("the_first_screens_cloud_question_takes_focus_to_choose_another_and_is_read
     expect(document.activeElement).toBe(safe);
   });
   const described = safe.getAttribute("aria-describedby") ?? "";
-  expect(document.getElementById(described)?.textContent).toContain("Lockbox doesn't support vaults in cloud folders.");
+  expect(document.getElementById(described)?.textContent).toContain("Petalock doesn't support vaults in cloud folders.");
 });
 
 test("cloud_folder_choose_another_asks_for_the_picker", async () => {
@@ -891,7 +891,7 @@ test("an_existing_vault_in_a_cloud_folder_asks_too", async () => {
   const { container } = start([]);
   shell.offerExisting({ id: 40, name: "Old vault", items: [] });
   shell.cloudNext();
-  await screen.findByRole("heading", { level: 1, name: "Welcome to Lockbox" });
+  await screen.findByRole("heading", { level: 1, name: "Welcome to Petalock" });
   click("I already have a vault or a backup");
   await screen.findByRole("heading", { level: 1, name: "What do you have?" });
   click("A vault folder");
@@ -1533,7 +1533,7 @@ test("print_refusal_shows_its_words", async () => {
   fireEvent.click(parts.send);
   const busy = await screen.findByRole("alert");
   expect(busy.textContent).toBe(messageText(messageFor(PRINTER_BUSY)));
-  expect(busy.textContent).toBe("Lockbox is still printing. Wait for it to finish, then try again.");
+  expect(busy.textContent).toBe("Petalock is still printing. Wait for it to finish, then try again.");
   expect(busy.textContent).not.toMatch(/printer|busy|code/);
   // The picker stays, to try again or to cancel, and focus has not left it.
   expect(pickerParts().send.getAttribute("aria-disabled")).toBeNull();
@@ -1546,7 +1546,7 @@ test("print_refusal_shows_its_words", async () => {
   fireEvent.click(pickerParts().send);
   await vi.waitFor(() => {
     expect(screen.getByRole("alert").textContent).toBe(
-      "Lockbox couldn't send that to the printer. Check that it's on and connected, then try again.",
+      "Petalock couldn't send that to the printer. Check that it's on and connected, then try again.",
     );
   });
   expect(screen.getAllByRole("alert")).toHaveLength(1);
@@ -1556,7 +1556,7 @@ test("print_refusal_shows_its_words", async () => {
   shell.refusePrintNext(PDF_NOT_MADE);
   fireEvent.click(pdf);
   await vi.waitFor(() => {
-    expect(screen.getByRole("alert").textContent).toBe("Lockbox couldn't make the PDF. Nothing was saved. Try again.");
+    expect(screen.getByRole("alert").textContent).toBe("Petalock couldn't make the PDF. Nothing was saved. Try again.");
   });
   expect(screen.getAllByRole("alert")).toHaveLength(1);
   expect(shell.pdfs).toEqual([]);
@@ -1955,7 +1955,7 @@ test("a_cloud_question_that_fails_for_another_reason_keeps_the_key_and_says_why"
       : (real(cmd, args) as Promise<unknown>),
   );
   fireEvent.click(within(dialog).getByRole("button", { name: "Continue" }));
-  expect((await screen.findByRole("alert")).textContent).toBe("Lockbox couldn't make the PDF. Nothing was saved. Try again.");
+  expect((await screen.findByRole("alert")).textContent).toBe("Petalock couldn't make the PDF. Nothing was saved. Try again.");
   expect(keyWordsOnPage(key).length).toBeGreaterThan(0);
   expect(debugState().sessions).toHaveLength(1);
 });
@@ -2020,7 +2020,7 @@ test("print_style_shows_only_the_key_and_its_words", async () => {
   expect(marked, "one element is marked").toHaveLength(1);
   const mine = marked[0] as Element;
   // The marked element holds the heading, the 24 numbered words and the plain warning, and nothing of the page's own.
-  expect(within(mine as HTMLElement).getByRole("heading", { level: 2, name: "Lockbox recovery key, not a crypto wallet phrase" })).toBeTruthy();
+  expect(within(mine as HTMLElement).getByRole("heading", { level: 2, name: "Petalock recovery key, not a crypto wallet phrase" })).toBeTruthy();
   expect(mine.querySelectorAll(".fu-key li")).toHaveLength(24);
   expect(within(mine as HTMLElement).getByText("If you lose both your password and this key, nobody can get your data back.")).toBeTruthy();
   expect(keyWordsInAttributes(key)).toEqual([]);

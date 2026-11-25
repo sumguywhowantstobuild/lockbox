@@ -1287,7 +1287,7 @@ fn a_cloud_destination_that_became_a_vault_folder_is_refused_at_confirm() {
 fn temps_in(docs: &Path) -> usize {
     names(docs)
         .iter()
-        .filter(|name| name.ends_with(".lockbox-partial"))
+        .filter(|name| name.ends_with(".petalock-partial"))
         .count()
 }
 
@@ -1397,8 +1397,8 @@ fn the_suggested_name_is_made_safe_for_a_file_name() {
         ("a<b>c:d\"e/f\\g|h?i*j", "a-b-c-d-e-f-g-h-i-j export.csv"),
         ("Home. ", "Home export.csv"),
         ("tab\there", "tab-here export.csv"),
-        ("...", "Lockbox export.csv"),
-        ("", "Lockbox export.csv"),
+        ("...", "Petalock export.csv"),
+        ("", "Petalock export.csv"),
         ("\u{1F600} MU-vault", "\u{1F600} MU-vault export.csv"),
     ];
     let mut checked = 0;
@@ -2093,7 +2093,7 @@ fn export_logs_errors_and_events_carry_no_marker() {
             between(
                 readable,
                 "/// Exports the vault as a readable CSV where the user picks, once `password`",
-                "/// The printers Lockbox offers for the recovery key, read from Windows now",
+                "/// The printers Petalock offers for the recovery key, read from Windows now",
             ),
         ),
         (
@@ -2101,7 +2101,7 @@ fn export_logs_errors_and_events_carry_no_marker() {
             between(
                 readable,
                 "pub(super) async fn export_csv(",
-                "/// The printers Lockbox offers for the recovery key, and the default one",
+                "/// The printers Petalock offers for the recovery key, and the default one",
             ),
         ),
     ];
@@ -2177,7 +2177,7 @@ fn a_temp_that_may_still_be_there_keeps_its_journal_entry() {
             .unwrap()
             .flatten()
             .map(|entry| entry.path())
-            .find(|path| path.to_string_lossy().ends_with(".lockbox-partial"))
+            .find(|path| path.to_string_lossy().ends_with(".petalock-partial"))
             .expect("the temp is there");
         // Nobody else may open it: the flush before the move fails, and so does removing it.
         let file = fs::OpenOptions::new()
@@ -2194,7 +2194,7 @@ fn a_temp_that_may_still_be_there_keeps_its_journal_entry() {
     assert!(!new_place.exists());
     let listed = w.ts.journal();
     assert_eq!(listed.len(), 1, "and its entry is kept");
-    assert!(listed[0].to_string_lossy().ends_with(".lockbox-partial"));
+    assert!(listed[0].to_string_lossy().ends_with(".petalock-partial"));
     assert_eq!(counted::alive(), 0);
 
     // Released, the next launch's sweep removes it.

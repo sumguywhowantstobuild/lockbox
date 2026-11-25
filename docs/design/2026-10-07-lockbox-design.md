@@ -1,5 +1,7 @@
 # Lockbox — Design Spec
 
+> 2026-11-25: the product is now Petalock; decisions below keep their original wording. The vault and backup format labels (`lockbox/header` and the others) keep the old name on purpose, so every existing vault and backup still opens.
+
 **Date:** 2026-10-07 · **Author:** Ariel Maningas · **Status:** revision 7 (2026-11-05, the [user interface design](2026-11-05-user-interface-design.md); revision 6 was Plan 3's decisions, 2026-10-27). What revision 7 adds is designed, and comes with Plan 4's build; 7.2 and 7.3 carry the results of Plan 4's first checks (2026-11-06). 5.2 shows the recovery secret as 24 words (2026-11-06, Ariel; the derivation and the vault format are unchanged).
 
 ## 1. Purpose

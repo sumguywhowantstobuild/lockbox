@@ -379,7 +379,7 @@ impl Hotkey for FakeHotkey {
     }
 }
 
-/// What the registry holds about starting with Windows, in memory: Lockbox's `Run` entry, and Windows' own on/off value
+/// What the registry holds about starting with Windows, in memory: Petalock's `Run` entry, and Windows' own on/off value
 /// for it. `read` counts and answers what is there now; an error a test sets is the OS's, with its own text, which the
 /// shell must never pass on.
 #[derive(Default)]
@@ -408,7 +408,7 @@ impl FakeStartup {
         lock(&self.inner).writes.clone()
     }
 
-    /// Whether Lockbox's `Run` entry is there.
+    /// Whether Petalock's `Run` entry is there.
     pub fn entry_present(&self) -> bool {
         lock(&self.inner).entry
     }
@@ -418,7 +418,7 @@ impl FakeStartup {
         lock(&self.inner).entry = present;
     }
 
-    /// The person turns Lockbox off in Windows' Startup settings.
+    /// The person turns Petalock off in Windows' Startup settings.
     pub fn turn_off_in_windows(&self) {
         lock(&self.inner).approved_off = true;
     }
@@ -577,7 +577,7 @@ struct Clip {
     /// Something that is not text is on the clipboard (a picture, a list of files).
     non_text: bool,
     /// Put on the clipboard once, right after the next look at the text's size: a program that opens the clipboard with no
-    /// owner window, which Windows lets in during Lockbox's opening, replacing the text between the two steps.
+    /// owner window, which Windows lets in during Petalock's opening, replacing the text between the two steps.
     after_size: Option<String>,
 }
 
@@ -647,7 +647,7 @@ impl FakeClipboard {
         lock(&self.clip).non_text
     }
 
-    /// Right after the next look at the text's size, `text` replaces what is on the clipboard, inside Lockbox's opening (a
+    /// Right after the next look at the text's size, `text` replaces what is on the clipboard, inside Petalock's opening (a
     /// program that opens it with no owner window).
     pub fn replace_after_size(&self, text: &str) {
         lock(&self.clip).after_size = Some(text.to_owned());
@@ -1188,6 +1188,8 @@ pub struct FakeDialogs {
     titles: Mutex<Vec<String>>,
     /// The filter each save dialog was given, in order: its name and extensions, or `None` for no filter.
     filters: Mutex<Vec<Filter>>,
+    /// The filter each open-a-file dialog was given, in order.
+    pick_filters: Mutex<Vec<Filter>>,
 }
 
 /// A dialog's filter as the fake records it: a name and the extensions it shows, or none.
@@ -1197,6 +1199,11 @@ impl FakeDialogs {
     /// The filter each save dialog was opened with, in order (`None`: no filter, so a real dialog adds no extension).
     pub fn filters(&self) -> Vec<Filter> {
         lock(&self.filters).clone()
+    }
+
+    /// The filter each open-a-file dialog (one file) was opened with, in order.
+    pub fn pick_filters(&self) -> Vec<Filter> {
+        lock(&self.pick_filters).clone()
     }
 
     /// The title each save dialog was opened with, in order.
@@ -1257,7 +1264,13 @@ impl Dialogs for FakeDialogs {
         self.next()
     }
 
-    fn pick_file(&self, _title: &str, _filter: Option<(&str, &[&str])>) -> Option<PathBuf> {
+    fn pick_file(&self, _title: &str, filter: Option<(&str, &[&str])>) -> Option<PathBuf> {
+        lock(&self.pick_filters).push(filter.map(|(name, extensions)| {
+            (
+                name.to_owned(),
+                extensions.iter().map(|e| (*e).to_owned()).collect(),
+            )
+        }));
         self.next()
     }
 
@@ -1698,9 +1711,9 @@ impl TestShell {
         let events = Arc::new(Events::default());
         let app_dirs = vec![
             env.folder(KnownFolder::RoamingAppData)
-                .join("io.github.sumguywhowantstobuild.lockbox"),
+                .join("io.github.sumguywhowantstobuild.petalock"),
             env.folder(KnownFolder::LocalAppData)
-                .join("io.github.sumguywhowantstobuild.lockbox"),
+                .join("io.github.sumguywhowantstobuild.petalock"),
         ];
         fs::create_dir_all(temp.path().join("vaults")).unwrap();
         let os = Os {

@@ -148,7 +148,7 @@ impl fmt::Debug for NoticeVault {
     }
 }
 
-/// A path as the user knows it: Lockbox spells a drive path `\\?\C:\..` and a share `\\?\UNC\srv\share\..`, which
+/// A path as the user knows it: Petalock spells a drive path `\\?\C:\..` and a share `\\?\UNC\srv\share\..`, which
 /// Explorer does not (`C:\..`, `\\srv\share\..`). The one rule for what is shown and what Show in Explorer opens.
 pub(crate) fn shown(path: &Path) -> String {
     let text = path.to_string_lossy();
@@ -775,7 +775,7 @@ impl Restores {
         *lock(&self.workers) += 1;
         let done = WorkerDone(Arc::clone(self));
         let _ = thread::Builder::new()
-            .name("lockbox-restore-cleanup".into())
+            .name("petalock-restore-cleanup".into())
             .spawn(move || {
                 let _done = done;
                 drop(prepared);
@@ -966,7 +966,7 @@ pub struct RestorePreparedView {
 pub struct PreRestoreOpened {
     #[serde(flatten)]
     pub info: SessionInfo,
-    /// Its header's stamp does not match: its name or date was changed outside Lockbox (spec §5.2). The copy still
+    /// Its header's stamp does not match: its name or date was changed outside Petalock (spec §5.2). The copy still
     /// opens, since it may be the only one left; the screen warns.
     pub header_changed: bool,
 }
@@ -2321,7 +2321,7 @@ mod tests {
 
     /// The usual vaults folder, where a restore goes until the person picks another.
     fn usual_folder(ts: &TestShell) -> PathBuf {
-        ts.env.folder(KnownFolder::Profile).join("Lockbox Vaults")
+        ts.env.folder(KnownFolder::Profile).join("Petalock Vaults")
     }
 
     /// A vault the engine makes in a folder of its own (`Source`), open as a session but not on the shell's vault list:
@@ -2466,7 +2466,7 @@ mod tests {
         let _cleanup = Cleanup;
         let (s, g) = ts.open_vault("Family");
         ts.stored_file(s, g, "report.pdf", b"report");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
         crash_mid_swap(&ts, &backup, &parent);
         assert!(!dir.exists(), "the old vault is aside");
@@ -2533,7 +2533,7 @@ mod tests {
         let ts = TestShell::new();
         let _cleanup = Cleanup;
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
         crash_mid_swap(&ts, &backup, &parent);
         assert!(matches!(
@@ -2541,7 +2541,7 @@ mod tests {
             RestoreNotice::Pending(_)
         ));
 
-        let unplugged = parent.with_file_name("Lockbox Vaults (unplugged)");
+        let unplugged = parent.with_file_name("Petalock Vaults (unplugged)");
         fs::rename(&parent, &unplugged).unwrap();
         let RestoreNotice::DriveMissing(paths) = ts.shell.retry_restore_recovery().unwrap() else {
             panic!("not told apart");
@@ -2660,7 +2660,7 @@ mod tests {
         let ts = TestShell::new();
         let _cleanup = Cleanup;
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
         let view = prepared(&ts, &backup, &parent);
         failpoint::arm("restore.after_move_existing");
@@ -2698,7 +2698,7 @@ mod tests {
         let ts = TestShell::new();
         let _cleanup = Cleanup;
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
         crash_mid_swap(&ts, &backup, &parent);
         let recoveries = ts.shell.restore.recoveries();
@@ -2726,7 +2726,7 @@ mod tests {
         let ts = TestShell::new();
         let _cleanup = Cleanup;
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
         let _ = dir;
 
@@ -2802,7 +2802,7 @@ mod tests {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Clients");
         ts.stored_file(s, g, "report.pdf", b"report");
-        let backup = backup_of(&ts, s, g, "clients.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "clients.petalock-backup");
         let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
         let short = read_vault_id(&dir).unwrap().to_hex()[..8].to_owned();
         ts.shell.sessions.lock(s, LockReason::Manual);
@@ -2895,7 +2895,7 @@ mod tests {
     fn new_folder_name_is_checked_by_the_engine() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Clients");
-        let backup = backup_of(&ts, s, g, "clients.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "clients.petalock-backup");
         let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
         ts.shell.sessions.lock(s, LockReason::Manual);
         for header in ["vault.json", "vault.json.bak"] {
@@ -2928,7 +2928,7 @@ mod tests {
     fn restore_parent_location_checked() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let refused = |what: &'static str, parent: &Path| {
             let answer = prepare(&ts, &backup, parent).err();
             assert_eq!(answer, Some(ShellError::InvalidInput { what }), "{what}");
@@ -2966,7 +2966,7 @@ mod tests {
     fn cloud_restore_parent_asks_first() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let cloud = ts.folder("Cloud");
         ts.volumes.add_sync_root(&cloud);
 
@@ -3015,7 +3015,7 @@ mod tests {
     fn lock_during_the_pickers_answers_locked() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let parent = vaults_folder(&ts);
         let lock_in_picker = || {
             let shell = Arc::clone(&ts.shell);
@@ -3078,7 +3078,7 @@ mod tests {
     fn wrong_password_starts_nothing() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let parent = vaults_folder(&ts);
         let before = names(&parent);
         let held = pick(&ts, &backup);
@@ -3106,7 +3106,7 @@ mod tests {
     fn restore_checks_room_in_the_vault_list() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
         ts.shell.sessions.lock(s, LockReason::Manual);
         let registry = ts.shell.paths.registry.clone();
@@ -3154,7 +3154,7 @@ mod tests {
     fn restore_picks_the_backup_before_the_password() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let size = fs::metadata(&backup).unwrap().len();
         let parent = vaults_folder(&ts);
         let before = names(&parent);
@@ -3163,7 +3163,7 @@ mod tests {
         let others = ts.shell.sessions.pending().len();
 
         let held = pick(&ts, &backup);
-        assert_eq!(held.file_name, "family.lockbox-backup");
+        assert_eq!(held.file_name, "family.petalock-backup");
         assert_eq!(held.size, size);
         let wire = serde_json::to_string(&held).unwrap();
         assert!(!wire.contains("Backups"), "the folder crossed: {wire}");
@@ -3213,7 +3213,7 @@ mod tests {
     fn restore_pick_kept_through_a_wrong_password() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let others = ts.shell.sessions.pending().len();
         let held = pick(&ts, &backup);
         let dialogs = ts.dialogs.opened();
@@ -3242,7 +3242,7 @@ mod tests {
         assert_eq!(ts.dialogs.opened(), dialogs, "no picker for the password");
 
         // A file that is no backup is refused the same way, and the pick stays.
-        let junk = ts.folder("Backups").join("junk.lockbox-backup");
+        let junk = ts.folder("Backups").join("junk.petalock-backup");
         fs::write(&junk, b"not a backup").unwrap();
         let bad = pick(&ts, &junk);
         let first = heavy(|| ts.shell.restore_check(&bad.choice, working(), REQUEST)).err();
@@ -3258,7 +3258,7 @@ mod tests {
     fn restore_check_answers_the_name_and_the_usual_folder() {
         let ts = TestShell::new();
         let (s, g, _) = source_vault(&ts, "Clients");
-        let backup = backup_of(&ts, s, g, "clients.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "clients.petalock-backup");
         let usual = usual_folder(&ts);
         let held = pick(&ts, &backup);
 
@@ -3316,7 +3316,7 @@ mod tests {
         // The folder holding a vault of this ID (the usual one, here): the answer names that vault's folder and says it
         // is the one replaced, though it is called by another name there.
         let (other, other_generation) = ts.open_vault("Family");
-        let backup = backup_of(&ts, other, other_generation, "family.lockbox-backup");
+        let backup = backup_of(&ts, other, other_generation, "family.petalock-backup");
         let held = pick(&ts, &backup);
         let view = check(&ts, &held.choice);
         assert!(view.usual && view.replaces_existing);
@@ -3342,7 +3342,7 @@ mod tests {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
         ts.stored_file(s, g, "report.pdf", b"report");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let parent = vaults_folder(&ts);
 
         let held = pick(&ts, &backup);
@@ -3389,7 +3389,7 @@ mod tests {
         let ts = TestShell::new();
         let (s, g, recovery) = source_vault(&ts, "Family");
         let key = recovery.to_display().to_string();
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let parent = ts.folder("Elsewhere");
 
         let held = pick(&ts, &backup);
@@ -3415,7 +3415,7 @@ mod tests {
         let _cleanup = Cleanup;
         let (s, g) = ts.open_vault("Family");
         ts.stored_file(s, g, "report.pdf", b"report");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
         let (in_vault, in_parent) = (names(&dir), names(&parent));
         let choice = chosen(&ts, &backup, &parent);
@@ -3473,7 +3473,7 @@ mod tests {
         let _cleanup = Cleanup;
         let (s, g) = ts.open_vault("Family");
         ts.stored_file(s, g, "big.bin", &vec![9u8; 3 << 20]);
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let parent = vaults_folder(&ts);
         let choice = chosen(&ts, &backup, &parent);
         let view = done(copy(&ts, &choice).unwrap());
@@ -3567,7 +3567,7 @@ mod tests {
     fn a_swap_that_is_refused_never_reaches_one_of_one() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
         ts.shell.sessions.lock(s, LockReason::Manual);
         let (outside, _) = heavy(|| Vault::unlock_with_password(&dir, TEST_PASSWORD)).unwrap();
@@ -3598,7 +3598,7 @@ mod tests {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
         ts.stored_file(s, g, "report.pdf", b"report");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         ts.shell
             .new_item(
                 s,
@@ -3699,7 +3699,7 @@ mod tests {
     fn all_old_copy_names_used_refused() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
         let folder = dir.file_name().unwrap().to_string_lossy().into_owned();
         ts.shell.sessions.lock(s, LockReason::Manual);
@@ -3736,7 +3736,7 @@ mod tests {
         let _volume = Volume;
         let (s, g) = ts.open_vault("Family");
         ts.stored_file(s, g, "report.pdf", &vec![7u8; 300_000]);
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let parent = vaults_folder(&ts);
         let before = names(&parent);
         let choice = chosen(&ts, &backup, &parent);
@@ -3780,9 +3780,9 @@ mod tests {
         let ts = TestShell::new();
         let _cleanup = Cleanup;
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let (other_s, other_g, _recovery) = source_vault(&ts, "Other");
-        let other = backup_of(&ts, other_s, other_g, "other.lockbox-backup");
+        let other = backup_of(&ts, other_s, other_g, "other.petalock-backup");
         let parent = vaults_folder(&ts);
         let before = names(&parent);
         let others = ts.shell.sessions.pending().len();
@@ -3825,9 +3825,9 @@ mod tests {
         let ts = TestShell::new();
         let _cleanup = Cleanup;
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let (other_s, other_g, _recovery) = source_vault(&ts, "Other");
-        let other = backup_of(&ts, other_s, other_g, "other.lockbox-backup");
+        let other = backup_of(&ts, other_s, other_g, "other.petalock-backup");
         let cloud = ts.folder("Cloud");
         ts.volumes.add_sync_root(&cloud);
         let others = ts.shell.sessions.pending().len();
@@ -3853,7 +3853,7 @@ mod tests {
     fn the_folder_picker_does_not_hold_the_credential_through_a_lock() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let parent = vaults_folder(&ts);
         let held = pick(&ts, &backup);
         check(&ts, &held.choice);
@@ -3891,7 +3891,7 @@ mod tests {
     fn a_pick_forgotten_in_the_folder_picker_answers_choice_expired() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let parent = vaults_folder(&ts);
         let others = ts.shell.sessions.pending().len();
         let held = pick(&ts, &backup);
@@ -3914,7 +3914,7 @@ mod tests {
         let ts = TestShell::new();
         let _volume = Volume;
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let parent = vaults_folder(&ts);
         pretend_free(None);
         let view = prepared(&ts, &backup, &parent);
@@ -3933,7 +3933,7 @@ mod tests {
     fn removable_fat32_or_network_drive_refused() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let good = ts.folder("Good");
         let choice = chosen(&ts, &backup, &good);
         let drives = [
@@ -3977,7 +3977,7 @@ mod tests {
     fn restore_cloud_folder_warns_first() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let cloud = ts.folder("Cloud");
         ts.volumes.add_sync_root(&cloud);
         let others = ts.shell.sessions.pending().len();
@@ -4029,7 +4029,7 @@ mod tests {
         let ts = TestShell::new();
         let (s, g, _) = source_vault(&ts, "Family");
         ts.stored_file(s, g, "report.pdf", b"report");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let usual = usual_folder(&ts);
         let held = pick(&ts, &backup);
         check(&ts, &held.choice);
@@ -4046,12 +4046,53 @@ mod tests {
         assert_eq!(titles(&ts, s2, g2), ["report.pdf"]);
     }
 
+    /// Plan 5, Task 0c, `an_old_backup_renamed_still_restores`: a backup the engine wrote before the product was renamed
+    /// (kept as a fixture, made-up data), renamed to `.petalock-backup` as a person would who
+    /// still has an old file, is picked, checked with its own password, copied, committed and unlocked, in the usual
+    /// `Petalock Vaults` folder: the engine reads a backup by its content, never by its name.
+    #[test]
+    fn an_old_backup_renamed_still_restores() {
+        use lockbox_core::internals::fixture::backup_before_the_rename;
+        let ts = TestShell::new();
+        let _cleanup = Cleanup;
+        let old = backup_before_the_rename(&ts.folder("Backups"), "made-before.petalock-backup");
+        assert!(old.path.is_file());
+        let held = pick(&ts, &old.path);
+        assert_eq!(held.file_name, "made-before.petalock-backup");
+
+        let checked = heavy(|| {
+            ts.shell
+                .restore_check(&held.choice, typed(&old.password), REQUEST)
+        })
+        .unwrap();
+        assert_eq!(checked.name, old.vault_name);
+        assert!(checked.usual && !checked.replaces_existing);
+        let usual = ts.env.folder(KnownFolder::Profile).join("Petalock Vaults");
+        let view = done(copy(&ts, &held.choice).unwrap());
+        assert!(usual.is_dir(), "the usual folder is Petalock Vaults");
+        let restored = ts.shell.restore_commit(view.restore, REQUEST).unwrap();
+        assert!(!restored.before_restore);
+        assert_eq!(names(&usual).len(), 1);
+
+        let unlocked = heavy(|| {
+            ts.shell.unlock_vault(
+                ts.vault(restored.vault),
+                Zeroizing::new(old.password.clone()),
+            )
+        })
+        .unwrap();
+        assert_eq!(
+            titles(&ts, unlocked.session, unlocked.generation),
+            [old.title.as_str()]
+        );
+    }
+
     /// The pick goes when the copy finishes (the staged restore holds all it needs), and stays through every refusal.
     #[test]
     fn the_pick_goes_when_the_copy_finishes_and_stays_through_refusals() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let (parent, roaming) = (
             vaults_folder(&ts),
             ts.env.folder(KnownFolder::RoamingAppData).join("Elsewhere"),
@@ -4091,7 +4132,7 @@ mod tests {
     fn restore_lock_all_between_credential_retries_drops_the_choice() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         for reason in [
             LockReason::Manual,
             LockReason::Idle,
@@ -4121,7 +4162,7 @@ mod tests {
         let _cleanup = Cleanup;
         let (s, g) = ts.open_vault("Family");
         ts.stored_file(s, g, "report.pdf", b"report");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let held = pick(&ts, &backup);
 
         // The lock comes as the backup's first item is read.
@@ -4192,7 +4233,7 @@ mod tests {
         let (s, g) = ts.open_vault("Family");
         ts.stored_file(s, g, "report.pdf", b"report");
         ts.stored_file(s, g, "notes.pdf", b"notes");
-        let backup = backup_of(ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(ts, s, g, "family.petalock-backup");
         (pick(ts, &backup), s, g)
     }
 
@@ -4503,7 +4544,7 @@ mod tests {
     fn restore_commands_refused_stale_foreign() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let expired = Some(ShellError::ChoiceExpired);
         let all_refused = |ts: &TestShell, choice: &Token, why: &str| {
             assert_eq!(
@@ -4594,7 +4635,7 @@ mod tests {
     fn prepared_restore_cancelled_by_windows_lock() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
         let view = prepared(&ts, &backup, &parent);
         assert_eq!(staging_in(&parent).len(), 1);
@@ -4624,7 +4665,7 @@ mod tests {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
         ts.stored_file(s, g, "report.pdf", b"report");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         ts.shell
             .new_item(
                 s,
@@ -4669,7 +4710,7 @@ mod tests {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
         let (other, _) = ts.open_vault("Other");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
 
         let view = prepared(&ts, &backup, &parent);
@@ -4699,7 +4740,7 @@ mod tests {
         let ts = TestShell::new();
         let _cleanup = Cleanup;
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let parent = vaults_folder(&ts);
         let shell = Arc::clone(&ts.shell);
         let once = Cell::new(true);
@@ -4724,7 +4765,7 @@ mod tests {
         let _cleanup = Cleanup;
         let (s, g) = ts.open_vault("Family");
         ts.stored_file(s, g, "report.pdf", b"report");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
 
         let shell = Arc::clone(&ts.shell);
@@ -4762,7 +4803,7 @@ mod tests {
     }
 
     /// Ask 15: a close or Quit that comes once the engine has written `swapping` says the restore is past the point of
-    /// cancelling (`past_swap`), so the page can say it will finish or be undone the next time Lockbox opens; one that
+    /// cancelling (`past_swap`), so the page can say it will finish or be undone the next time Petalock opens; one that
     /// comes while the restore is committing but before that point does not, and neither does a restore waiting for its
     /// yes (which asks for its own reason, `restore_waiting`, and is kept here). Asked from inside the commit, at each
     /// of the two points, and once while it waits. Close anyway in the swap runs the old close, which cancels and
@@ -4774,7 +4815,7 @@ mod tests {
         let (s, g) = ts.open_vault("Family");
         ts.shell.settings.mark_close_explained().unwrap();
         ts.stored_file(s, g, "report.pdf", b"report");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
 
         // Waiting for the yes: no job runs and nothing is past its swap, so the question is about the waiting restore
@@ -4840,7 +4881,7 @@ mod tests {
         let _cleanup = Cleanup;
         let (s, g) = ts.open_vault("Family");
         ts.stored_file(s, g, "report.pdf", b"report");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
         let view = prepared(&ts, &backup, &parent);
         let shell = Arc::clone(&ts.shell);
@@ -4875,7 +4916,7 @@ mod tests {
         let ts = TestShell::new();
         let _cleanup = Cleanup;
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let fresh = ts.folder("Fresh");
         let view = prepared(&ts, &backup, &fresh);
         assert!(!view.replaces_existing, "a new folder");
@@ -4954,7 +4995,7 @@ mod tests {
         let (s, g) = ts.open_vault("Family");
         ts.shell.settings.mark_close_explained().unwrap();
         ts.stored_file(s, g, "report.pdf", b"report");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
         let before = names(&dir);
         let view = prepared(&ts, &backup, &parent);
@@ -5133,7 +5174,7 @@ mod tests {
         let ts = TestShell::new();
         let _cleanup = Cleanup;
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let parent = vaults_folder(&ts);
         assert!(!ts.shell.restore.waiting(), "idle");
 
@@ -5188,7 +5229,7 @@ mod tests {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
         ts.shell.settings.mark_close_explained().unwrap();
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let parent = vaults_folder(&ts);
         let discarded = prepared(&ts, &backup, &parent);
         ts.shell.restore_discard(discarded.restore).unwrap();
@@ -5261,7 +5302,7 @@ mod tests {
         let ts = TestShell::new();
         let _cleanup = Cleanup;
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let parent = vaults_folder(&ts);
         let view = prepared(&ts, &backup, &parent);
 
@@ -5284,7 +5325,7 @@ mod tests {
         let ts = TestShell::new();
         let _cleanup = Cleanup;
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let parent = vaults_folder(&ts);
         let idle_for = Duration::from_secs(6 * 60);
         let idle_locks = |events: &crate::testing::Events| {
@@ -5347,7 +5388,7 @@ mod tests {
         let _cleanup = Cleanup;
         let (s, g) = ts.open_vault("Family");
         ts.stored_file(s, g, "report.pdf", b"report");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         ts.shell
             .new_item(
                 s,
@@ -5390,7 +5431,7 @@ mod tests {
     fn an_idle_lock_with_its_hook_still_queued_does_not_cancel_the_swap() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
         let _ = g;
         let view = prepared(&ts, &backup, &parent);
@@ -5432,7 +5473,7 @@ mod tests {
     fn a_lock_all_with_its_hook_still_queued_cancels_the_swap() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
         let _ = (s, g);
         let before = names(&dir);
@@ -5475,7 +5516,7 @@ mod tests {
         let ts = TestShell::new();
         let _cleanup = Cleanup;
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
         let before = names(&dir);
         let view = prepared(&ts, &backup, &parent);
@@ -5527,7 +5568,7 @@ mod tests {
         let ts = TestShell::new();
         let _cleanup = Cleanup;
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
         let before = names(&dir);
         let view = prepared(&ts, &backup, &parent);
@@ -5589,7 +5630,7 @@ mod tests {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
         let (other, _) = ts.open_vault("Other");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
         let view = prepared(&ts, &backup, &parent);
 
@@ -5619,7 +5660,7 @@ mod tests {
     fn vault_in_use_keeps_the_staged_restore() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
         ts.shell.sessions.lock(s, LockReason::Manual);
         let (outside, _) = heavy(|| Vault::unlock_with_password(&dir, TEST_PASSWORD)).unwrap();
@@ -5642,7 +5683,7 @@ mod tests {
     fn commit_waits_for_the_destination_to_release() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let parent = vaults_folder(&ts);
         let view = prepared(&ts, &backup, &parent);
 
@@ -5672,7 +5713,7 @@ mod tests {
     fn restore_whose_listing_fails_reports_vault_not_listed() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
         let view = prepared(&ts, &backup, &parent);
         // The list can be read no more: a folder where the file was.
@@ -5692,7 +5733,7 @@ mod tests {
     fn discard_removes_the_staged_restore() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
         let before = names(&dir);
         let view = prepared(&ts, &backup, &parent);
@@ -5721,7 +5762,7 @@ mod tests {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
         let (other, _) = ts.open_vault("Other");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
         let folder = dir.file_name().unwrap().to_string_lossy().into_owned();
         restore_once(&ts, &backup, &parent);
@@ -5788,7 +5829,7 @@ mod tests {
     fn older_copy_session_says_older_copy() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let parent = vaults_folder(&ts);
         restore_once(&ts, &backup, &parent);
         let listed = ts.shell.list_pre_restore();
@@ -5836,7 +5877,7 @@ mod tests {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
         let (other, _) = ts.open_vault("Other");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
         let _ = other;
         for _ in 0..3 {
@@ -5932,7 +5973,7 @@ mod tests {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
         ts.stored_file(s, g, "old.pdf", b"old");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         ts.shell
             .new_item(
                 s,
@@ -5982,7 +6023,7 @@ mod tests {
     fn pre_restore_copy_with_a_changed_header_says_so() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let parent = vaults_folder(&ts);
         restore_once(&ts, &backup, &parent);
         let listed = ts.shell.list_pre_restore();
@@ -6010,7 +6051,7 @@ mod tests {
     fn a_pre_restore_folder_on_the_vault_list_is_a_live_vault() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let parent = vaults_folder(&ts);
         restore_once(&ts, &backup, &parent);
         let listed = ts.shell.list_pre_restore();
@@ -6090,7 +6131,7 @@ mod tests {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
         ts.stored_file(s, g, "report.pdf", &vec![5u8; 5000]);
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let parent = vaults_folder(&ts);
         restore_once(&ts, &backup, &parent);
         let listed = ts.shell.list_pre_restore();
@@ -6130,7 +6171,7 @@ mod tests {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
         ts.stored_file(s, g, "report.pdf", &vec![5u8; 5000]);
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let parent = vaults_folder(&ts);
         restore_once(&ts, &backup, &parent);
         let listed = ts.shell.list_pre_restore();
@@ -6190,7 +6231,7 @@ mod tests {
         let ts = TestShell::new();
         let (s, g, recovery) = source_vault(&ts, "Family");
         let key = recovery.to_display().to_string();
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         // The vault is put on the shell's list (it is in the folder `Source` holds), then restored over.
         let source = ts.folder("Source");
         let vault_folder = fs::read_dir(&source)
@@ -6235,7 +6276,7 @@ mod tests {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
         let (_other, _) = ts.open_vault("Other");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let parent = vaults_folder(&ts);
 
         let view = prepared(&ts, &backup, &parent);
@@ -6266,7 +6307,7 @@ mod tests {
     fn too_many_copies_keeps_the_finished_restore() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
         let folder = dir.file_name().unwrap().to_string_lossy().into_owned();
         restore_once(&ts, &backup, &parent);
@@ -6303,7 +6344,7 @@ mod tests {
     fn restore_folder_picker_starts_in_the_current_folder() {
         let ts = TestShell::new();
         let (s, g, _) = source_vault(&ts, "Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let usual = usual_folder(&ts);
         let held = pick(&ts, &backup);
         assert!(ts.dialogs.folder_starts().is_empty(), "the pick opens none");
@@ -6360,7 +6401,7 @@ mod tests {
         let ts = TestShell::new();
         let _cleanup = Cleanup;
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let parent = vaults_folder(&ts);
         let view = prepared(&ts, &backup, &parent);
 
@@ -6417,7 +6458,7 @@ mod tests {
     fn failed_commit_the_engine_kept_stays_prepared_even_when_the_journal_cannot_be_read() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
         ts.shell.sessions.lock(s, LockReason::Manual);
         let (outside, _) = heavy(|| Vault::unlock_with_password(&dir, TEST_PASSWORD)).unwrap();
@@ -6448,7 +6489,7 @@ mod tests {
     fn destination_unlocked_after_prepare_then_locked_cancels() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
 
         // Locked when prepared, unlocked, then locked by the user.
@@ -6492,7 +6533,7 @@ mod tests {
     fn a_lock_just_before_the_swap_cancels_it() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
         let _ = g;
         let _ = s;
@@ -6545,7 +6586,7 @@ mod tests {
     fn destination_lock_with_its_hook_still_queued_cancels() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
         let _ = g;
         let view = prepared(&ts, &backup, &parent);
@@ -6650,24 +6691,24 @@ mod tests {
         assert_eq!(
             serde_json::to_value(RestorePick {
                 choice: token(hex),
-                file_name: "family.lockbox-backup".into(),
+                file_name: "family.petalock-backup".into(),
                 size: 2048,
             })
             .unwrap(),
-            json!({ "choice": hex, "file_name": "family.lockbox-backup", "size": 2048 })
+            json!({ "choice": hex, "file_name": "family.petalock-backup", "size": 2048 })
         );
         assert_eq!(
             serde_json::to_value(RestoreChecked {
                 name: "Family".into(),
                 made: Some("2026-11-16".into()),
-                folder_shown: r"C:\Users\Me\Lockbox Vaults\Family-1a2b3c4d".into(),
+                folder_shown: r"C:\Users\Me\Petalock Vaults\Family-1a2b3c4d".into(),
                 usual: true,
                 replaces_existing: false,
             })
             .unwrap(),
             json!({
                 "name": "Family", "made": "2026-11-16",
-                "folder_shown": r"C:\Users\Me\Lockbox Vaults\Family-1a2b3c4d",
+                "folder_shown": r"C:\Users\Me\Petalock Vaults\Family-1a2b3c4d",
                 "usual": true, "replaces_existing": false
             })
         );
@@ -6774,7 +6815,7 @@ mod tests {
         let ts = TestShell::new();
         let (s, g, id, dir) = listed_in_source(&ts, "Clients");
         ts.stored_file(s, g, "report.pdf", b"report");
-        let backup = backup_of(&ts, s, g, "clients.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "clients.petalock-backup");
         damage_both_headers(&ts, s, &dir);
         let before = snapshot(&dir);
         let held = pick_for(&ts, &backup, id);
@@ -6796,7 +6837,7 @@ mod tests {
         let ts = TestShell::new();
         let (s, g, id, dir) = listed_in_source(&ts, "Clients");
         ts.stored_file(s, g, "report.pdf", b"report");
-        let backup = backup_of(&ts, s, g, "clients.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "clients.petalock-backup");
         let usual = usual_folder(&ts);
 
         let held = pick_for(&ts, &backup, id);
@@ -6834,7 +6875,7 @@ mod tests {
     fn restore_pick_refuses_a_vault_not_listed() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let (dialogs, held) = (ts.dialogs.opened(), ts.shell.sessions.pending().len());
 
         assert_eq!(
@@ -7036,7 +7077,7 @@ mod tests {
         let listing = names(&parent);
 
         // Again, from the same damaged vault.
-        let backup = ts.folder("Backups").join("clients.lockbox-backup");
+        let backup = ts.folder("Backups").join("clients.petalock-backup");
         let held = pick_for(&ts, &backup, 1);
         let checked = check(&ts, &held.choice);
         assert!(
@@ -7064,7 +7105,7 @@ mod tests {
         let ts = TestShell::new();
         let (s, g, _) = source_vault(&ts, "Clients");
         ts.stored_file(s, g, "report.pdf", b"report");
-        let backup = backup_of(&ts, s, g, "clients.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "clients.petalock-backup");
         let source = ts.folder("Source");
         let own = source.join(names(&source).remove(0));
         damage_both_headers(&ts, s, &own);
@@ -7131,7 +7172,7 @@ mod tests {
         let ts = TestShell::new();
         let _cleanup = Cleanup;
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let parent = vaults_folder(&ts);
         crash_mid_swap(&ts, &backup, &parent);
 
@@ -7166,7 +7207,7 @@ mod tests {
         let ts = TestShell::new();
         let _cleanup = Cleanup;
         let (s, g, _) = source_vault(&ts, "Clients");
-        let backup = backup_of(&ts, s, g, "clients.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "clients.petalock-backup");
         let elsewhere = ts.folder("Elsewhere");
         let view = prepared(&ts, &backup, &elsewhere);
         failpoint::arm("restore.before_journal_done");
@@ -7210,11 +7251,11 @@ mod tests {
         let ts = TestShell::new();
         let _cleanup = Cleanup;
         let (s, g) = ts.open_vault("Family");
-        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let backup = backup_of(&ts, s, g, "family.petalock-backup");
         let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
         crash_mid_swap(&ts, &backup, &parent);
 
-        let unplugged = parent.with_file_name("Lockbox Vaults (unplugged)");
+        let unplugged = parent.with_file_name("Petalock Vaults (unplugged)");
         fs::rename(&parent, &unplugged).unwrap();
         let notice = ts.shell.retry_restore_recovery().unwrap();
         let told = serde_json::to_value(&notice).unwrap();

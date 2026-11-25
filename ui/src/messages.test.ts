@@ -71,7 +71,7 @@ test("every_shell_error_has_a_message", () => {
 test("a_new_recovery_key_a_lock_kept_from_the_screen_has_words_of_its_own", () => {
   // Not "Unlock the vault to see it.": that key was never seen, and the next unlock makes another.
   const message = messageFor({ code: "locked_after_change", what: "recovery key" });
-  expect(message.title).toBe("The vault locked before Lockbox could show your new recovery key.");
+  expect(message.title).toBe("The vault locked before Petalock could show your new recovery key.");
   expect(message.body).toContain("make another one");
 });
 
@@ -106,7 +106,7 @@ test("an_older_copy_that_is_open_says_to_close_it_before_it_is_deleted", () => {
   // A busy vault of another kind keeps the busy words.
   expect(messageFor({ code: "busy" }).title).toBe("That vault is busy.");
   // An older copy the page's listing no longer matches is `not_found`: the screen says its own words, the table has the plain ones.
-  expect(messageFor({ code: "not_found" }).title).toBe("Lockbox can't find that.");
+  expect(messageFor({ code: "not_found" }).title).toBe("Petalock can't find that.");
 });
 
 test("a_backup_that_changed_after_it_was_checked_says_to_pick_it_again", () => {
@@ -144,7 +144,7 @@ test("a_vault_state_refusal_has_words_of_its_own", () => {
   // The shell could not write the "not confirmed" mark, so it made no key (and, for a new vault, no vault).
   const words = messageFor({ code: "too_large", what: "vault state" });
   expect(words).toEqual({
-    title: "Lockbox couldn't save a note it needs before making the key, so it made none.",
+    title: "Petalock couldn't save a note it needs before making the key, so it made none.",
     body: "Try again.",
   });
   expect(KNOWN_WHATS).toContain("vault state");
@@ -180,7 +180,7 @@ test("word_and_count_refusals_have_words", () => {
   }
   // The typo's words are the spec's (5.2: "That recovery key has a typo"), on every screen that meets it; the other old kind is as it was.
   expect(messageFor({ code: "core", kind: "recovery_key_typo" })).toEqual({ title: "That recovery key has a typo.", body: "Check it against the one you saved." });
-  expect(messageFor({ code: "core", kind: "invalid_recovery_key" }).title).toBe("That isn't a recovery key for Lockbox.");
+  expect(messageFor({ code: "core", kind: "invalid_recovery_key" }).title).toBe("That isn't a recovery key for Petalock.");
 });
 
 test("a_key_that_does_not_open_a_vault_names_the_vault_the_page_gives", () => {
@@ -232,9 +232,9 @@ test("a_folder_that_cannot_be_added_has_words_of_its_own", () => {
     );
   }
   expect(messageText(messageFor({ code: "invalid_input", what: "not a vault folder" }))).toBe(
-    "That folder isn't a Lockbox vault. Choose the vault's own folder.",
+    "That folder isn't a Petalock vault. Choose the vault's own folder.",
   );
-  // Lockbox's own settings folder has the words `state folder` has.
+  // Petalock's own settings folder has the words `state folder` has.
   expect(messageFor({ code: "invalid_input", what: "app data folder" })).toEqual(messageFor({ code: "invalid_input", what: "state folder" }));
   for (const what of ["network drive", "drive type not supported", "file system not supported", "not a vault folder", "app data folder"]) {
     expect(KNOWN_WHATS).toContain(what);
@@ -245,13 +245,13 @@ test("a_bad_key_name_has_words_of_its_own", () => {
   // The engine refuses a key's name that is not a variable name; the shell sends it as the engine's refusal.
   const words = messageFor({ code: "core", kind: "invalid_input", what: "key name" });
   expect(words).toEqual({
-    title: "That isn't a name Lockbox can use for a key.",
+    title: "That isn't a name Petalock can use for a key.",
     body: "Use letters, digits and underscores (_) only, and don't start with a digit.",
   });
   expect(KNOWN_WHATS).toContain("key name");
   // A key's value asked of another kind, or a login's field of a key, is a page mistake: the plain words, nothing of the kind.
   expect(KNOWN_WHATS).toContain("not a key");
-  expect(messageFor({ code: "invalid_input", what: "not a key" }).title).toBe("Lockbox can't use that.");
+  expect(messageFor({ code: "invalid_input", what: "not a key" }).title).toBe("Petalock can't use that.");
 });
 
 test("a_folder_without_a_name_has_words_and_the_trash_refusals_stay_plain", () => {
@@ -264,7 +264,7 @@ test("a_folder_without_a_name_has_words_and_the_trash_refusals_stay_plain", () =
   for (const what of ["being deleted", "not in trash", "not a collection", "use delete_collection", "collection", "collection inside a collection"]) {
     expect(KNOWN_WHATS, what).toContain(what);
     const message = messageFor({ code: "core", kind: "invalid_input", what });
-    expect(message.title, what).toBe("Lockbox can't use that.");
+    expect(message.title, what).toBe("Petalock can't use that.");
   }
 });
 
@@ -284,7 +284,7 @@ test("the_env_refusals_have_words_of_their_own", () => {
   // The label lists stay sorted, so the next one goes where a reader looks for it.
   expect([...KNOWN_WHATS]).toEqual([...KNOWN_WHATS].sort());
   // A value or a name over its limit has its own label already, and the same plain words as any too-large refusal.
-  expect(messageFor({ code: "too_large", what: "value" }).title).toBe("That is too big for Lockbox to keep.");
+  expect(messageFor({ code: "too_large", what: "value" }).title).toBe("That is too big for Petalock to keep.");
 });
 
 test("a_save_with_no_value_has_words_of_its_own", () => {
@@ -303,7 +303,7 @@ test("the_settings_refusals_have_words_of_their_own", () => {
       "Ctrl with C, V or X is kept for copy and paste.",
     ],
     [{ code: "invalid_input", what: "shortcut not set" }, "Windows didn't take that shortcut.", "Try again."],
-    [{ code: "core", kind: "io", what: "startup" }, "Lockbox couldn't change Start with Windows.", "Try again."],
+    [{ code: "core", kind: "io", what: "startup" }, "Petalock couldn't change Start with Windows.", "Try again."],
   ];
   for (const [error, title, body] of words) {
     expect(messageFor(error), JSON.stringify(error)).toEqual({ title, body });
@@ -320,8 +320,8 @@ test("the_settings_refusals_have_words_of_their_own", () => {
   expect(messageFor({ code: "invalid_input", what: "shortcut not set" }, { shortcut: "{found}" }).title).toBe("Windows didn't take that shortcut.");
   expect(messageFor({ code: "invalid_input", what: "shortcut taken" }, { shortcut: "{found}" }).title).toBe("Another app already uses {found}.");
   // The other refusals of these rows keep the general words.
-  expect(messageFor({ code: "invalid_input", what: "idle time" }).title).toBe("Lockbox can't use that.");
-  expect(messageFor({ code: "invalid_input", what: "clipboard delay" }).title).toBe("Lockbox can't use that.");
+  expect(messageFor({ code: "invalid_input", what: "idle time" }).title).toBe("Petalock can't use that.");
+  expect(messageFor({ code: "invalid_input", what: "clipboard delay" }).title).toBe("Petalock can't use that.");
   expect([...KNOWN_WHATS]).toEqual([...KNOWN_WHATS].sort());
 });
 
@@ -335,17 +335,17 @@ test("a_damaged_stored_file_has_the_designs_words_and_no_backup_button_text", ()
     expect(said.body).toBe("A backup may have a good copy.");
   }
   expect(messageFor({ code: "core", kind: "damaged", what: "file" }).title).toBe("This file is damaged, so it can't be opened or saved.");
-  expect(messageFor({ code: "core", kind: "damaged", what: "item" }).title).toBe("Lockbox can't read part of this vault.");
+  expect(messageFor({ code: "core", kind: "damaged", what: "item" }).title).toBe("Petalock can't read part of this vault.");
 });
 
 test("the_new_vault_list_refusals_say_no_more_than_the_plain_words", () => {
   // `Start a new list` is refused for a list that reads fine (or none), and once a hundred damaged copies are already set aside.
   expect(KNOWN_WHATS).toContain("damaged vault lists");
   expect(KNOWN_WHATS).toContain("vault list");
-  expect(messageFor({ code: "invalid_input", what: "vault list" }).title).toBe("Lockbox can't use that.");
-  expect(messageFor({ code: "too_large", what: "damaged vault lists" }).title).toBe("That is too big for Lockbox to keep.");
+  expect(messageFor({ code: "invalid_input", what: "vault list" }).title).toBe("Petalock can't use that.");
+  expect(messageFor({ code: "too_large", what: "damaged vault lists" }).title).toBe("That is too big for Petalock to keep.");
   // The damaged list itself keeps its own words, which the lost-list screen no longer needs but a refused add still can say.
-  expect(messageFor({ code: "core", kind: "damaged", what: "vault list" }).title).toBe("Lockbox lost its list of vaults.");
+  expect(messageFor({ code: "core", kind: "damaged", what: "vault list" }).title).toBe("Petalock lost its list of vaults.");
   expect([...KNOWN_WHATS]).toEqual([...KNOWN_WHATS].sort());
 });
 
@@ -388,7 +388,7 @@ test("no_message_contains_raw_error_text", () => {
 test("the_four_backup_refusals_have_the_designs_words", () => {
   const said = (what: string) => messageText(messageFor({ code: "invalid_input", what }));
   expect(said("details changed")).toBe(
-    "Its details were changed outside Lockbox, so a backup made now might not open. Look at that change and accept it first, then back up.",
+    "Its details were changed outside Petalock, so a backup made now might not open. Look at that change and accept it first, then back up.",
   );
   expect(said("password copies disagree")).toBe("Change this vault's password once more, then back up.");
   expect(said("recovery key copies disagree")).toBe("Make a new recovery key for this vault, then back up.");
@@ -404,7 +404,7 @@ test("the_rename_refusals_have_words_of_their_own", () => {
   const said = (error: object) => messageText(messageFor(error));
   expect(said({ code: "core", kind: "invalid_input", what: "vault name" })).toBe("That name is too long. A vault name can have up to 200 characters.");
   expect(said({ code: "page", kind: "rename_details_changed" })).toBe(
-    "Its details were changed outside Lockbox. Look at that change and accept it first, then rename it.",
+    "Its details were changed outside Petalock. Look at that change and accept it first, then rename it.",
   );
   expect(said({ code: "page", kind: "rename_password_copies_disagree" })).toBe("Change this vault's password once more, then rename it.");
   expect(said({ code: "page", kind: "rename_recovery_key_copies_disagree" })).toBe("Make a new recovery key for this vault, then rename it.");

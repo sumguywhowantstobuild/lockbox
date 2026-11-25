@@ -76,7 +76,7 @@ export type SessionKind = "vault" | "older_copy" | "backup";
 export interface SessionInfo {
   session: number;
   generation: number;
-  /** A backup's is the backup file's name without `.lockbox-backup`, not the vault's name inside it; an older copy keeps its vault's name. */
+  /** A backup's is the backup file's name without `.petalock-backup`, not the vault's name inside it; an older copy keeps its vault's name. */
   name: string;
   read_only: boolean;
   state: "unlocked" | "locked" | "unavailable";
@@ -223,11 +223,11 @@ export interface Settings {
   clipboard_seconds: number;
   theme: Theme;
   shortcut: Shortcut;
-  /** Lockbox is kept out of screenshots, recordings and screen sharing. */
+  /** Petalock is kept out of screenshots, recordings and screen sharing. */
   capture_protected: boolean;
 }
 
-/** Start with Windows as the shell reads it: Lockbox's own entry, and whether Windows' Startup settings have turned it off. */
+/** Start with Windows as the shell reads it: Petalock's own entry, and whether Windows' Startup settings have turned it off. */
 export interface StartupState {
   on: boolean;
   turned_off_in_windows: boolean;
@@ -274,7 +274,7 @@ export function setSettings(settings: Settings): Promise<null> {
   return callPlain<null>("set_settings", { ...settings });
 }
 
-/** Whether Lockbox starts with Windows, as the shell reads it now. */
+/** Whether Petalock starts with Windows, as the shell reads it now. */
 export function getStartup(): Promise<StartupState> {
   return callPlain<StartupState>("get_startup", {});
 }
@@ -429,7 +429,7 @@ export function recoveryConfirmed(vault: SessionRef, issue: number): Promise<Tag
 }
 
 /**
- * The person's yes to Ask 3: the vault's details, changed outside Lockbox, are signed again and saved (the shell writes).
+ * The person's yes to Ask 3: the vault's details, changed outside Petalock, are signed again and saved (the shell writes).
  * Until then the engine refuses every other header write, a new recovery key included, so this comes before one. Refused
  * on a stale generation and on a read-only copy.
  */
@@ -478,7 +478,7 @@ export async function resetOutputJournal(): Promise<void> {
  * 5b's button, after the first close: the shell saves that the explanation was seen, so later closes hide the window at
  * once, sends `first_close` with `explain: false`, and hides the window. Every vault is already locked by then. When the
  * settings file can't be written, the shell still remembers it for this run and hides the window: a note seen once is not
- * worth an error, and it shows again only after Lockbox restarts. So this never refuses.
+ * worth an error, and it shows again only after Petalock restarts. So this never refuses.
  */
 export async function closeExplainedOk(): Promise<void> {
   await callPlain<null>("close_explained_ok", {});
@@ -525,7 +525,7 @@ export interface ExportSummary {
 
 /**
  * Exports the vault to a readable CSV file (34a to 34c). The vault's password is checked in the same call, and is sent once: it is the page's only
- * secret here, and nothing else of the vault crosses. Rust opens the save dialog, refuses a vault's folder and Lockbox's own folder (`core`
+ * secret here, and nothing else of the vault crosses. Rust opens the save dialog, refuses a vault's folder and Petalock's own folder (`core`
  * `invalid_input`, what `"destination in a vault folder"`; `invalid_input`, what `"state folder"`), and writes the file only once the place is
  * approved. Answers `"Dismissed"` when the dialog is closed, `{ Confirm: { CloudFolder: { token, provider } } }` before anything is built for a
  * cloud-synced folder (go on with `saveReadableConfirm(token)`, or `exportRepick(token)` to pick another folder), or `{ Done: SavedView }` with
@@ -546,12 +546,12 @@ export function exportRepick(token: string): Promise<Tagged<Outcome<SavedView>>>
 }
 
 /**
- * Saves the recovery key on screen as a PDF (21c, 21f). Rust opens the save dialog, refuses a vault folder and Lockbox's
+ * Saves the recovery key on screen as a PDF (21c, 21f). Rust opens the save dialog, refuses a vault folder and Petalock's
  * own folder, and prints the page as it shows now: only the part marked `data-print-only` (see `print.css`), so the key
  * reaches the PDF through the printed page and never through this call. Answers `"Dismissed"` when the dialog is
  * closed, `{ Confirm: { CloudFolder: { token, provider } } }` before anything is written to a cloud-synced folder (21e: go on with
  * `saveReadableConfirm(token)`, or call this again to pick another folder), or `{ Done: SavedView }`. Refused with
- * `busy` (`what: "printer"`) while a print of Lockbox's own runs, and `print_failed` (`what: "pdf"`) when no PDF came;
+ * `busy` (`what: "printer"`) while a print of Petalock's own runs, and `print_failed` (`what: "pdf"`) when no PDF came;
  * nothing is left on disk either way. A lock while it runs makes the answer stale: no file appears and no error shows.
  */
 export function saveRecoveryPdf(vault: SessionRef): Promise<Tagged<Outcome<SavedView>>> {
@@ -564,9 +564,9 @@ export function saveReadableConfirm(token: string): Promise<Tagged<Outcome<Saved
 }
 
 /**
- * The printers Lockbox can print to, by the names Windows shows, and the default one when it is among them. Printers
+ * The printers Petalock can print to, by the names Windows shows, and the default one when it is among them. Printers
  * that write a file through a save box of their own (Microsoft Print to PDF, XPS, OneNote, fax) are left out: that box
- * would hold the key outside Lockbox after a lock, and Save as PDF is Lockbox's own way to make a file. No vault data.
+ * would hold the key outside Petalock after a lock, and Save as PDF is Petalock's own way to make a file. No vault data.
  */
 export interface PrinterList {
   printers: string[];
@@ -580,7 +580,7 @@ export function listPrinters(): Promise<PrinterList> {
 /**
  * Prints the page as it shows now to `printer` (a name from `listPrinters`), with no Windows window: only the part
  * marked `data-print-only`. Answers once the printer has the job. Refused with `busy` (`what: "printer"`) while a print
- * of Lockbox's own runs, `invalid_input` (`what: "printer name"`) when that printer is not listed any more, and
+ * of Petalock's own runs, `invalid_input` (`what: "printer name"`) when that printer is not listed any more, and
  * `print_failed` (`what: "print"`) when the job could not be sent. A lock while it runs makes the answer stale.
  */
 export function printRecoveryKey(vault: SessionRef, printer: string): Promise<Tagged<null>> {
@@ -1172,7 +1172,7 @@ export async function forgetOpenBackup(choice: string): Promise<void> {
 /**
  * Opens the picked backup read-only, with what was typed as one box's (`password_or_key`). A launch-scoped job (`request` names it for `lockbox://job-started`
  * and `lockbox://progress`, kind `open_backup`, scope `launch`): it shows progress and a Stop (`cancelOperation`). The answer is the new session, tagged: a
- * read-only session of `kind` `backup` whose name is the backup file's name without `.lockbox-backup`. A wrong password (`core` `wrong_password`), damage (`core`
+ * read-only session of `kind` `backup` whose name is the backup file's name without `.petalock-backup`. A wrong password (`core` `wrong_password`), damage (`core`
  * `damaged`), `core` `io` and a stop (`cancelled`) keep the choice; a session opened uses it up. A choice that is gone is `choice_expired`; `locked` means every
  * vault was locked while it ran. A backup that is open already is answered as it is.
  */
@@ -1345,7 +1345,7 @@ export interface PreRestoreEntry {
   size: number | null;
 }
 
-/** What opening an older copy answers: the read-only session's details beside the flag that its details were changed outside Lockbox (the shell's `PreRestoreOpened`). */
+/** What opening an older copy answers: the read-only session's details beside the flag that its details were changed outside Petalock (the shell's `PreRestoreOpened`). */
 export interface PreRestoreOpened extends SessionInfo {
   header_changed: boolean;
 }
@@ -1407,18 +1407,18 @@ export function openHelp(): Promise<null> {
   return callPlain<null>("open_help", {});
 }
 
-/** What 2c's Clear now found: Lockbox's copy taken off, nothing of Lockbox's left to clear, or the clipboard held by another app. */
+/** What 2c's Clear now found: Petalock's copy taken off, nothing of Petalock's left to clear, or the clipboard held by another app. */
 export type ClearNow = "cleared" | "gone" | "busy";
 
 /**
- * 2c's Clear now: takes Lockbox's last copy off the clipboard while it is still there. Whatever was copied since is left alone,
+ * 2c's Clear now: takes Petalock's last copy off the clipboard while it is still there. Whatever was copied since is left alone,
  * as the timer leaves it. With the clipboard busy, the shell keeps trying on its own.
  */
 export function clearCopied(): Promise<ClearNow> {
   return callPlain<ClearNow>("clear_copied", {});
 }
 
-/** Locks every vault, then clears the clipboard of what Lockbox put there. */
+/** Locks every vault, then clears the clipboard of what Petalock put there. */
 export async function lockAll(): Promise<void> {
   await callPlain<null>("lock_all", {});
 }

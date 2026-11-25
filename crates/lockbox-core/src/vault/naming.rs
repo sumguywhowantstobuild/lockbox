@@ -20,11 +20,11 @@ const RESERVED_DEVICE_NAMES: &[&str] = &[
     "COM5", "COM6", "COM7", "COM8", "COM9", "COM¹", "COM²", "COM³", "LPT0", "LPT1", "LPT2", "LPT3",
     "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", "LPT¹", "LPT²", "LPT³",
 ];
-/// Longest path Lockbox's own Win32 calls take (`MoveFileExW` and the others in `fsio::windows`
+/// Longest path Petalock's own Win32 calls take (`MoveFileExW` and the others in `fsio::windows`
 /// get no `\\?\` prefix, and the app declares no long-path support): `MAX_PATH`, 260 UTF-16
 /// units, less the terminating NUL.
 pub(crate) const MAX_PATH_UNITS: usize = 259;
-/// How far below a vault folder Lockbox later writes at most: `\files\orphaned\<32 hex>.blob`,
+/// How far below a vault folder Petalock later writes at most: `\files\orphaned\<32 hex>.blob`,
 /// a blob moved aside by cleanup (1 + 5 + 1 + 8 + 1 + 32 + 5 units). Every other path inside a
 /// vault is shorter (`\items\<32 hex>.item` is 44, a hidden temp `\items\.<16 hex>.tmp` is 28).
 pub(crate) const DEEPEST_IN_VAULT_UNITS: usize = 53;

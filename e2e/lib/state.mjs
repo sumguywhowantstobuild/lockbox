@@ -1,15 +1,15 @@
-// Sets Lockbox's real state aside while a hands-on check or an end-to-end run uses a test state, and puts it back.
+// Sets Petalock's real state aside while a hands-on check or an end-to-end run uses a test state, and puts it back.
 //
 // Where the release app keeps its state on Windows (read from the code, not guessed):
-//   state       <LocalAppData>\Lockbox   the vault list, the journals and the "open" folders
+//   state       <LocalAppData>\Petalock  the vault list, the journals and the "open" folders
 //                                        (crates/lockbox-desktop/src/paths.rs, state_paths)
-//   appLocal    <LocalAppData>\io.github.sumguywhowantstobuild.lockbox
+//   appLocal    <LocalAppData>\io.github.sumguywhowantstobuild.petalock
 //                                        Tauri's app-local folder (app_local_data_dir). It holds WebView2's profile
 //                                        (EBWebView), Tauri's default web-view data folder, as the app sets no
 //                                        data_directory of its own
-//   appRoaming  <RoamingAppData>\io.github.sumguywhowantstobuild.lockbox
+//   appRoaming  <RoamingAppData>\io.github.sumguywhowantstobuild.petalock
 //                                        Tauri's app-data folder (app_data_dir, lib.rs). It may not exist
-//   vaults      <Profile>\Lockbox Vaults
+//   vaults      <Profile>\Petalock Vaults
 //                                        the default folder new vaults are made in (paths.rs)
 // The identifier comes from crates/lockbox-desktop/tauri.conf.json; a test compares the two. The three roots are asked
 // of Windows (its known-folder lookup, as the app does), and a command refuses when %LOCALAPPDATA%, %APPDATA% or
@@ -22,7 +22,7 @@
 //
 // How a swap works. `in` checks every location first (none may be a link, or the same as or inside another once the
 // links on the way to it are resolved; nothing may sit at a name it will use) and refuses, renaming nothing, if any
-// check fails or if Lockbox runs. Then it writes a journal beside the vaults folder in the profile (the one place every
+// check fails or if Petalock runs. Then it writes a journal beside the vaults folder in the profile (the one place every
 // terminal sees alike; a uniquely named temp file made exclusively, renamed into place), recording each existing folder's identity (volume and file ID), and for each location
 // that exists puts a sentinel file naming the run inside it, renames it to `<folder>.aside-<run>`, and moves a kept
 // `<folder>.test-<run>` into its place if there is one; otherwise the place stays empty so the app starts fresh. `back`
@@ -31,7 +31,7 @@
 // only), the aside folder is renamed back, its sentinel removed, and the journal removed last.
 //
 // A packaged app's private copy. An app installed as a package (MSIX), and every program it starts, sees its own copy of
-// AppData: `<LocalAppData>\Lockbox` is really `<LocalAppData>\Packages\<family>\LocalCache\Local\Lockbox`, and the
+// AppData: `<LocalAppData>\Petalock` is really `<LocalAppData>\Packages\<family>\LocalCache\Local\Petalock`, and the
 // roaming folder is the same under `LocalCache\Roaming`. A run started from such an app therefore swaps that app's
 // private copy, which is the one the release app started from the same place opens. Whether a location is seen that way
 // is decided by identity (the same device and file ID as a package copy of the same leaf, any family), because the real
@@ -55,7 +55,7 @@
 // process id) from before they read the journal to after their last rename. A lock whose process is alive refuses the
 // command; a lock whose process is gone is taken over, and the result says so. A lock is removed only if it still holds
 // this process's id. A lock whose process id has been reused by an unrelated program refuses until it is deleted by hand.
-// Lockbox is looked for again before each location is touched; if it appears, the command stops with the journal kept.
+// Petalock is looked for again before each location is touched; if it appears, the command stops with the journal kept.
 //
 // What recover touches. It moves a folder out of the way only to keep a test state, and treats a folder as the original
 // only when its identity is the one recorded; an aside folder is put back only when the sentinel inside it also names
@@ -73,7 +73,7 @@ import { pathToFileURL } from "node:url";
 /** The order locations are handled in, and the only keys there are. */
 export const LOCATION_KEYS = ["state", "appLocal", "appRoaming", "vaults"];
 
-const IDENTIFIER = "io.github.sumguywhowantstobuild.lockbox";
+const IDENTIFIER = "io.github.sumguywhowantstobuild.petalock";
 const SHOWN_THROUGH_LINE = "appLocal: a web-view folder outside the app's private copy shows through (cache only)";
 const SENTINEL = ".lockbox-test-swap.json";
 const RUN_NAME = /^[a-z0-9-]{1,40}$/;
@@ -133,10 +133,10 @@ export function knownFolders() {
 /** The four locations as absolute paths, each under its short key, from the three roots. */
 export function locationsFrom({ localAppData, roamingAppData, profile }) {
   return {
-    state: join(resolve(localAppData), "Lockbox"),
+    state: join(resolve(localAppData), "Petalock"),
     appLocal: join(resolve(localAppData), IDENTIFIER),
     appRoaming: join(resolve(roamingAppData), IDENTIFIER),
-    vaults: join(resolve(profile), "Lockbox Vaults"),
+    vaults: join(resolve(profile), "Petalock Vaults"),
   };
 }
 
@@ -160,7 +160,7 @@ export function defaultLocations({ env = process.env, lookup = knownFolders } = 
   return locationsFrom(known);
 }
 
-/** True when `tasklist`'s CSV answer lists a Lockbox process (the name only, so the language of Windows doesn't matter). */
+/** True when `tasklist`'s CSV answer lists a Petalock process (the name only, so the language of Windows doesn't matter). */
 export function parseTasklist(output) {
   return /"lockbox-desktop\.exe"/i.test(output);
 }
@@ -222,7 +222,7 @@ const FAMILY = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 /**
  * A packaged (MSIX) app and the programs it starts see their own private copy of AppData: the folder spelled
- * `<LocalAppData>\Lockbox` is really `<LocalAppData>\Packages\<family>\LocalCache\Local\Lockbox`. Whether a location is
+ * `<LocalAppData>\Petalock` is really `<LocalAppData>\Packages\<family>\LocalCache\Local\Petalock`. Whether a location is
  * seen that way is decided by identity, never by the realpath (which is not reliable here): the spelled folder and one
  * package copy of the same leaf (`Local` for state and appLocal, `Roaming` for appRoaming) must be the same folder by
  * device and file ID. Returns `{ family, copy }` or undefined. The vaults folder is never redirected.
@@ -314,15 +314,15 @@ function refuseWhileRunning(ctx, midway = false) {
   } catch {
     refuse(
       midway
-        ? "could not check whether Lockbox is running; stopped with the journal kept. Close Lockbox, then run recover"
-        : "could not check whether Lockbox is running, so nothing was changed",
+        ? "could not check whether Petalock is running; stopped with the journal kept. Close Petalock, then run recover"
+        : "could not check whether Petalock is running, so nothing was changed",
     );
   }
   if (running !== false) {
     refuse(
       midway
-        ? "Lockbox is running; stopped with the journal kept. Close Lockbox, then run recover"
-        : "Lockbox is running; close it first. Nothing was changed",
+        ? "Petalock is running; stopped with the journal kept. Close Petalock, then run recover"
+        : "Petalock is running; close it first. Nothing was changed",
     );
   }
 }
@@ -549,7 +549,7 @@ export function swapIn(run, options = {}) {
         if (kindOf(path) !== "absent") {
           // A folder still shows at the place: under a packaged app's private copy, the real folder outside it now
           // falls through. For appLocal that folder is only the web-view cache: it is recorded (its identity, so that
-          // putting back never takes it for test state) and the swap goes on. Anywhere else it may hold Lockbox's own
+          // putting back never takes it for test state) and the swap goes on. Anywhere else it may hold Petalock's own
           // data, so nothing may go on from here: this location goes back (the folder that shows is kept under the
           // test name by the routine that puts things back), and so does everything done before it.
           // Either way the folder that shows is recorded by identity first, so that no later step can take it for test

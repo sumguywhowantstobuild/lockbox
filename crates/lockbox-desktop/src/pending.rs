@@ -1404,7 +1404,7 @@ mod tests {
 
     fn held(epoch: u64) -> PendingChoice {
         PendingChoice::TestBackup {
-            path: PathBuf::from("a.lockbox-backup"),
+            path: PathBuf::from("a.petalock-backup"),
             epoch,
         }
     }
@@ -1420,7 +1420,7 @@ mod tests {
         let other = pending.put_at(picked(1, 1, &["a"]), now);
         assert_eq!(
             used(&pending, &token, 3, now),
-            Ok(PathBuf::from("a.lockbox-backup"))
+            Ok(PathBuf::from("a.petalock-backup"))
         );
         assert_eq!(
             used(&pending, &token, 4, now),
@@ -1482,7 +1482,7 @@ mod tests {
                 1,
                 ended + LIFETIME - Duration::from_secs(1)
             ),
-            Ok(PathBuf::from("a.lockbox-backup")),
+            Ok(PathBuf::from("a.petalock-backup")),
             "still there to try again"
         );
         let again = ended + LIFETIME - Duration::from_secs(1) + LIFETIME;
@@ -1602,7 +1602,7 @@ mod tests {
 
     fn held_open(epoch: u64) -> PendingChoice {
         PendingChoice::OpenBackup {
-            path: PathBuf::from("b.lockbox-backup"),
+            path: PathBuf::from("b.petalock-backup"),
             epoch,
         }
     }
@@ -1632,7 +1632,7 @@ mod tests {
         let other = pending.put_at(picked(1, 1, &["a"]), now);
         assert_eq!(
             open_used(&pending, &open, 3, now),
-            Ok(PathBuf::from("b.lockbox-backup"))
+            Ok(PathBuf::from("b.petalock-backup"))
         );
         for (token, epoch) in [(&open, 4), (&test, 3), (&other, 3), (&Token::random(), 3)] {
             assert_eq!(
@@ -1745,7 +1745,7 @@ mod tests {
 
     fn restore_pick(epoch: u64) -> PendingChoice {
         PendingChoice::RestorePick {
-            path: PathBuf::from("a.lockbox-backup"),
+            path: PathBuf::from("a.petalock-backup"),
             epoch,
             vault: None,
             checked: None,
@@ -1788,7 +1788,7 @@ mod tests {
         let other = pending.put_at(picked(1, 1, &["a"]), now);
         assert_eq!(
             restore_used(&pending, &token, 3, now),
-            Ok(PathBuf::from("a.lockbox-backup"))
+            Ok(PathBuf::from("a.petalock-backup"))
         );
         for (token, epoch) in [
             (&token, 4),

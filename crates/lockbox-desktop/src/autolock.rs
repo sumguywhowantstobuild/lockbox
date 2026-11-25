@@ -545,7 +545,7 @@ impl AutoLock {
         let (sessions, volumes) = (Arc::clone(&self.sessions), Arc::clone(&self.volumes));
         let done = DoneProbing(Arc::clone(&self.probing));
         let probe = thread::Builder::new()
-            .name("lockbox-folder-check".into())
+            .name("petalock-folder-check".into())
             .spawn(move || {
                 let _done = done;
                 // Each one revoked as soon as its check answers: a later check that stalls must not hold it up.
@@ -701,12 +701,12 @@ impl AutoLock {
         let spawned = match self.fail_spawn.load(Ordering::SeqCst) {
             true => Err(std::io::Error::other("no thread")),
             false => thread::Builder::new()
-                .name("lockbox-closing".into())
+                .name("petalock-closing".into())
                 .spawn(helper),
         };
         #[cfg(not(test))]
         let spawned = thread::Builder::new()
-            .name("lockbox-closing".into())
+            .name("petalock-closing".into())
             .spawn(helper);
         if spawned.is_err() {
             self.operations.close();
@@ -1071,7 +1071,7 @@ mod tests {
     #[test]
     fn drive_bit_table() {
         let table = [
-            (r"\\?\C:\Lockbox Vaults\Family", 1 << 2),
+            (r"\\?\C:\Petalock Vaults\Family", 1 << 2),
             (r"\\?\d:\Family", 1 << 3),
             (r"C:\Family", 1 << 2),
             (r"\\?\A:\", 1),

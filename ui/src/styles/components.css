@@ -452,7 +452,7 @@
   margin-top: 10px;
 }
 
-/* Lockbox's own printer picker, under the two buttons: the printers in a short list with the default picked, then Print
+/* Petalock's own printer picker, under the two buttons: the printers in a short list with the default picked, then Print
    and Cancel; or one sentence and Cancel when there is no printer. Screen only, like the buttons above it. */
 .fu-picker {
   margin-top: 14px;

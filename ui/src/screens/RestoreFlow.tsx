@@ -402,7 +402,7 @@ function CloudQuestion({ open }: { open: boolean }) {
         if (!next) backToRestoreFolder();
       }}
       title="This folder is synced to the cloud"
-      description="A cloud service syncs this folder. Lockbox doesn't support vaults in cloud folders. Choose a folder on this PC, or continue anyway."
+      description="A cloud service syncs this folder. Petalock doesn't support vaults in cloud folders. Choose a folder on this PC, or continue anyway."
       initialFocus={another}
     >
       <Button
@@ -440,7 +440,7 @@ function NameQuestion({ suggested }: { suggested: string }) {
         if (!next) backToRestoreFolder();
       }}
       title="Restore into a new folder?"
-      description="A vault is already in that folder, and Lockbox can't tell whether it's the same one. This backup can unpack into a new folder beside it instead."
+      description="A vault is already in that folder, and Petalock can't tell whether it's the same one. This backup can unpack into a new folder beside it instead."
       initialFocus={cancel}
       body={
         <div className="fbox">

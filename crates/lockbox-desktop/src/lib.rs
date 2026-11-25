@@ -1,4 +1,4 @@
-//! Lockbox's desktop shell (spec §4): the Tauri app between the screens and the vault engine.
+//! Petalock's desktop shell (spec §4): the Tauri app between the screens and the vault engine.
 #![deny(unsafe_code)]
 
 // The window's file-drop protection is WebView2's and the lock signals are Windows' own (`os::win`); there is no
@@ -20,6 +20,8 @@ mod export_csv;
 pub mod jobs;
 mod launch;
 pub mod locations;
+#[cfg(test)]
+mod names;
 pub mod open;
 mod os;
 pub mod outputs;
@@ -87,7 +89,7 @@ pub fn run() {
 
 /// A second copy of the app was started and handed its arguments over (`args`, the program first): the window comes
 /// forward as it always has (`bring_forward`), unless the arguments are exactly `--hidden`, which is Windows starting
-/// Lockbox at sign-in while it already runs: that does nothing, and in particular never shows the window. Any other
+/// Petalock at sign-in while it already runs: that does nothing, and in particular never shows the window. Any other
 /// arguments change nothing.
 fn second_launch(args: &[String], bring_forward: impl FnOnce()) {
     if !startup::hidden_launch(args) {
@@ -158,18 +160,18 @@ fn route_signals(signals: mpsc::Receiver<os::OsSignal>, shell: Arc<Shell>) -> io
     let (presses, pressed) = mpsc::channel::<()>();
     let reader = Arc::clone(&shell);
     thread::Builder::new()
-        .name("lockbox-save-shortcut".into())
+        .name("petalock-save-shortcut".into())
         .spawn(move || {
             for () in pressed {
                 reader.save_shortcut_pressed();
             }
         })?;
     thread::Builder::new()
-        .name("lockbox-signal-route".into())
+        .name("petalock-signal-route".into())
         .spawn(move || {
             for signal in signals {
                 #[cfg(debug_assertions)]
-                eprintln!("Lockbox debug: Windows signal {signal:?}");
+                eprintln!("Petalock debug: Windows signal {signal:?}");
                 match signal {
                     // The reader thread ends with the router's, which drops `presses`.
                     os::OsSignal::SaveShortcut => {
@@ -179,7 +181,7 @@ fn route_signals(signals: mpsc::Receiver<os::OsSignal>, shell: Arc<Shell>) -> io
                 }
             }
             #[cfg(debug_assertions)]
-            eprintln!("Lockbox debug: Windows signals stopped");
+            eprintln!("Petalock debug: Windows signals stopped");
         })?;
     Ok(())
 }
@@ -187,7 +189,7 @@ fn route_signals(signals: mpsc::Receiver<os::OsSignal>, shell: Arc<Shell>) -> io
 /// The auto-lock's timer: a tick every [`autolock::TICK`] for as long as the app runs.
 fn start_ticks(shell: Arc<Shell>) -> io::Result<()> {
     thread::Builder::new()
-        .name("lockbox-autolock".into())
+        .name("petalock-autolock".into())
         .spawn(move || {
             loop {
                 thread::sleep(autolock::TICK);
@@ -545,7 +547,7 @@ mod tests {
         assert_eq!(brought(&[]), 1);
         assert_eq!(brought(&["lockbox.exe", "--hidden"]), 0);
         assert_eq!(
-            brought(&["C:\\Program Files\\Lockbox\\lockbox.exe", "--hidden"]),
+            brought(&["C:\\Program Files\\Petalock\\lockbox.exe", "--hidden"]),
             0
         );
     }

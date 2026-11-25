@@ -288,6 +288,7 @@ pub(crate) fn new_file_ref(length: u64, name: String, media_type: String) -> Fil
 
 /// The authenticated data of every chunk of this file (spec 5.1, 5.5).
 fn chunk_ad(vault_id: &VaultId, fref: &FileRef) -> Vec<u8> {
+    // Fixed format label, not the product name: never renamed, or every stored file stops opening.
     encode_ad(
         "lockbox/chunk",
         &[

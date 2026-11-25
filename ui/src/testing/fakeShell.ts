@@ -69,7 +69,7 @@ export interface FakeVault {
    */
   markUnreadable?: boolean;
   /**
-   * The vault's details were changed outside Lockbox: every unlock reports `header_mac_mismatch` until `accept_header`,
+   * The vault's details were changed outside Petalock: every unlock reports `header_mac_mismatch` until `accept_header`,
    * and the engine refuses a new recovery key meanwhile, as `HeaderGuard` does.
    */
   headerChanged?: boolean;
@@ -90,7 +90,7 @@ export interface FakeVault {
    * `used` is a copy an item still attaches: it waits in the quarantine for the next unlock, and is neither listed nor deleted.
    */
   orphans?: { file_id: string; length: number; stored: number; used?: boolean }[];
-  /** A newer Lockbox made this vault: unlock is refused as `unsupported_version`. */
+  /** A newer Petalock made this vault: unlock is refused as `unsupported_version`. */
   newer?: boolean;
   /** A long change holds the vault past the short wait: a search reports it in `busy` and gives none of its items. */
   busy?: boolean;
@@ -123,7 +123,7 @@ export const WRONG_PASSWORD = { code: "core", kind: "wrong_password" };
 export const LOCKED = { code: "locked" };
 /** What the shell sends when the vault list file can't be read (`registry.rs`: `Damaged { what: "vault list" }`). */
 export const VAULT_LIST_DAMAGED = { code: "core", kind: "damaged", what: "vault list" };
-/** What the engine sends when a newer Lockbox made the vault (`unsupported_version`). */
+/** What the engine sends when a newer Petalock made the vault (`unsupported_version`). */
 export const NEWER_VAULT = { code: "core", kind: "unsupported_version" };
 /** What the engine refuses a new recovery key with while a changed header waits to be accepted (`HeaderGuard::check`). */
 const ACCEPT_FIRST = { code: "core", kind: "invalid_input", what: "accept the header change first" };
@@ -1088,7 +1088,7 @@ const MAX_FILE = 256 * 1024 ** 3;
 /** What the shell sends for a choice that was used, dropped, expired or is another session's. */
 export const CHOICE_EXPIRED = { code: "choice_expired" };
 /** The backup the picker chooses when a test names none, how big it is, and the password it was made with (the day it was made, not today's). */
-export const BACKUP_NAME = "My vault 2026-10-02.lockbox-backup";
+export const BACKUP_NAME = "My vault 2026-10-02.petalock-backup";
 const BACKUP_SIZE = 1_288_490_188;
 export const BACKUP_PASSWORD = "from-the-day-it-was-made";
 /** The backup the fake's backups write, as named and kept for 22c. */
@@ -1108,7 +1108,7 @@ export interface FakeOlderCopy {
   last_written?: string | null;
   size?: number | null;
   password?: string;
-  /** Its details were changed outside Lockbox: opening it answers `header_changed: true`. */
+  /** Its details were changed outside Petalock: opening it answers `header_changed: true`. */
   headerChanged?: boolean;
 }
 
@@ -1508,7 +1508,7 @@ export function installFakeShell(
     return {
       name: found.name,
       made: found.made,
-      folder_shown: `${found.usual ? "C:\\Users\\Someone\\Lockbox Vaults" : "D:\\Vaults"}\\${found.name}`,
+      folder_shown: `${found.usual ? "C:\\Users\\Someone\\Petalock Vaults" : "D:\\Vaults"}\\${found.name}`,
       usual: found.usual,
       replaces_existing: found.replaces,
     };
@@ -3035,7 +3035,7 @@ export function installFakeShell(
         // And parks the backup it wrote for 22c's Test this backup, which opens it with this vault's password (the one it was made with).
         nextToken += 1;
         const token = nextToken.toString(16).padStart(32, "0");
-        const name = `${vault.name ?? "Vault"} ${BACKUP_DAY}.lockbox-backup`;
+        const name = `${vault.name ?? "Vault"} ${BACKUP_DAY}.petalock-backup`;
         testHeld.set(token, { name, size: view.size_on_disk, password: vault.password ?? PASSWORD });
         lastBackup = { name, choice: token };
         return tagged(sent.session, sent.generation, { Done: { ...view, test: { choice: token, file_name: name, size: view.size_on_disk } } });
@@ -3798,7 +3798,7 @@ export function installFakeShell(
    * held (or is a test's) is `choice_expired`, before anything; only then does the job begin (launch-scoped, kind `open_backup`, `lockbox://job-started` before
    * the answer). It ends when the answer is decided (held until released with `holdOpen`): a Cancel answers `cancelled`; a lock epoch that moved meanwhile
    * refuses `locked` (the choice went with it); a wrong password is `wrong_password`; a damaged backup is `damaged`; else the backup is a read-only session whose
-   * name is the file's name without `.lockbox-backup`, and the choice is used up. A wrong password, damage and a Stop keep the choice. A backup that is open
+   * name is the file's name without `.petalock-backup`, and the choice is used up. A wrong password, damage and a Stop keep the choice. A backup that is open
    * already is answered as it is (and its choice is used up too).
    */
   const openBackupCommand = (args: unknown): Promise<unknown> => {
@@ -3869,7 +3869,7 @@ export function installFakeShell(
         }
         const vault: FakeVault = {
           id: -(nextSession + 1),
-          name: held.name.replace(/\.lockbox-backup$/, ""),
+          name: held.name.replace(/\.petalock-backup$/, ""),
           password: held.password,
           readOnly: true,
           kind: "backup",

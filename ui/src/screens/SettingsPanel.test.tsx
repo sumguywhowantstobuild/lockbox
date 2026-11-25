@@ -226,7 +226,7 @@ test("a_refused_save_puts_the_control_back_to_the_saved_value", async () => {
   shell.refuseNext("set_settings", { code: "invalid_input", what: "idle time" });
   await pick("Lock after idle", "15 minutes");
   const alert = await screen.findByRole("alert");
-  expect(alert.textContent).toBe("Lockbox can't use that. Check what you entered and try again.");
+  expect(alert.textContent).toBe("Petalock can't use that. Check what you entered and try again.");
   expect(screen.getByRole("combobox", { name: "Lock after idle" }).textContent).toContain("5 minutes");
   expect(shell.settings().idle_minutes).toBe(5);
   expect(debugState().settings?.idle_minutes).toBe(5);
@@ -236,7 +236,7 @@ test("a_refused_save_puts_the_control_back_to_the_saved_value", async () => {
   fireEvent.click(screen.getByRole("switch", { name: "Keep out of screen capture" }));
   await vi.waitFor(() => {
     expect(screen.getAllByRole("alert").map((line) => line.textContent)).toContain(
-      "Lockbox couldn't reach that folder or file. Check that the drive is connected, then try again.",
+      "Petalock couldn't reach that folder or file. Check that the drive is connected, then try again.",
     );
   });
   expect(screen.getByRole<HTMLInputElement>("switch", { name: "Keep out of screen capture" }).checked).toBe(true);
@@ -406,8 +406,8 @@ test("start_with_windows_that_cannot_be_read_back_says_it_does_not_know", async 
   });
   fireEvent.click(within(panel).getByRole("switch", { name: "Start with Windows" }));
   const alert = await within(panel).findByRole("alert");
-  expect(alert.textContent).toBe("Lockbox couldn't change Start with Windows. Try again.");
-  expect(within(panel).getByText("Lockbox can't tell right now whether it starts with Windows.")).toBeTruthy();
+  expect(alert.textContent).toBe("Petalock couldn't change Start with Windows. Try again.");
+  expect(within(panel).getByText("Petalock can't tell right now whether it starts with Windows.")).toBeTruthy();
   expect(within(panel).queryByText("Starts locked, by the clock.")).toBeNull();
   // It is not shown as the old state or as the one asked for, and it can be pressed again.
   expect(within(panel).getByRole<HTMLInputElement>("switch", { name: "Start with Windows" }).checked).toBe(false);
@@ -602,11 +602,11 @@ test("says_which_vault", async () => {
   for (const words of [
     "Theme",
     "Save shortcut",
-    "Works while Lockbox is by the clock.",
+    "Works while Petalock is by the clock.",
     "Start with Windows",
     "Starts locked, by the clock.",
     "Keep out of screen capture",
-    "Screenshots, recordings and screen sharing show Lockbox blank. Windows doesn't guarantee this.",
+    "Screenshots, recordings and screen sharing show Petalock blank. Windows doesn't guarantee this.",
   ]) {
     expect(within(panel).getByText(words), words).toBeTruthy();
   }
@@ -625,7 +625,7 @@ test("shows_the_version", async () => {
   const about = within(panel).getByRole("heading", { level: 3, name: "About" }).closest("section");
   expect(about).not.toBeNull();
   expect(await within(about as HTMLElement).findByText("Version 1.2.3")).toBeTruthy();
-  expect(within(about as HTMLElement).getByText("Lockbox")).toBeTruthy();
+  expect(within(about as HTMLElement).getByText("Petalock")).toBeTruthy();
   expect(commands("app_info")).toEqual([{}]);
 });
 
@@ -1010,10 +1010,10 @@ test("start_with_windows_already_on_is_shown_on", async () => {
 test("start_with_windows_turned_off_in_windows_shows_off_and_says_where_to_turn_it_on", async () => {
   const { panel, container } = await opened({ startup: { on: true, turned_off_in_windows: true } });
   const toggle = within(panel).getByRole<HTMLInputElement>("switch", { name: "Start with Windows" });
-  // Off, whatever Lockbox's own entry says, and the hint says whose switch it is.
+  // Off, whatever Petalock's own entry says, and the hint says whose switch it is.
   expect(toggle.checked).toBe(false);
   expect(
-    within(panel).getByText("Turned off in Windows' Startup settings. Turn Lockbox on there to start it with Windows."),
+    within(panel).getByText("Turned off in Windows' Startup settings. Turn Petalock on there to start it with Windows."),
   ).toBeTruthy();
   expect(within(panel).queryByText("Starts locked, by the clock.")).toBeNull();
   // Pressing it changes nothing here: Windows' own switch wins, and a screen reader is told the control is not available.
@@ -1045,7 +1045,7 @@ test("start_with_windows_refused_says_so_and_goes_back", async () => {
   shell.refuseNext("set_startup", STARTUP_FAILED);
   fireEvent.click(within(panel).getByRole("switch", { name: "Start with Windows" }));
   const alert = await screen.findByRole("alert");
-  expect(alert.textContent).toBe("Lockbox couldn't change Start with Windows. Try again.");
+  expect(alert.textContent).toBe("Petalock couldn't change Start with Windows. Try again.");
   expect(within(panel).getByRole<HTMLInputElement>("switch", { name: "Start with Windows" }).checked).toBe(false);
   // Trying again works, and the refusal goes.
   fireEvent.click(within(panel).getByRole("switch", { name: "Start with Windows" }));
@@ -1060,16 +1060,16 @@ test("start_with_windows_that_cannot_be_read_says_so", async () => {
   shell.refuseNext("get_startup", STARTUP_FAILED);
   fireEvent.click(within(side()).getByRole("button", { name: "Settings" }));
   const panel = await screen.findByRole("complementary", { name: "Settings" });
-  expect((await within(panel).findByRole("alert")).textContent).toBe("Lockbox couldn't change Start with Windows. Try again.");
+  expect((await within(panel).findByRole("alert")).textContent).toBe("Petalock couldn't change Start with Windows. Try again.");
   expect(within(panel).getByRole<HTMLInputElement>("switch", { name: "Start with Windows" }).checked).toBe(false);
 });
 
 test("recovery_key_words_follow_the_capture_setting", async () => {
   const unfinished: FakeVault[] = [{ id: 7, name: "My vault", items: [], unconfirmed: true }];
-  // On (the default): the screen says screenshots won't work, since Lockbox stays out of screen capture.
+  // On (the default): the screen says screenshots won't work, since Petalock stays out of screen capture.
   await unlocked({ vaults: unfinished });
   await screen.findByRole("heading", { level: 1, name: "Finish your recovery key" });
-  expect(screen.getByText(/Screenshots won't work, because Lockbox stays out of screen capture\./)).toBeTruthy();
+  expect(screen.getByText(/Screenshots won't work, because Petalock stays out of screen capture\./)).toBeTruthy();
   expect(screen.queryByText(/readable copy/)).toBeNull();
   cleanup();
   resetStoreForTests();

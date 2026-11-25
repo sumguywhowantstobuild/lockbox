@@ -1,4 +1,4 @@
-//! The icon by the clock, where the window hides to when it is closed (design: "The window"). Menu: Open Lockbox,
+//! The icon by the clock, where the window hides to when it is closed (design: "The window"). Menu: Open Petalock,
 //! Lock all, Quit.
 
 use std::sync::Arc;
@@ -17,14 +17,17 @@ const OPEN: &str = "open";
 const LOCK_ALL: &str = "lock_all";
 const QUIT: &str = "quit";
 
+/// What the tray icon says when it is pointed at.
+pub const TOOLTIP: &str = "Petalock";
+
 /// The menu, in order: each item's id and its words on screen.
-const ITEMS: [(&str, &str); 3] = [
-    (OPEN, "Open Lockbox"),
+pub(crate) const ITEMS: [(&str, &str); 3] = [
+    (OPEN, "Open Petalock"),
     (LOCK_ALL, "Lock all"),
     (QUIT, "Quit"),
 ];
 
-/// Puts Lockbox's icon by the clock, with its menu: a left click opens the window, a right click opens the menu. The setup hook calls it
+/// Puts Petalock's icon by the clock, with its menu: a left click opens the window, a right click opens the menu. The setup hook calls it
 /// and ends the app when it fails: with no icon, a hidden window could never be reached again (fail closed).
 pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let Some(icon) = app.default_window_icon() else {
@@ -32,7 +35,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     };
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon.clone())
-        .tooltip("Lockbox")
+        .tooltip(TOOLTIP)
         .menu(&menu(app)?)
         // The menu opens on the right button only: the left one opens the window.
         .show_menu_on_left_click(false)
@@ -58,7 +61,7 @@ pub fn remove<R: Runtime>(app: &AppHandle<R>) {
     drop(app.remove_tray_by_id(TRAY_ID));
 }
 
-/// What a click on the icon chooses: the left button, on its release, is "Open Lockbox" (Windows' convention). Any other
+/// What a click on the icon chooses: the left button, on its release, is "Open Petalock" (Windows' convention). Any other
 /// click chooses nothing (the right button opens the menu on its own).
 fn click_chooses(button: MouseButton, state: MouseButtonState) -> Option<&'static str> {
     match (button, state) {
@@ -67,7 +70,7 @@ fn click_chooses(button: MouseButton, state: MouseButtonState) -> Option<&'stati
     }
 }
 
-/// Open Lockbox, Lock all and Quit, in that order.
+/// Open Petalock, Lock all and Quit, in that order.
 fn menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let items = ITEMS
         .iter()
@@ -364,7 +367,7 @@ mod tests {
     }
 
     /// A left click on the icon opens the window (Windows' convention), on the release of the button, through the same
-    /// menu choice as "Open Lockbox" and so the same way back; no other click does anything, and a right click is left
+    /// menu choice as "Open Petalock" and so the same way back; no other click does anything, and a right click is left
     /// to the menu.
     #[test]
     fn left_click_opens_the_window_through_the_open_item() {
@@ -373,7 +376,7 @@ mod tests {
         assert_eq!(click_chooses(Left, Up), Some(OPEN));
         assert_eq!(
             ITEMS[0].0, OPEN,
-            "Open Lockbox is not the item the click uses"
+            "Open Petalock is not the item the click uses"
         );
         for (button, state) in [
             (Left, Down),
@@ -411,7 +414,7 @@ mod tests {
         remove(app.handle());
     }
 
-    /// The menu is exactly Open Lockbox, Lock all and Quit, in that order, with ids the handler knows.
+    /// The menu is exactly Open Petalock, Lock all and Quit, in that order, with ids the handler knows.
     #[test]
     fn tray_menu_is_open_lock_all_and_quit() {
         let app = mock_builder()
@@ -433,7 +436,7 @@ mod tests {
         assert_eq!(
             seen,
             [
-                ("open".to_owned(), "Open Lockbox".to_owned()),
+                ("open".to_owned(), "Open Petalock".to_owned()),
                 ("lock_all".to_owned(), "Lock all".to_owned()),
                 ("quit".to_owned(), "Quit".to_owned()),
             ]

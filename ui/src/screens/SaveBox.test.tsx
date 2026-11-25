@@ -751,7 +751,7 @@ test("a_name_the_shell_refuses_is_marked_and_the_box_stays", async () => {
   typeName(panel, "9 bad name");
   fireEvent.click(saveButton(panel));
   const alert = await within(panel).findByRole("alert");
-  expect(alert.textContent).toBe("That isn't a name Lockbox can use for a key. Use letters, digits and underscores (_) only, and don't start with a digit.");
+  expect(alert.textContent).toBe("That isn't a name Petalock can use for a key. Use letters, digits and underscores (_) only, and don't start with a digit.");
   expect(nameBox(panel).getAttribute("aria-invalid")).toBe("true");
   expect(shell.captureSlot()).not.toBeNull();
   // Nothing typed at all is asked for before anything is sent.
@@ -883,7 +883,7 @@ test("a_folder_that_is_gone_says_so_and_the_box_stays", async () => {
   vault.items = stored().filter((item) => item.id !== FOLDER_2);
   fireEvent.click(saveButton(panel));
   // The shell said not found, but the copy is still waiting: it was the folder.
-  expect((await within(panel).findByRole("alert")).textContent).toBe("Lockbox can't find that. It may have been moved or deleted.");
+  expect((await within(panel).findByRole("alert")).textContent).toBe("Petalock can't find that. It may have been moved or deleted.");
   expect(screen.getByRole("complementary", { name: PAGE_WORDS })).toBe(panel);
   expect(shell.captureSlot()).not.toBeNull();
 });
@@ -955,7 +955,7 @@ test("shortcut_taken_notice_shows", async () => {
       made.setLaunchNotices([{ kind: "shortcut_taken" }]);
     },
   });
-  const words = "Ctrl+Shift+L is used by another app, so the save shortcut is off. Close that app and restart Lockbox to use it.";
+  const words = "Ctrl+Shift+L is used by another app, so the save shortcut is off. Close that app and restart Petalock to use it.";
   // On the lock screen, as the other launch notices are, and again in the vault once it opens, until it is closed.
   expect(await screen.findByText(words)).toBeTruthy();
   await expectNoAxe(container);
@@ -970,7 +970,7 @@ test("shortcut_not_set_notice_shows", async () => {
   act(() => {
     shell.tell({ kind: "shortcut_not_set" });
   });
-  const words = "The save shortcut couldn't be turned on. Restart Lockbox to try again.";
+  const words = "The save shortcut couldn't be turned on. Restart Petalock to try again.";
   expect(await screen.findByText(words)).toBeTruthy();
   // Not the "taken" words: it is never called taken for another reason.
   expect(screen.queryByText(/used by another app/)).toBeNull();
@@ -2459,7 +2459,7 @@ test("a_chosen_open_vault_that_starts_waiting_on_a_step_keeps_the_choice_and_off
 });
 
 test("switching_to_a_chosen_vault_that_waits_on_a_step_shows_no_save_controls", async () => {
-  // Archive's details were changed outside Lockbox (Ask 3): it opens waiting, behind the window.
+  // Archive's details were changed outside Petalock (Ask 3): it opens waiting, behind the window.
   await openAll([{ id: 7, name: "My vault", items: withKey() }, { id: 9, name: "Archive", items: sampleItems(), headerChanged: true }], [], "My vault");
   await press({ text: COPIED });
   const panel = await boxPanel();

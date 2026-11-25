@@ -92,6 +92,7 @@ impl Argon2Params {
     fn time_one_run(&self) -> Option<Duration> {
         let start = Instant::now();
         let mut out = [0u8; 32];
+        // Fixed label of the timing run, not the product name; it is never stored, and is kept as it was.
         argon2id_raw(
             b"lockbox calibration",
             &[0u8; 16],

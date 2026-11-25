@@ -1,19 +1,19 @@
 # Security
 
-Lockbox is a work in progress and **has not been independently audited**. Don't store real passwords in it yet. This
-file says what Lockbox is built to protect, what it does not protect, how it encrypts, and every limit we know about.
+Petalock is a work in progress and **has not been independently audited**. Don't store real passwords in it yet. This
+file says what Petalock is built to protect, what it does not protect, how it encrypts, and every limit we know about.
 The requirements R1–R7 are defined in the
 [design spec](docs/design/2026-10-07-lockbox-design.md#security-requirements-v1).
 
 ## Reporting a vulnerability
 
 Please report it privately, not in a public issue: on this repository's **Security** tab choose **Report a
-vulnerability** (GitHub private vulnerability reporting). Say what you found and how to reproduce it. Lockbox is a
+vulnerability** (GitHub private vulnerability reporting). Say what you found and how to reproduce it. Petalock is a
 one-person project, so there is no promised response time. There is no release yet; reports apply to the latest code.
 
-## What Lockbox protects against
+## What Petalock protects against
 
-Lockbox keeps everything on your own PC, in one folder per vault. It is built so that:
+Petalock keeps everything on your own PC, in one folder per vault. It is built so that:
 
 - **A copy of the vault folder is useless without the password or recovery key (R1).** Someone who steals the folder (a
   stolen disk, a copied folder, a stolen backup) learns only the vault's name, the settings used to slow down password
@@ -33,10 +33,10 @@ Lockbox keeps everything on your own PC, in one folder per vault. It is built so
   the test that damages a whole backup also checks that no error names the vault, its IDs, an item title or a file
   name.
 
-## What Lockbox does not protect against
+## What Petalock does not protect against
 
-- **Malware on your PC while a vault is unlocked.** It can read whatever Lockbox can read. A program running as you can
-  also start Lockbox with WebView2's debugging settings and read what the window shows; Lockbox's end-to-end tests
+- **Malware on your PC while a vault is unlocked.** It can read whatever Petalock can read. A program running as you can
+  also start Petalock with WebView2's debugging settings and read what the window shows; Petalock's end-to-end tests
   drive the real app this way.
 - **Someone who has your password or recovery key.**
 - **A weak password.** The core insists on at least 12 characters when a password is set, but a guessable password is
@@ -51,13 +51,13 @@ Lockbox keeps everything on your own PC, in one folder per vault. It is built so
 - **Old data a restore leaves behind.** The vault a restore replaces stays beside it until you delete it (see "A
   restore keeps the vault it replaced" under "Honest limits").
 - **Rollback and deleted item files.** An attacker who can write to the folder can put back an older valid copy of an
-  item, or delete an item file, and Lockbox will not notice (R7, spec 6.6). Files that lose their item are set aside,
+  item, or delete an item file, and Petalock will not notice (R7, spec 6.6). Files that lose their item are set aside,
   not deleted. An authenticated manifest (a tamper-proof list of every file) for the live vault is left for the future
   sync design. A backup already has one: restore and "test a backup" check every entry against it, so no entry of a
   backup can be swapped for an older one (an older backup as a whole still opens).
 - **Copies the operating system makes.** Windows may write secrets to the pagefile (memory it parks on disk), the
   hibernation file (memory saved when the PC hibernates), crash dumps (memory saved when a program crashes) or the print
-  spooler (the queue of print jobs), and Lockbox cannot control that. Use full-disk encryption (BitLocker on Windows Pro
+  spooler (the queue of print jobs), and Petalock cannot control that. Use full-disk encryption (BitLocker on Windows Pro
   and above; "Device encryption" on supported Home PCs). Deleted files on an SSD are not guaranteed to be erased.
 - **Copies made by the interface and other programs.** Text typed or shown in the app's window passes through the
   webview's memory (WebView2, a browser engine), which cannot be wiped as reliably as Rust's. Files you open with
@@ -70,7 +70,7 @@ Lockbox keeps everything on your own PC, in one folder per vault. It is built so
 The Rust core (Plans 1 and 2), the desktop shell (Plan 3), the daily-use screens (4A) and the backup, restore, files and
 long-job screens (4B) and the vault and password screens (4C: change password, forgot password, a new recovery key,
 several vaults open, a new vault, rename, remove and add back) exist, and so do the last screens (4D: export, emptying
-the trash, Help, and the notice when Lockbox can't start). If you
+the trash, Help, and the notice when Petalock can't start). If you
 lose both the password and the recovery key, nothing opens the vault, or a backup made since you last changed them.
 
 | Requirement | State |
@@ -79,7 +79,7 @@ lose both the password and the recovery key, nothing opens the vault, or a backu
 | R2 Integrity | Built: every key slot, item and file chunk is authenticated; the header has a MAC (a tamper-evident stamp); a backup carries a MAC-protected list of its contents, and restore checks every entry against it |
 | R3 Guessing cost | Built: settings enforced and bounded, calibrated at creation |
 | R4 No plaintext written except on request | Built: plaintext is written only for "Save a copy" and "Save all files" (all of a folder's files, none replacing an existing file), to a place you choose, and for "Open", into a folder only you can reach. A crash can leave a hidden partial copy until the next launch (see "Honest limits"). Backup, restore and copying an item between vaults never write plaintext. The recovery key's PDF and a folder's keys saved as a `.env` file are written like "Save a copy", through the same journaled writer (see "Printing the recovery key"); an export (a CSV in Bitwarden's layout, after the current password is checked in the same call) is written the same way |
-| R5 No secrets in logs and errors | Built in the core and the shell: errors reaching the page carry fixed text and numbers only. There is no logging; debug builds print each Windows signal's name, and a removed drive's letter mask, and nothing else. When Lockbox can't start, its notice has the same fixed words for every cause, and Lockbox never shows the cause (with any path or name in it); WebView2's own error box, outside Lockbox, may name its data folder before that notice |
+| R5 No secrets in logs and errors | Built in the core and the shell: errors reaching the page carry fixed text and numbers only. There is no logging; debug builds print each Windows signal's name, and a removed drive's letter mask, and nothing else. When Petalock can't start, its notice has the same fixed words for every cause, and Petalock never shows the cause (with any path or name in it); WebView2's own error box, outside Petalock, may name its data folder before that notice |
 | R6 Locking stops access | Built in the shell (see "Locking" below). The page's half (clearing what it shows) is built with the daily-use screens (4A): the bridge drops stale answers, and the page's store drops a vault's list, open item, shown values, typed text, the rows read from a pasted `.env` (its text goes to Rust at once and never stays in the page) and the save box when the vault it would save to locks, or every vault does (a lock of another vault leaves it) |
 | R7 Documented limits | This file |
 
@@ -88,7 +88,7 @@ lose both the password and the recovery key, nothing opens the vault, or a backu
 The shell sits between the screens and the engine. The screens run in a webview, and we treat what runs there as less
 trusted than Rust.
 
-- **Permissions.** Each Lockbox command has its own permission, and one capability grants them to the main window only.
+- **Permissions.** Each Petalock command has its own permission, and one capability grants them to the main window only.
   The page's only other permissions are listening to and un-listening from events. It has no file, shell, HTTP, opener or
   dialog permissions, and a test pins the exact set.
 - **Content Security Policy.** Scripts, styles, images and fonts come only from the app itself (images also from `data:`).
@@ -100,14 +100,14 @@ trusted than Rust.
 - **Paths.** Commands take IDs and values, never paths. Rust opens every file dialog, so a chosen path never comes from
   the page. Paths go to the page as text, for showing only and never accepted back, in four cases: a restore that cannot
   finish (its notice, and the question before dismissing it), the folder a restore will use, the folder Save all files
-  is about to write to (and later saved to), and a readable file Lockbox saved where you chose (the recovery key's PDF,
+  is about to write to (and later saved to), and a readable file Petalock saved where you chose (the recovery key's PDF,
   a saved `.env`, an export). An export's answer carries only counts, the titles of items whose values hold line breaks
   (already shown in the vault), that folder and a Show in Explorer handle (a token, dropped as Save all's is: by Done, a
   lock of that vault or five minutes); no exported value reaches the page. Show in Explorer checks, as it is pressed,
   that the saved folder is still a folder and not a link, and refuses otherwise (a program already running as you could
   still swap it in the instant before Explorer opens it). Stored links are opened from Rust,
-  and only for `http` and `https`. Help, and the notice when Lockbox can't start, open one fixed `https` address (the
-  guide), held in Rust; the Help command takes no input. Lockbox itself makes no network call.
+  and only for `http` and `https`. Help, and the notice when Petalock can't start, open one fixed `https` address (the
+  guide), held in Rust; the Help command takes no input. Petalock itself makes no network call.
 - **A backup picked to be tested.** "Test a backup" asks for the file first and holds its path in Rust under a one-time
   token; the page gets the token, the file's name and its size, never the path, and the path is in no error or event.
   The held pick belongs to no vault: locking one vault leaves it, and a lock of all vaults, an idle lock, Windows
@@ -115,7 +115,7 @@ trusted than Rust.
   new pick, and the page forgetting it when the panel closes. A token that is unknown, used, expired or of another kind
   answers "choice expired", and a lock that comes while the picker is open or the test runs answers "locked" and holds
   nothing. The held pick holds no password and no key: the credential is typed again with each try, so a wrong password
-  keeps the file picked and nothing else. A backup Lockbox has just written is held the same way, so "Test this backup"
+  keeps the file picked and nothing else. A backup Petalock has just written is held the same way, so "Test this backup"
   needs no picker. Testing reads the backup and writes nothing.
 - **A backup picked to be opened read-only.** "Open a backup" is held exactly as a backup picked to be tested is (a token,
   the file's name and size, never the path; the same lifetime and the same refusals), as a kind of choice of its own: a
@@ -211,7 +211,7 @@ trusted than Rust.
   stops that job and no other, and a lock stops all. A restore past its swap has no Stop.
 - **The app does not start** if it cannot listen for Windows lock and sleep.
 
-## How Lockbox encrypts
+## How Petalock encrypts
 
 Everything comes from well-reviewed libraries. We wrote no cryptography ourselves, only the small encoding around
 it (IDs, the extra context each encryption is bound to, base64). Exact versions are pinned in `Cargo.lock`.
@@ -224,7 +224,7 @@ it (IDs, the extra context each encryption is bound to, base64). Exact versions 
 - **Recovery key:** 256 random bits, shown as 24 words from the BIP39 English list, with an 8-bit typo check. The key
   is derived from it with HKDF-SHA256 (a standard way to derive keys from a secret), crates `hkdf` and `sha2`. The
   earlier 52-character form is no longer accepted; it was never released. The 24 words look like a crypto wallet's
-  recovery phrase, which malware and scams hunt for, so every screen and PDF that shows it is headed "Lockbox recovery
+  recovery phrase, which malware and scams hunt for, so every screen and PDF that shows it is headed "Petalock recovery
   key, not a crypto wallet phrase". Keep a saved copy off this PC. A password change, a recovery (forgot password) and a
   new recovery key do not change the vault key. Someone with an old copy of the vault's details (the header: an earlier
   copy of the folder, or an old backup) and its old password or old recovery key can read the vault's current and future
@@ -248,7 +248,7 @@ in the code with a `shortcut:` comment.
 
 ### Review status
 
-- **Not independently audited.** No independent security expert has audited Lockbox, and none is planned (spec 11).
+- **Not independently audited.** No independent security expert has audited Petalock, and none is planned (spec 11).
   *Accepted:* the project's answer is tests, a written walk-through of this file against the code before each release,
   and honesty about what is not covered.
 
@@ -260,7 +260,7 @@ in the code with a `shortcut:` comment.
   vault takes longer. *Accepted:* the target is under 3 s for 5 000 items, the cleanup resumes at the next unlock, and
   nothing is delivered.
 - **IPC buffers are not wiped.** Typed passwords arrive and revealed values leave as JSON text inside Tauri's message
-  buffers, which Lockbox does not own. The fields Rust parses them into are wiped when they are dropped; a password kept
+  buffers, which Petalock does not own. The fields Rust parses them into are wiped when they are dropped; a password kept
   for a question waiting for your answer lives until the answer, the five-minute limit or a lock of all vaults, and one
   typed before a file or folder picker lives until that picker closes, even past a lock (nothing is done with it then).
   The one box of "Test a backup" (and of "Open a backup") holds a password or a recovery key: Rust reads the text as a recovery key first and,
@@ -278,26 +278,26 @@ in the code with a `shortcut:` comment.
   and away from monitors that honour them (`CanIncludeInClipboardHistory`, `CanUploadToCloudClipboard`,
   `ExcludeClipboardContentFromMonitorProcessing`). The text is written last, so if any format cannot be set the password
   never reaches the clipboard and the copy fails. These formats are a request: a program that ignores them, or one that simply reads the clipboard, can still get the password
-  while it is there. Lockbox clears it after the delay (10 to 300 seconds, default 30), at a lock of its vault and at
+  while it is there. Petalock clears it after the delay (10 to 300 seconds, default 30), at a lock of its vault and at
   close, and only if the copy's own random tag is still there, so a later copy of yours is left alone. Another program
-  holding the clipboard open delays the clear: Lockbox keeps trying while it runs, and at close it tries until its 2 s
-  deadline, so a password can stay behind after a normal exit if the clipboard stays busy. If Lockbox is killed, or the PC
+  holding the clipboard open delays the clear: Petalock keeps trying while it runs, and at close it tries until its 2 s
+  deadline, so a password can stay behind after a normal exit if the clipboard stays busy. If Petalock is killed, or the PC
   loses power, before the clear, the password also stays until something replaces it. *Accepted:* this is how the
   clipboard works on Windows, and you asked for the copy.
-- **"Open" writes a decrypted copy to disk.** It goes in `%LOCALAPPDATA%\Lockbox\open\<random>\`, a folder only your
+- **"Open" writes a decrypted copy to disk.** It goes in `%LOCALAPPDATA%\Petalock\open\<random>\`, a folder only your
   Windows user can reach, read-only, and only after the whole file has verified. Edits are not saved back. The copy
   carries Windows' internet mark, so Office blocks its macros and Windows warns as for a download; to use macros, use
   "Save a copy". Types that can run code ask first, judged on the cleaned-up name and on Windows' own opinion of the type. Copies
   go at the lock, at close and at the next launch, and a file another program holds open cannot be deleted until it lets
-  go: Lockbox reports it and keeps trying. Deleted files can still be recovered from the disk, and copies the other
-  program makes (autosaves, recent-file caches, temp files) are outside Lockbox's reach. *Accepted:* opening a file in
+  go: Petalock reports it and keeps trying. Deleted files can still be recovered from the disk, and copies the other
+  program makes (autosaves, recent-file caches, temp files) are outside Petalock's reach. *Accepted:* opening a file in
   another program needs a file on disk; full-disk encryption covers the rest.
 - **"Save all files" writes many decrypted copies at once, and never replaces a file.** From a folder's menu, it saves
   every stored file of every live item in that folder (a file item's own file and every attachment) into a folder you
-  pick, which Lockbox opens itself: the picker's title says how many unencrypted copies are coming before any is written,
+  pick, which Petalock opens itself: the picker's title says how many unencrypted copies are coming before any is written,
   and the page is shown the folder's path as text but never sends a path back (it sends names' positions, a folder ID
   and a token). The checks are the ones for "Save a
-  copy": a damaged output journal blocks it, Lockbox's own state folder and any vault's folder are refused, a
+  copy": a damaged output journal blocks it, Petalock's own state folder and any vault's folder are refused, a
   cloud-synced folder asks first, and free space for the whole batch is checked first, with the numbers; every check but the
   cloud question (which was answered before) runs again when the job starts, and so does the check that the folder still holds
   exactly the files that were listed. Each file is decrypted once into a hidden temp beside its destination, checked whole, and then moved
@@ -308,26 +308,26 @@ in the code with a `shortcut:` comment.
   characters is cut (the extension is kept), and a file whose names up to (999) are all taken is skipped and listed. A Stop,
   a lock, a full drive or any failure leaves the files already saved where they are and nothing of the one in progress; a
   damaged file is named and the rest go on. The summary says in so many words that the copies aren't encrypted, to delete
-  them and empty the Recycle Bin when you are done, and it offers Show in Explorer through a handle Lockbox holds (never a
+  them and empty the Recycle Bin when you are done, and it offers Show in Explorer through a handle Petalock holds (never a
   path from the page). The handle goes when the summary closes, at a lock of that vault, at Lock all, Windows locking or
   sleep, at close and after five minutes. *Accepted:* these are copies you asked to have in plaintext; once saved, they
-  are ordinary files that nothing in Lockbox protects or tracks, and a cloud folder you said yes to will upload them.
+  are ordinary files that nothing in Petalock protects or tracks, and a cloud folder you said yes to will upload them.
 - **What the launch sweep deletes.** Every temp plaintext file is recorded in `pending-outputs.json` (by its random temp
-  path, never the original name) before it is created. At launch, an entry is deleted only if it has Lockbox's own temp
-  name (`.<16 hex>.lockbox-partial`, `.<16 hex>.lockbox-backup-partial`) or is a folder directly inside `open\`, or is the
-  hidden folder a recovery key PDF is printed in (`.<16 hex>.lockbox-partial-folder`, beside the place you saved to: the
+  path, never the original name) before it is created. At launch, an entry is deleted only if it has Petalock's own temp
+  name (`.<16 hex>.petalock-partial`, `.<16 hex>.petalock-backup-partial`) or is a folder directly inside `open\`, or is the
+  hidden folder a recovery key PDF is printed in (`.<16 hex>.petalock-partial-folder`, beside the place you saved to: the
   PDF is a new file inside a new folder, since WebView2 refuses to write over an existing hidden file), and only
   if no link is anywhere along its path. That PDF folder is never emptied by the sweep: it removes the journaled file
   first, then the folder only if it is empty (never a recursive delete), so a folder that holds anything else is left on
   disk and dropped from the list. Anything else is dropped from the list and left on disk. An entry on a drive that
-  is not connected is kept for later. A damaged journal blocks new decrypted output until you let Lockbox set it aside;
+  is not connected is kept for later. A damaged journal blocks new decrypted output until you let Petalock set it aside;
   after that, any "Save a copy" or "Save all files" temp files it listed are no longer swept and may need deleting by hand (they are hidden,
   named as above, and beside the place you saved to). The launch also lists `open\` itself, damaged journal or not, and removes folders named exactly 32 lowercase hex under the
   same no-link rule. The check runs again before each delete attempt, but it is a check followed by a delete, not one step:
   a program already running as you could swap something in between, and only a victim carrying one of those names could be hit.
   *Accepted:* such a program can already delete your files.
 - **State files can be edited by code running as you.** `vaults.json`, `settings.json`, `vault-state.json` and
-  `pending-outputs.json` in `%LOCALAPPDATA%\Lockbox\` are not authenticated, only size-capped and strictly parsed. Such a
+  `pending-outputs.json` in `%LOCALAPPDATA%\Petalock\` are not authenticated, only size-capped and strictly parsed. Such a
   program could add a vault to the list, raise the idle time or clipboard delay to their limits (a value out of range
   gives the defaults), turn capture protection off or change the save shortcut (`settings.json`; a shortcut the
   Settings screen would refuse, or any other value out of range, gives the defaults), remove a vault's "recovery key not
@@ -350,7 +350,7 @@ in the code with a `shortcut:` comment.
   rename, password change or new recovery key here writes this copy's header over a change the other copy made, so that
   change is undone: a password or recovery key set on the other copy stops working, and the one it replaced works again
   (a leaked password that was changed there opens the vault again; someone who no longer has the replaced one is locked
-  out). Nothing unsigned is ever trusted: this needs a genuine change made by Lockbox on
+  out). Nothing unsigned is ever trusted: this needs a genuine change made by Petalock on
   the other copy. *Accepted:* v1 does not
   support these folders, and the warning says so. A vault brought to a
   new computer ("Move to a new computer") keeps the settings calibrated on the PC that made it, and the old computer's
@@ -362,39 +362,39 @@ in the code with a `shortcut:` comment.
 - **Windows' lock signals are tested on one PC.** It has S3 sleep only; Modern Standby is on the pre-release list for
   another laptop. *Accepted for now:* the app is not released.
 - **Browser shortcuts and menus are off, but only as far as WebView2 offers.** The window is built hidden, and shows only
-  after WebView2 confirms its browser keys and default context menu are off; if it can't confirm, Lockbox stops. Tested on
+  after WebView2 confirms its browser keys and default context menu are off; if it can't confirm, Petalock stops. Tested on
   2026-11-06: Ctrl+P, F12, Ctrl+Shift+I, F5, Ctrl+R, Ctrl+U and right-click open nothing, while Ctrl+F, copy and paste still
-  reach the page. Lockbox prints only through its own code (the recovery key's screen), and anything printed
+  reach the page. Petalock prints only through its own code (the recovery key's screen), and anything printed
   can pass through the print spooler (see above). *Accepted:* this is WebView2's documented switch; there is no stronger one.
-- **Printing the recovery key.** "Save as PDF" has WebView2 print the page as it shows into a file Lockbox then moves to
-  the place you picked, by "Save a copy"'s rules (a vault folder and Lockbox's own folder are refused, a cloud folder asks
+- **Printing the recovery key.** "Save as PDF" has WebView2 print the page as it shows into a file Petalock then moves to
+  the place you picked, by "Save a copy"'s rules (a vault folder and Petalock's own folder are refused, a cloud folder asks
   first, an existing file is replaced only after Windows asked, and nothing is moved after a lock). "Print" shows a short
-  list of your printers inside Lockbox and sends the page straight to the one you pick, with no Windows print window,
-  and Lockbox writes no file there. Either way the page goes to Windows' print spooler (the queue of print jobs), which
-  may keep its own copy until the job is done, and Lockbox cannot clear that. Printers that make a file through a save box
+  list of your printers inside Petalock and sends the page straight to the one you pick, with no Windows print window,
+  and Petalock writes no file there. Either way the page goes to Windows' print spooler (the queue of print jobs), which
+  may keep its own copy until the job is done, and Petalock cannot clear that. Printers that make a file through a save box
   of their own (Microsoft Print to PDF, the XPS writer, any printer on the file prompt's port, OneNote's printers and fax
-  printers) are not offered, and Lockbox refuses to print to them even by name: such a box would belong to another
-  program and would keep the page after a lock, which Lockbox cannot close. A third-party PDF printer on a port of its
-  own looks like a real printer to Windows and is offered; it is yours to avoid. A lock that comes before Lockbox hands
+  printers) are not offered, and Petalock refuses to print to them even by name: such a box would belong to another
+  program and would keep the page after a lock, which Petalock cannot close. A third-party PDF printer on a port of its
+  own looks like a real printer to Windows and is offered; it is yours to avoid. A lock that comes before Petalock hands
   the page to WebView2 stops the print (checked right before the call, on the thread that makes it). WebView2 cannot
-  cancel a print, so after a lock Lockbox waits up to 30 seconds for the printer to answer; a print it already sent is the printer's, and a
+  cancel a print, so after a lock Petalock waits up to 30 seconds for the printer to answer; a print it already sent is the printer's, and a
   PDF it made is deleted then (with no answer the file and its hidden folder stay in the output journal and the next
   launch removes them). *Accepted:* the PDF is a copy you asked to have in plaintext, it is hidden until it is moved,
   and the sweep removes any leftover; a print the printer has already taken cannot be recalled.
 - **Staying out of screen capture isn't a guarantee.** It is on unless you turn it off in Settings ("Keep out of screen
-  capture", saved in `settings.json`, applied to the open window at once). Each time the window shows, Lockbox asks
+  capture", saved in `settings.json`, applied to the open window at once). Each time the window shows, Petalock asks
   Windows to leave it out of screenshots, recordings, screen sharing and Recall (`WDA_EXCLUDEFROMCAPTURE`), before it
-  shows. Tested on 2026-11-06: screenshots and Snipping Tool leave Lockbox out, and Magnifier still shows it in Full
+  shows. Tested on 2026-11-06 (when the app was still called Lockbox): screenshots and Snipping Tool leave Lockbox out, and Magnifier still shows it in Full
   screen, Docked and Lens, judged by eye, since a screenshot of Magnifier loses Lockbox too. Not tested yet: Quick Assist
   and remote desktop (pre-release list). If asking fails, the window still shows. Microsoft says there's no guarantee, and
   a camera can always get round it. With it off, the recovery key screens say that a screenshot would be a readable copy.
   *Accepted:* this is the strongest request Windows offers, and turning it off is your choice.
-- **Start with Windows writes one value, and Windows' own setting wins.** Turning it on adds Lockbox's own value to the
-  current user's `Run` key (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, named `Lockbox` as the installer's
-  uninstaller removes it), holding the program's full path in quotes and `--hidden`. Lockbox starts in the tray, with
+- **Start with Windows writes one value, and Windows' own setting wins.** Turning it on adds Petalock's own value to the
+  current user's `Run` key (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, named `Petalock` as the installer's
+  uninstaller removes it), holding the program's full path in quotes and `--hidden`. Petalock starts in the tray, with
   every vault locked and the window hidden; a start with that argument and nothing else only ever changes whether the
-  window shows (other arguments are ignored, and a second copy started that way does nothing). Lockbox reads Windows' own
-  Startup setting for it (`...\Explorer\StartupApproved\Run`) and never writes it: if you turned it off there, Lockbox
+  window shows (other arguments are ignored, and a second copy started that way does nothing). Petalock reads Windows' own
+  Startup setting for it (`...\Explorer\StartupApproved\Run`) and never writes it: if you turned it off there, Petalock
   says so. *Accepted:* a program running as you can already write that key, and could start itself the same way; the
   value holds no secret.
 - **No isolation frame.** Tauri's isolation pattern (a sandboxed frame that checks every IPC message) is not used (Ariel's
@@ -423,7 +423,7 @@ in the code with a `shortcut:` comment.
 
 ### Memory and wiping
 
-Lockbox wipes the secrets it owns when it is done with them, but wiping is best effort. Anyone who can read the
+Petalock wipes the secrets it owns when it is done with them, but wiping is best effort. Anyone who can read the
 memory of the running program (malware, a debugger, a crash dump) is already past what a password manager can stop.
 
 - **Wiping cannot reach every copy.** Rust moves values and grows buffers, which can leave earlier copies behind, and
@@ -449,7 +449,7 @@ memory of the running program (malware, a debugger, a crash dump) is already pas
   and notes are wiped. *Accepted:* these are less secret than passwords, and wiping only the search copy would protect
   nothing.
 - **The cipher keeps its own copy of the key while it works.** Each encrypt or decrypt call builds a cipher object that
-  holds a copy of the key (spec 5.6). Lockbox builds it for that one operation and drops it straight away, and the
+  holds a copy of the key (spec 5.6). Petalock builds it for that one operation and drops it straight away, and the
   `chacha20poly1305` library's wiping option is on. *Accepted:* the copy lives only for the call and is wiped when
   dropped.
 - **Other libraries' internals.** How well Argon2, SHA-2 and HMAC wipe their own working memory is up to those
@@ -458,7 +458,7 @@ memory of the running program (malware, a debugger, a crash dump) is already pas
   rather than continue without randomness; a command running on a worker thread then answers "cancelled", and a clipboard
   copy's tag simply fails that copy. *Accepted:* continuing would be worse.
 - **Unlocking uses a lot of memory for a moment.** Argon2id deliberately takes 64 to 256 MiB while it runs for a vault
-  Lockbox creates, and Lockbox will read a vault file that asks for up to 1 GiB, so unlocking such a file can use that
+  Petalock creates, and Petalock will read a vault file that asks for up to 1 GiB, so unlocking such a file can use that
   much. The 200 MB "flat memory" check for big files was measured with the smallest accepted setting, not a typical
   vault's. *Accepted:* the memory cost is what makes guessing expensive, and the upper limit stops a damaged or hostile
   file from asking for more.
@@ -466,14 +466,14 @@ memory of the running program (malware, a debugger, a crash dump) is already pas
 ### Crashes, power cuts and half-finished writes
 
 - **Power loss is assumed safe, not proven.** Windows renames over an existing file are relied on to be atomic (all or
-  nothing), though Microsoft does not formally document it. Crashes of Lockbox itself are tested by simulation (the
+  nothing), though Microsoft does not formally document it. Crashes of Petalock itself are tested by simulation (the
   tests make each step fail in turn and rebuild the folder a crash would leave); no process is actually killed and power
   cuts are not tested (spec 6.2). *Accepted:* it is how nearly all software saves files on Windows.
 - **A crash during "Save a copy", "Save all files", an export or saving a `.env` can leave a decrypted file behind.** The
-  copy is first built in a hidden temp file (`.<random>.lockbox-partial`) beside the destination (for "Save all files", one at a time, each
+  copy is first built in a hidden temp file (`.<random>.petalock-partial`) beside the destination (for "Save all files", one at a time, each
   recorded before it exists, the ones already saved being whole files under their own names), and moved into place only
   when it is whole (for a stored file, after every chunk has been checked). If
-  Lockbox crashes, is killed or loses power while that temp file exists, it stays there as plaintext (part of the file
+  Petalock crashes, is killed or loses power while that temp file exists, it stays there as plaintext (part of the file
   you chose to export), until the next launch: the output journal, a record of temp files, lets the launch sweep delete
   it (see "What the launch sweep deletes"). A leftover on a drive that is not connected waits until it is. A normal
   failure or cancel tries to remove the temp file at once; if that fails, it stays recorded for the sweep. *Accepted:* it
@@ -481,7 +481,7 @@ memory of the running program (malware, a debugger, a crash dump) is already pas
 - **A stale `.bak` after a half-failed password change.** The header is stored twice (`vault.json` and
   `vault.json.bak`). If a password change writes the first and fails on the second, the change reports an error and
   `.bak` still holds the old password slot. Until the next unlock, either password opens the vault, and whichever is
-  used first wins: the new password makes Lockbox repair `.bak`, but the old password opens from `.bak` and then copies
+  used first wins: the new password makes Petalock repair `.bak`, but the old password opens from `.bak` and then copies
   it over `vault.json`, silently undoing the password change (the only sign is the "opened from the backup header"
   notice, and the new password stops working). There is no key rotation. *Accepted:* it follows from the two-copy
   design; and because a password change does not change the vault key, an old password plus any older copy of the header
@@ -495,7 +495,7 @@ memory of the running program (malware, a debugger, a crash dump) is already pas
   recovery is lost (the password still works and a new recovery key can be made). The app leaves its "recovery key not
   confirmed" note, so the next unlock offers a new key straight away. *Accepted:* it needs two failures in a
   row; the other write order could leave a vault with no working recovery key at all.
-- **A new recovery key can be lost if the process dies right after writing it.** If Lockbox is killed after both header
+- **A new recovery key can be lost if the process dies right after writing it.** If Petalock is killed after both header
   files are written but before the caller shows the new recovery key, the old key no longer works and the new one was
   never seen (the password still works and a new recovery key can be made). *Accepted:* a very narrow window, the same
   kind as the "Concurrent vault creation in one folder" case below. The app narrows it: before it makes a key (a new
@@ -513,13 +513,13 @@ memory of the running program (malware, a debugger, a crash dump) is already pas
 - **Header writes are refused while the two copies disagree on a slot.** An unlock checks only the key slot for the
   credential it was given (the password slot after a password unlock, the recovery slot after a recovery unlock). If the
   other slot (the recovery slot after a password unlock, the password slot after a recovery unlock) differs between
-  `vault.json` and `.bak` (for example one copy was damaged), Lockbox cannot tell which is good, so it leaves both files
+  `vault.json` and `.bak` (for example one copy was damaged), Petalock cannot tell which is good, so it leaves both files
   alone and remembers that slot as unverified. Until that slot is replaced, any header write that would copy it over
   the other file is refused with a fixed message ("header copies disagree"). Regenerating the recovery key replaces the
   recovery slot, and changing the password replaces the password slot, so each is allowed when it is the unchecked one,
   and clears the block. *Accepted:* the user may have to replace the unchecked credential first.
-- **A header changed outside Lockbox must be accepted before any other header change.** While the "changed outside
-  Lockbox" warning is pending, changing the password or regenerating the recovery key is refused ("accept the header
+- **A header changed outside Petalock must be accepted before any other header change.** While the "changed outside
+  Petalock" warning is pending, changing the password or regenerating the recovery key is refused ("accept the header
   change first"), and so is renaming the vault, so the authentic `.bak` is never overwritten by the edited header before the user agrees. The
   screen's way to decline is "Lock this vault": nothing is written, and the question comes back at the next unlock.
 - **Both at once.** If the header was changed and a slot is unverified, accepting writes each file with the accepted
@@ -527,29 +527,29 @@ memory of the running program (malware, a debugger, a crash dump) is already pas
   slots, so nothing unchecked is thrown away and no copy is preferred). The consent clears; the slot block stays, and
   replacing that slot (regenerate the recovery key, or change the password) ends it, so the other credential is not
   needed. *Accepted:* until then the two files differ in that slot.
-- **After a failed header write, Lockbox does not trust what it finds.** It reads `vault.json` back and accepts it
+- **After a failed header write, Petalock does not trust what it finds.** It reads `vault.json` back and accepts it
   only if it is exactly the previous header state or the intended one (it does not prove who wrote it; the previous
-  state may itself hold edits made outside Lockbox). Anything else, or a read that fails, means Lockbox cannot
+  state may itself hold edits made outside Petalock). Anything else, or a read that fails, means Petalock cannot
   establish the state, so every later header write on that open vault is refused until the vault is reopened. While two
   copies disagree on a key slot, any failed header write blocks this way without a read-back, because the per-file slots
   cannot be kept in step with a half-written pair; reopening re-reads both files. The original error is still
   reported. *Accepted:* the user must reopen the vault after such a failure; that includes a failed accept when the
   vault was opened from `.bak` and `vault.json` was not yet touched.
 - **No backup while a header question waits for you.** A backup is refused while a header change made outside
-  Lockbox waits to be accepted ("accept the header change first"), while the two header copies disagree on a key slot
+  Petalock waits to be accepted ("accept the header change first"), while the two header copies disagree on a key slot
   ("header copies disagree; replace the unchecked credential first"), and while the header state is unknown after a
   failed header write ("header state unknown; reopen the vault"). *Accepted:* a backup made then would keep a header
   nobody has checked; accepting the change, replacing the unchecked credential or reopening the vault ends it.
   Renaming the vault is refused in the same four cases.
 - **Odd header files read as damaged.** A `vault.json` saved with a byte-order mark (an invisible marker some editors
-  add), or a version number out of range, reads as damaged rather than "update Lockbox", so Lockbox may fall back to
+  add), or a version number out of range, reads as damaged rather than "update Petalock", so Petalock may fall back to
   `.bak` and repair the unreadable file from it. *Accepted:* only a header that passed its checks is ever copied over
   it.
-- **Concurrent vault creation in one folder.** Two Lockbox processes creating vaults in the same parent folder at the
+- **Concurrent vault creation in one folder.** Two Petalock processes creating vaults in the same parent folder at the
   same instant could delete each other's half-built staging folder, and a second process opening a brand-new folder in
   that instant can make the first report an error after the vault was already created (the password still works and
   the recovery key can be regenerated). *Accepted:* it takes two instances at the same moment, and a retry fixes it.
-- **Windows hidden-attribute edge cases.** Lockbox hides its temporary files and un-hides them before moving them into
+- **Windows hidden-attribute edge cases.** Petalock hides its temporary files and un-hides them before moving them into
   place. A few unusual cases are not tested: a file with only the hidden attribute, a failure on a missing file, and
   un-hiding a temp file that is still open (it works with the sharing Rust's standard library uses, but would fail if
   the file were opened more restrictively). *Accepted:* if one went wrong, the write would report an error and clean up
@@ -558,18 +558,18 @@ memory of the running program (malware, a debugger, a crash dump) is already pas
 ### Someone who can already write inside your vault folder
 
 These need a local attacker with write access to the vault folder or to the place you export to, which is outside what
-Lockbox defends.
+Petalock defends.
 
 - **The restore journal can be edited by code running as you.** A restore keeps a small file, the restore journal,
-  in your own profile folder (`%LOCALAPPDATA%\Lockbox`). It records the hidden
+  in your own profile folder (`%LOCALAPPDATA%\Petalock`). It records the hidden
   staging folder and the folders being swapped, so that a crash in the middle can be finished or undone at the next
-  start. Before acting on it Lockbox checks it hard: the paths must be absolute and in the same folder, the names must
+  start. Before acting on it Petalock checks it hard: the paths must be absolute and in the same folder, the names must
   have the exact shapes a restore writes, and each folder it names must be a real folder, not a link, a junction or
   another reparse point that redirects the path. Those checks guard against damage and mistakes. They do not guard
   against a program already running as you that writes a journal on purpose: it could point recovery at a
   staging-shaped folder it chose. *Accepted:* such a program can already read and delete your files, and the checks
   still mean recovery deletes only a folder named `.restore-` plus 32 hex characters.
-- **Swapping the export destination.** Before saving a decrypted copy (or each of a folder's files, for "Save all files"), Lockbox checks that the destination is not
+- **Swapping the export destination.** Before saving a decrypted copy (or each of a folder's files, for "Save all files"), Petalock checks that the destination is not
   inside the vault. A local attacker could swap a folder link into place between that check and the save.
   *Accepted:* the window is tiny and the attacker already has the access to cause harm. The same check, and the same
   accepted window, apply when you save a file out of a backup or a `.before-restore` folder opened read-only: the
@@ -588,11 +588,11 @@ Lockbox defends.
 - **Non-Windows rename race (Android only).** On non-Windows systems "rename without replacing" is a check followed by a
   rename, so a racing outside process could cause a quarantined file to be replaced. Replacing a file there can also
   report failure after the new file is already in place. *Accepted:* the non-Windows code only ships with the Android
-  plan; Windows uses a genuinely atomic call, and the vault lock keeps other Lockbox processes out.
+  plan; Windows uses a genuinely atomic call, and the vault lock keeps other Petalock processes out.
 
 ### Things the format cannot detect
 
-- **No rollback protection for the live vault (spec 6.6).** Described under "What Lockbox does not protect against".
+- **No rollback protection for the live vault (spec 6.6).** Described under "What Petalock does not protect against".
   *Accepted:* it needs the authenticated manifest of the sync design.
 - **Old backups keep old passwords working.** A backup holds the vault's header as it was when the backup was made, so
   a password or recovery key you have changed since keeps opening that backup, and restoring it brings the old
@@ -619,7 +619,7 @@ Lockbox defends.
 - A restore keeps the vault it replaced until you delete it. When a restore replaces a vault, the old one is kept next
   to it as `<folder>.before-restore` (then `-2`, `-3` and so on up to `-99`; past that, a restore over that vault is
   refused until one is deleted), so a bad restore can be undone. That folder is a full copy of the old vault, readable
-  with the old password, and Lockbox never deletes it for you. *Accepted:* deleting it automatically could throw away
+  with the old password, and Petalock never deletes it for you. *Accepted:* deleting it automatically could throw away
   the only good copy; the shell lists these folders, to open read-only or delete.
 - Dismissing a stuck restore (one that recovery cannot finish) while its drive is not connected removes only the
   restore journal. The hidden staging folder (`.restore-` plus 32 hex characters) stays on that drive, and nothing
@@ -639,7 +639,7 @@ Lockbox defends.
   `vault.json` or `vault.json.bak`, so one is never nested inside another. An unrelated file of that name higher up (in
   your profile folder, say) refuses them too. *Accepted:* rare, the error says why, and another folder gets round it.
 - A vault whose two header files are both unreadable cannot be restored in place. Restore cannot tell that its folder
-  is that vault, so it makes a new folder; while the damaged one still has the name Lockbox gave it, that name is
+  is that vault, so it makes a new folder; while the damaged one still has the name Petalock gave it, that name is
   taken, and the restore stops ("destination exists") before writing anything. The restore dialog then offers a new
   folder you name, beside the damaged one (for example `Family-1a2b3c4d (restored)`): the backup is restored there, and
   the damaged folder is left exactly as it was, for you to delete once you no longer need it. A new folder is refused,
@@ -683,7 +683,7 @@ Lockbox defends.
 These are described in the spec but do not exist, so nothing here should be relied on yet: the installer, updates and
 uninstalling (Plan 5). Plans 4A to 4D are built (export, emptying the trash and the list of items in the trash
 for 30 days or more, the list of leftover files with no item that uses them and Delete them all, which asks first and
-sends no file name or path, Help and the guide, the notice when Lockbox can't start, and end-to-end tests on the running app,
+sends no file name or path, Help and the guide, the notice when Petalock can't start, and end-to-end tests on the running app,
 besides first-time setup and the recovery key, unlock, the list, search and signing in, adding and editing logins, keys and notes,
 folders and the trash, `.env` in and out, the save shortcut, stored files, settings, and backing up, testing and
 restoring a backup, older copies, opening a backup read-only, moving a vault to a new computer, adding many files,
@@ -695,23 +695,23 @@ cleanup); to look at a vault or a backup without writing, open it read-only.
 
 These come with the screens of Plans 4A to 4D, which are built ([Plan 4 design](docs/design/2026-11-05-user-interface-design.md)).
 
-- **The save shortcut reads the clipboard once, each time it's pressed.** The only other read is when you ask Lockbox to clear
+- **The save shortcut reads the clipboard once, each time it's pressed.** The only other read is when you ask Petalock to clear
   that value (the save box's tick box, and the same tick box in the paste panel for a `.env` you pasted): after the key is
   saved, it compares what's on the clipboard in one opening and empties it only if it's still the same text (the paste
   panel counts CRLF and LF as one line break), and drops what it read otherwise. The value waits in one wiped
   slot in Rust until it's saved, cancelled or the slot empties (every lock of all vaults, the window's close, idle time even
   with no vault open, Windows lock and sleep, Quit, or a lock of the vault it was handed to); a read still running when
   every vault locks keeps nothing. Clearing it afterwards may not reach a copy Windows clipboard history already
-  took, because a value copied from another app usually carries none of Lockbox's marks. Tested on 2026-11-05: a value copied
+  took, because a value copied from another app usually carries none of Petalock's marks. Tested on 2026-11-05: a value copied
   from Notepad stayed in Win+V after the clear, so clear it from Win+V too (Win+V, then the entry's menu). Another program
-  that empties the clipboard while it is being read can make the text in the box garbled; it can't make Lockbox keep or show
+  that empties the clipboard while it is being read can make the text in the box garbled; it can't make Petalock keep or show
   more than it read.
 - **An export, a saved `.env` and files saved out are readable by anyone who gets them.** They aren't encrypted. An export or a
-  `.env` warns first, and saving a folder's files says so in the folder picker. Lockbox can't protect them or delete them afterwards. Deleting one may leave it in the Recycle Bin, on an SSD, or in a
+  `.env` warns first, and saving a folder's files says so in the folder picker. Petalock can't protect them or delete them afterwards. Deleting one may leave it in the Recycle Bin, on an SSD, or in a
   cloud provider's version history.
 - **Earlier passwords stay in old backups.** They're encrypted like everything else, and dropping one from a login doesn't remove
   it from a backup already made.
-- **Emptying the trash can't be undone, and old backups still hold what it deleted.** Lockbox never empties the trash by
+- **Emptying the trash can't be undone, and old backups still hold what it deleted.** Petalock never empties the trash by
   itself; it asks first, naming how many items go, and deletes nothing if that number changed after it asked. Items
   deleted for good stay in any backup made before (encrypted), and their bytes may stay on the drive (an SSD especially)
   until Windows reuses the space.

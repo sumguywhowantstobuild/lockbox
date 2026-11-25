@@ -1,4 +1,4 @@
-# Presses Lockbox's default save shortcut, Ctrl+Shift+L, as real keyboard input to this session (keybd_event): Windows
+# Presses Petalock's default save shortcut, Ctrl+Shift+L, as real keyboard input to this session (keybd_event): Windows
 # hands a registered hotkey to the app that registered it, whatever window is in front. Takes no arguments and types
 # nothing else. Only for steps that may use this PC's keyboard (on CI, or with LOCKBOX_E2E_PC_FREE=1).
 Add-Type -Namespace LockboxE2e -Name Keys -MemberDefinition @"

@@ -138,7 +138,7 @@ test("open_backup_read_only_takes_a_choice_a_credential_and_a_request_and_answer
 // Plan 4C Task 11: the restore check is a job, so `restore_check` takes the page's `request` beside the choice and the one box's credential.
 test("restore_check_takes_a_choice_a_credential_and_a_request", async () => {
   const api = await import("./api");
-  const answer = { name: "Family", made: null, folder_shown: "Lockbox Vaults", usual: true, replaces_existing: false };
+  const answer = { name: "Family", made: null, folder_shown: "Petalock Vaults", usual: true, replaces_existing: false };
   invoke.mockResolvedValueOnce(answer);
   await expect(api.restoreCheck("a".repeat(32), { password_or_key: "typed" }, 5)).resolves.toEqual(answer);
   expect(invoke).toHaveBeenLastCalledWith("restore_check", { choice: "a".repeat(32), credential: { password_or_key: "typed" }, request: 5 });

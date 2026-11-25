@@ -32,7 +32,7 @@ const NO_PRINTER = "No printer is set up on this PC. Save as PDF instead, or add
  * the element marked `data-print-only`, and this row, its picker, its line and its alert are marked `data-print-hide`
  * inside it.
  *
- * Print opens Lockbox's own printer picker under the buttons (Windows' print window would keep its own copy of the page
+ * Print opens Petalock's own printer picker under the buttons (Windows' print window would keep its own copy of the page
  * past a lock): the printers by name with the default picked, Print and Cancel, or with no printer a sentence and only
  * Cancel. Print sends the page to the one chosen, with no window of Windows' own, and the status line says where it went.
  *

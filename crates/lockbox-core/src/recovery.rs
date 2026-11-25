@@ -10,6 +10,8 @@ use std::fmt;
 use std::sync::LazyLock;
 use zeroize::Zeroizing;
 
+// Fixed format label (it keys the recovery key's derivation), not the product name: never renamed, or every recovery
+// key stops working.
 const INFO: &[u8] = b"lockbox recovery key v1";
 /// Trezor's `python-mnemonic` copy of the BIP39 English list (MIT; see THIRD-PARTY-NOTICES.md): 2,048 sorted words, LF
 /// endings. A test pins its SHA-256.

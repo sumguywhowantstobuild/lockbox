@@ -1,6 +1,6 @@
 # Development setup
 
-Every tool needed to build and check Lockbox, the version used and one line on why.
+Every tool needed to build and check Petalock, the version used and one line on why.
 Never passwords or keys here, only where they're kept.
 
 ## Dev machine (Windows 11)
@@ -35,7 +35,7 @@ Never passwords or keys here, only where they're kept.
 |---|---|---|---|
 | Visual Studio 2022 Build Tools, "Desktop development with C++" | 17.14 · Windows SDK 10.0.26100 | `winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"` (accept the licence) | Rust on Windows needs Microsoft's C++ linker |
 | rustup | 1.29.1 | `winget install --id Rustlang.Rustup` | Installs and switches Rust versions |
-| Rust | 1.99.1 + rustfmt, clippy | `rustup toolchain install 1.99.1 --profile minimal --component rustfmt,clippy` | The language of the Lockbox core; pinned so every machine builds the same |
+| Rust | 1.99.1 + rustfmt, clippy | `rustup toolchain install 1.99.1 --profile minimal --component rustfmt,clippy` | The language of the Petalock core; pinned so every machine builds the same |
 
 Check: a test program builds and runs, outside this repo (`cargo new hello && cargo run --manifest-path hello/Cargo.toml`). `~/.cargo/bin` must be on the user PATH;
 terminals opened before the install need restarting to see `cargo`.
@@ -60,8 +60,8 @@ terminals opened before the install need restarting to see `cargo`.
   compile time, because it would load the dev server. The bridge tests that only exist in that configuration run with
   `cargo test -p lockbox-desktop --locked --features custom-protocol --test ipc`.
 - **Debug builds** print each Windows signal to the console, for checking the signal window by hand.
-- **App state** is in `%LOCALAPPDATA%\Lockbox\` (the vault list, settings, journals, opened copies), and vaults default
-  to `%USERPROFILE%\Lockbox Vaults\`. Test against test vaults only: a debug and a release build share both folders.
+- **App state** is in `%LOCALAPPDATA%\Petalock\` (the vault list, settings, journals, opened copies), and vaults default
+  to `%USERPROFILE%\Petalock Vaults\`. Test against test vaults only: a debug and a release build share both folders.
 - **Real-clipboard checks:** the tests that touch the real clipboard are ignored by default. Run them with
   `cargo test -p lockbox-desktop clipboard -- --ignored`, with nothing else using the clipboard meanwhile.
 - Tauri writes generated schemas to `crates/lockbox-desktop/gen/` on every build; it is git-ignored.

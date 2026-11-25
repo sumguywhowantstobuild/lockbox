@@ -58,6 +58,7 @@ fn slot_ad(
     kdf: Option<&Argon2Params>,
 ) -> Vec<u8> {
     let kdf_bytes = kdf.map(Argon2Params::to_ad_bytes);
+    // Fixed format label, not the product name: never renamed, or every vault stops opening.
     encode_ad(
         "lockbox/slot",
         &[
@@ -113,7 +114,7 @@ pub fn wrap_slot(
     )
 }
 
-/// Refuses a slot written by a newer Lockbox. Call before deriving its key, so a slot that
+/// Refuses a slot written by a newer Petalock. Call before deriving its key, so a slot that
 /// cannot be opened costs no Argon2 run.
 pub fn check_slot_version(slot: &KeySlot) -> Result<()> {
     if slot.slot_version == SLOT_VERSION {

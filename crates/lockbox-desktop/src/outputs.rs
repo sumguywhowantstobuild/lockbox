@@ -1,6 +1,6 @@
-//! The output journal (spec §7.2): every temporary plaintext file Lockbox creates is written down in
+//! The output journal (spec §7.2): every temporary plaintext file Petalock creates is written down in
 //! `pending-outputs.json`, in the state folder, before it exists, and forgotten once it is gone. At launch the
-//! leftovers of a crash or power cut are swept by strict rules, so a tampered journal never makes Lockbox delete
+//! leftovers of a crash or power cut are swept by strict rules, so a tampered journal never makes Petalock delete
 //! anything it did not make.
 //!
 //! `{ "version": 1, "entries": ["<absolute path>", ..] }`: temp paths and "Open" folders only, never an original file
@@ -36,12 +36,12 @@ pub const WHAT: &str = "output journal";
 const REFUSED: CoreError = CoreError::Cancelled;
 
 /// The engine's temp names: `.<16 lowercase hex>` and one of these.
-const TEMP_SUFFIXES: [&str; 2] = [".lockbox-partial", ".lockbox-backup-partial"];
+const TEMP_SUFFIXES: [&str; 2] = [".petalock-partial", ".petalock-backup-partial"];
 
 /// The name of the hidden folder a recovery key's PDF is printed in (WebView2 refuses an existing hidden file, so the file
 /// is a new one inside a new hidden folder): `.<16 lowercase hex>` and this. The launch sweep removes it only when it is
 /// empty, after the journaled file inside it.
-pub(crate) const FOLDER_SUFFIX: &str = ".lockbox-partial-folder";
+pub(crate) const FOLDER_SUFFIX: &str = ".petalock-partial-folder";
 
 /// How many damaged journals [`Outputs::reset`] keeps beside the new one: `pending-outputs.json.damaged-1` to `-99`.
 const MAX_SET_ASIDE: u32 = 99;
@@ -81,7 +81,7 @@ struct JournalFile {
 pub struct Outputs {
     file: PathBuf,
     /// The state folder's `open\` folder, where "Open" copies live ([`OpenFolders`](crate::open::OpenFolders)), as
-    /// Lockbox computes it from the known folder: never a resolved copy of a folder that may lead elsewhere.
+    /// Petalock computes it from the known folder: never a resolved copy of a folder that may lead elsewhere.
     open: PathBuf,
     volumes: Arc<dyn Volumes>,
     edits: Mutex<()>,
@@ -124,11 +124,11 @@ pub(crate) enum Attempt {
 
 /// What the sweep does with one entry.
 enum Swept {
-    /// Lockbox's leftover, deleted: dropped from the journal.
+    /// Petalock's leftover, deleted: dropped from the journal.
     Removed,
     /// Kept for a later launch: its drive is not connected, or it could not be removed yet.
     Kept,
-    /// Not Lockbox's, or already gone: dropped from the journal, nothing deleted.
+    /// Not Petalock's, or already gone: dropped from the journal, nothing deleted.
     Dropped,
     /// A temp folder that holds something: never emptied by the sweep (it deletes no tree). Dropped from the journal
     /// unless a file of its own that stayed is still in it, which keeps it for the next launch.
@@ -237,7 +237,7 @@ impl Outputs {
     }
 
     /// Writes the new "Open" folder `folder` down before it exists, spelled exactly as given: `open\<32 hex>` as
-    /// Lockbox computes it, never resolved, or the sweep would drop the entry. Any failure is returned, and then the
+    /// Petalock computes it, never resolved, or the sweep would drop the entry. Any failure is returned, and then the
     /// folder is never made.
     pub(crate) fn record_open(&self, folder: &Path) -> ShellResult<()> {
         let _edit = lock(&self.edits);
@@ -261,7 +261,7 @@ impl Outputs {
             .is_ok_and(|file_system| file_system.eq_ignore_ascii_case("NTFS"))
     }
 
-    /// The folders directly inside `open\` that are certainly of Lockbox's making, by what is on disk and not by the
+    /// The folders directly inside `open\` that are certainly of Petalock's making, by what is on disk and not by the
     /// journal: each named exactly 32 lowercase hex and, by its own metadata, a plain folder. Files, other names and
     /// links are not listed. None when `open\` is missing or a link leads to it. Each still passes the sweep's full
     /// check before each delete ([`remove_open`](Self::remove_open)).
@@ -303,7 +303,7 @@ impl Outputs {
 
     /// Removes `entry` (an "Open" folder, an engine temp or the PDF's temp folder) by the sweep's rules in at most
     /// `tries` attempts, and forgets it unless it is kept (it could not be removed yet, or its drive is not there):
-    /// whether it is done with. A temp folder that holds anything is left as it is and forgotten: it is not Lockbox's
+    /// whether it is done with. A temp folder that holds anything is left as it is and forgotten: it is not Petalock's
     /// to empty. The journal's lock is not held meanwhile.
     pub(crate) fn remove_leftover(&self, entry: &Path, tries: u32) -> bool {
         match self.sweep_one(entry, tries) {
@@ -330,14 +330,14 @@ impl Outputs {
         }
     }
 
-    /// The launch sweep (spec §7.2): deletes the leftovers the journal lists that are certainly Lockbox's, and only
+    /// The launch sweep (spec §7.2): deletes the leftovers the journal lists that are certainly Petalock's, and only
     /// those. An entry is deleted only when all of these hold, checked again right before every delete attempt:
     /// - its text is an absolute path on a local drive (`C:\`, `\\?\C:\`) or a share (`\\?\UNC\server\share\`),
     ///   then plain names only: no `.`, `..` or empty part, refused as written, before anything normalises it;
-    /// - it is an "Open" folder (its name 32 lowercase hex, directly inside `open\` as Lockbox spells it from the
-    ///   known folder), or an engine temp (`.<16 lowercase hex>.lockbox-partial` or `.lockbox-backup-partial`) whose
+    /// - it is an "Open" folder (its name 32 lowercase hex, directly inside `open\` as Petalock spells it from the
+    ///   known folder), or an engine temp (`.<16 lowercase hex>.petalock-partial` or `.petalock-backup-partial`) whose
     ///   folder, resolved, is the folder written down, or the recovery key PDF's temp folder
-    ///   (`.<16 lowercase hex>.lockbox-partial-folder`, its own folder resolved the same way), which is removed only
+    ///   (`.<16 lowercase hex>.petalock-partial-folder`, its own folder resolved the same way), which is removed only
     ///   while it is empty, after the file journaled inside it, and is never emptied (a folder holding anything else is
     ///   left, and forgotten);
     /// - no folder on its way, from the drive or share down (the state folder and the folders above it included), is
@@ -380,7 +380,7 @@ impl Outputs {
                 Swept::Dropped => {}
                 Swept::NotEmpty => {
                     // Kept while a file of its own is, so the next launch finds both; otherwise it holds only what is
-                    // not Lockbox's: left alone, and forgotten.
+                    // not Petalock's: left alone, and forgotten.
                     let holds_a_kept_file = kept.iter().any(|file| {
                         file.parent()
                             .is_some_and(|inside| same_path(inside, &entry))
@@ -464,7 +464,7 @@ impl Outputs {
             not_safe => return not_safe,
         }
         // A temp (or a PDF's temp folder) is written down with its folder resolved; one spelled any other way is not
-        // Lockbox's.
+        // Petalock's.
         if !open_folder && !fs::canonicalize(folder).is_ok_and(|real| same_path(&real, folder)) {
             return Checked::Drop;
         }
@@ -476,7 +476,7 @@ impl Outputs {
         }
     }
 
-    /// Whether `folder` is the `open\` folder as Lockbox spells it (or that same text in its verbatim form).
+    /// Whether `folder` is the `open\` folder as Petalock spells it (or that same text in its verbatim form).
     fn is_open(&self, folder: &Path) -> bool {
         same_path(folder, &self.open)
             || verbatim(&self.open).is_some_and(|open| same_path(folder, &open))
@@ -716,7 +716,7 @@ fn is_open_name(name: &str) -> bool {
     is_lower_hex(name, 32)
 }
 
-/// An engine temp's name: `^\.[0-9a-f]{16}\.lockbox(-backup)?-partial$`.
+/// An engine temp's name: `^\.[0-9a-f]{16}\.petalock(-backup)?-partial$`.
 fn is_temp_name(name: &str) -> bool {
     let Some(rest) = name.strip_prefix('.') else {
         return false;
@@ -727,7 +727,7 @@ fn is_temp_name(name: &str) -> bool {
     })
 }
 
-/// The PDF's temp folder's name: `^\.[0-9a-f]{16}\.lockbox-partial-folder$`.
+/// The PDF's temp folder's name: `^\.[0-9a-f]{16}\.petalock-partial-folder$`.
 fn is_temp_folder_name(name: &str) -> bool {
     name.strip_prefix('.')
         .and_then(|rest| rest.strip_suffix(FOLDER_SUFFIX))
@@ -860,13 +860,13 @@ mod tests {
     use crate::session::VaultRef;
     use crate::testing::TestShell;
 
-    /// Lockbox's own temp names, as the engine makes them.
-    const TEMP: &str = ".0123456789abcdef.lockbox-partial";
-    const BACKUP_TEMP: &str = ".fedcba9876543210.lockbox-backup-partial";
+    /// Petalock's own temp names, as the engine makes them.
+    const TEMP: &str = ".0123456789abcdef.petalock-partial";
+    const BACKUP_TEMP: &str = ".fedcba9876543210.petalock-backup-partial";
     /// An "Open" folder's name.
     const OPEN: &str = "0123456789abcdef0123456789abcdef";
     /// The hidden folder a recovery key PDF is printed in.
-    const PDF_FOLDER: &str = ".fedcba9876543210.lockbox-partial-folder";
+    const PDF_FOLDER: &str = ".fedcba9876543210.petalock-partial-folder";
 
     /// Always disarms, so a failing test cannot leak a failpoint into the next one on this thread.
     struct Cleanup;
@@ -941,7 +941,7 @@ mod tests {
                 };
                 let journal = shell.outputs.for_call(&shell.sessions, s, g);
                 let backup = vault.backup(
-                    &out.join("family.lockbox-backup"),
+                    &out.join("family.petalock-backup"),
                     &journal,
                     cancel,
                     &NoProgress,
@@ -952,7 +952,7 @@ mod tests {
 
         let seen = seen.borrow();
         assert_eq!(seen.len(), 2, "both steps reached");
-        let suffixes = [".lockbox-partial", ".lockbox-backup-partial"];
+        let suffixes = [".petalock-partial", ".petalock-backup-partial"];
         for ((step, entries, there), suffix) in seen.iter().zip(suffixes) {
             assert_eq!(entries.len(), 1, "{step}: the temp is written down");
             assert!(is_temp_named(&entries[0], suffix), "{step}");
@@ -965,7 +965,7 @@ mod tests {
             "cleared once published"
         );
         assert_eq!(fs::read(out.join("report copy.pdf")).unwrap(), b"report");
-        assert!(out.join("family.lockbox-backup").is_file());
+        assert!(out.join("family.petalock-backup").is_file());
     }
 
     /// A stale temp of each kind and an "Open" folder holding read-only files: all removed, the journal emptied, and
@@ -1070,7 +1070,7 @@ mod tests {
         assert!(docs.join(TEMP).is_file());
         assert_eq!(ts.journal(), Vec::<PathBuf>::new(), "all dropped");
 
-        // `open` itself a junction: whatever is behind it is not Lockbox's.
+        // `open` itself a junction: whatever is behind it is not Petalock's.
         fs::remove_dir(&junction).unwrap();
         fs::remove_dir(&paths.open).unwrap();
         let elsewhere = docs.join("elsewhere");
@@ -1084,7 +1084,7 @@ mod tests {
     }
 
     /// Fix round 1: the state folder itself a junction to the user's own folder, which holds `open\<32 hex>`: the
-    /// entry, spelled as Lockbox spells the state folder, is dropped and what the junction leads to stays.
+    /// entry, spelled as Petalock spells the state folder, is dropped and what the junction leads to stays.
     #[cfg(windows)]
     #[test]
     fn sweep_refuses_a_junctioned_state_root() {
@@ -1111,7 +1111,7 @@ mod tests {
         let paths = ts.shell.paths.clone();
         let local = ts.env.folder(KnownFolder::LocalAppData);
         let victim = ts.folder("victim");
-        let theirs = victim.join("Lockbox").join("open").join(OPEN);
+        let theirs = victim.join("Petalock").join("open").join(OPEN);
         fs::create_dir_all(&theirs).unwrap();
         fs::write(theirs.join("inside.txt"), b"mine").unwrap();
         fs::remove_dir(&local).unwrap();
@@ -1214,7 +1214,7 @@ mod tests {
 
     /// Fix round 1: an "Open" folder named through `open\.\<32 hex>` (which `Path::components` would quietly turn
     /// into `open\<32 hex>`) is dropped by the journal's own sweep, and the folder stays. Then it is a real folder of
-    /// Lockbox's name that nothing lists: the launch's look at `open\` removes it, by its own spelling.
+    /// Petalock's name that nothing lists: the launch's look at `open\` removes it, by its own spelling.
     #[test]
     fn sweep_drops_dotted_entries() {
         let ts = TestShell::new();
@@ -1240,7 +1240,7 @@ mod tests {
     fn crash_leftover_swept_at_launch() {
         let ts = TestShell::new();
         let docs = ts.folder("Documents");
-        let saved = docs.join("Lockbox recovery key.pdf");
+        let saved = docs.join("Petalock recovery key.pdf");
         fs::write(&saved, b"the earlier pdf").unwrap();
         let folder = docs.join(PDF_FOLDER);
         fs::create_dir(&folder).unwrap();
@@ -1317,7 +1317,7 @@ mod tests {
         let target = docs.join("target");
         fs::create_dir(&target).unwrap();
         fs::write(target.join("kept.txt"), b"mine").unwrap();
-        let junction = docs.join(".0011223344556677.lockbox-partial-folder");
+        let junction = docs.join(".0011223344556677.petalock-partial-folder");
         make_dir_link(&junction, &target);
         let real = docs.join("real");
         fs::create_dir_all(real.join(PDF_FOLDER)).unwrap();

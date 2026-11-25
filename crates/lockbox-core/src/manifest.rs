@@ -22,6 +22,7 @@ pub const MAX_MANIFEST_BYTES: usize = 67_108_864;
 /// so it holds at most `MAX_ENTRIES + 1`.
 pub const MAX_ENTRIES: usize = 250_000;
 
+// Fixed format label (it keys the manifest MAC), not the product name: never renamed, or every backup stops opening.
 const MAC_INFO: &[u8] = b"lockbox backup manifest v1";
 /// Bytes of the MAC message hashed between two cancellation checks.
 const MAC_PIECE: usize = 1 << 20;
@@ -63,6 +64,7 @@ fn mac_message(m: &BackupManifest) -> Vec<u8> {
     for (e, size) in m.entries.iter().zip(&sizes) {
         fields.extend([e.path.as_bytes(), size, &e.sha256]);
     }
+    // Fixed format label, not the product name: never renamed, or every backup stops opening.
     encode_ad("lockbox/backup-manifest", &fields)
 }
 
@@ -136,7 +138,7 @@ pub fn serialize_manifest(m: &BackupManifest) -> Vec<u8> {
 }
 
 /// Reads `backup-manifest.json`. Order matters: size and depth first, then only the
-/// version (so a newer backup says "update Lockbox", not "damaged"), then the strict
+/// version (so a newer backup says "update Petalock", not "damaged"), then the strict
 /// parse and the entry cap. Serde's own messages are never passed on.
 pub fn parse_manifest(bytes: &[u8]) -> Result<BackupManifest> {
     const DAMAGED: CoreError = CoreError::Damaged {

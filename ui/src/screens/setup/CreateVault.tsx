@@ -305,7 +305,7 @@ export function CreateVault({ onBack, inside = false }: { onBack: () => void; in
             <span className="fu-lab">{WHERE_IT_LIVES}</span>
             <div className="fu-row">
               <span className="fu-hint fu-where">
-                {chooseFolder ? "You'll pick the folder when you press Continue." : "Kept in your Lockbox Vaults folder on this PC."}
+                {chooseFolder ? "You'll pick the folder when you press Continue." : "Kept in your Petalock Vaults folder on this PC."}
               </span>
               <button
                 type="button"
@@ -322,7 +322,7 @@ export function CreateVault({ onBack, inside = false }: { onBack: () => void; in
         ) : (
           <div className="fu-row">
             <span className="fu-hint fu-where">
-              {chooseFolder ? "You'll pick the folder when you press Create vault." : "Kept in your Lockbox Vaults folder on this PC."}
+              {chooseFolder ? "You'll pick the folder when you press Create vault." : "Kept in your Petalock Vaults folder on this PC."}
             </span>
             <button
               type="button"

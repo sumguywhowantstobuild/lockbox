@@ -285,7 +285,7 @@ export function GeneratorPage({ data }: { data: SessionData }) {
         }
       />
       {seconds === null ? null : (
-        <p className="fhint">{`Clears from the clipboard after ${String(seconds)} seconds, like any password. Lockbox doesn't keep it unless you save it in an item.`}</p>
+        <p className="fhint">{`Clears from the clipboard after ${String(seconds)} seconds, like any password. Petalock doesn't keep it unless you save it in an item.`}</p>
       )}
     </Panel>
   );

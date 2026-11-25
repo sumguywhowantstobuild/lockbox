@@ -427,6 +427,7 @@ mod file_refs {
 
 /// The authenticated data for an item file (spec 5.1).
 fn item_ad(vault_id: &VaultId, item_id: &ItemId) -> Vec<u8> {
+    // Fixed format label, not the product name: never renamed, or every vault stops opening.
     encode_ad(
         "lockbox/item",
         &[&v16(ITEM_VERSION), &vault_id.0, &item_id.0],

@@ -1,5 +1,5 @@
 // Tests for scripts/e2e.mjs and e2e/lib/app.mjs, e2e/lib/folderbox.mjs: the end-to-end runner's own logic. Nothing here
-// starts Lockbox or a driver, and nothing touches the real state folders: every run is handed disposable folders. The
+// starts Petalock or a driver, and nothing touches the real state folders: every run is handed disposable folders. The
 // tests that need the built app are in e2e/real-app.test.mjs, which scripts/e2e.mjs runs. Every comparison counts what
 // it compared and fails on zero.
 
@@ -54,7 +54,7 @@ function makeWorld() {
     writeFileSync(join(locations[key], "MU-note.txt"), `Made-up note for ${key}\n`);
     writeFileSync(join(locations[key], "sub", "MU-data.bin"), Buffer.from(Array.from({ length: 64 }, (_, i) => (i + key.length) % 256)));
   }
-  const journal = join(env.USERPROFILE, "Lockbox Vaults.swap-journal.json");
+  const journal = join(env.USERPROFILE, "Petalock Vaults.swap-journal.json");
   return {
     root,
     locations,
@@ -111,7 +111,7 @@ test("e2e_refuses_to_start_while_lockbox_runs", async () => {
     const run = fakeRun(world, { isRunning: () => true });
     const result = await run.promise;
     assert.equal(result.code, 2, "a refusal ends with code 2");
-    assert.match(result.lines.join("\n"), /Lockbox is running/);
+    assert.match(result.lines.join("\n"), /Petalock is running/);
     assert.deepEqual(run.calls, ["isRunning"], "nothing else ran: no tool check, no build, no swap, no suites");
     assertSamePrints(before, world.prints(), "the state after a refusal");
     assert.equal(existsSync(world.journal), false, "no swap was begun");
@@ -121,7 +121,7 @@ test("e2e_refuses_to_start_while_lockbox_runs", async () => {
 });
 
 test("e2e_refuses_to_start_while_lockbox_runs: a process that really has the program's name", async () => {
-  // A copy of node.exe named like the app, left running: the real Windows question (tasklist) says Lockbox runs.
+  // A copy of node.exe named like the app, left running: the real Windows question (tasklist) says Petalock runs.
   const world = makeWorld();
   const holder = mkdtempSync(join(tmpdir(), "e2e-name-"));
   const imitation = join(holder, "lockbox-desktop.exe");
@@ -129,7 +129,7 @@ test("e2e_refuses_to_start_while_lockbox_runs: a process that really has the pro
   const child = spawn(imitation, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore", windowsHide: true });
   try {
     await sleep(500);
-    assert.equal(state.isLockboxRunning(), true, "the imitation shows to Windows as Lockbox");
+    assert.equal(state.isLockboxRunning(), true, "the imitation shows to Windows as Petalock");
     const calls = [];
     const result = await e2e.runE2e({
       env: {},
@@ -170,7 +170,7 @@ test("a_failed_run_swaps_back", async () => {
           // (the place is empty: the app makes its own folder when it starts)
           mkdirSync(world.locations.state, { recursive: true });
           writeFileSync(join(world.locations.state, "MU-test-state.txt"), "Made-up state the app wrote\n");
-          // what someone who opened Lockbox during the run would have made in the substituted default vault folder
+          // what someone who opened Petalock during the run would have made in the substituted default vault folder
           mkdirSync(world.locations.vaults, { recursive: true });
           writeFileSync(join(world.locations.vaults, "MU-vault-made-by-someone.txt"), "Made-up vault made during the run\n");
           if (how === "throws") throw new Error("a suite failed");
@@ -246,7 +246,7 @@ test("a_swap_that_stops_part_way_is_put_right_by_the_run", async () => {
 
 test("a_run_refused_by_another_runs_swap_leaves_that_swap_alone", async () => {
   // Two local runs can overlap (the build comes before the swap). The second is refused by the first's swap, and its
-  // cleanup must not undo the first's: the first is mid-run, in a gap with no Lockbox process.
+  // cleanup must not undo the first's: the first is mid-run, in a gap with no Petalock process.
   const world = makeWorld();
   try {
     const before = world.prints();

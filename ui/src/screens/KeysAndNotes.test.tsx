@@ -386,7 +386,7 @@ test("a_reveal_the_shell_refuses_says_so_in_words", async () => {
   );
   fireEvent.click(await within(panel).findByRole("button", { name: "Reveal" }));
   const alert = await screen.findByRole("alert");
-  expect(alert.textContent).toContain("Lockbox can't find that.");
+  expect(alert.textContent).toContain("Petalock can't find that.");
   expect(within(panel).queryByRole("textbox", { name: "Key value" })).toBeNull();
   expect(within(panel).getByRole("button", { name: "Reveal" })).toBeTruthy();
 });
@@ -604,7 +604,7 @@ test("a_name_that_is_not_a_variable_name_is_refused_in_words_and_the_form_stays"
   fireEvent.click(within(form).getByRole("button", { name: "Save" }));
   const alert = await within(form).findByRole("alert");
   expect(alert.textContent).toBe(
-    "That isn't a name Lockbox can use for a key. Use letters, digits and underscores (_) only, and don't start with a digit.",
+    "That isn't a name Petalock can use for a key. Use letters, digits and underscores (_) only, and don't start with a digit.",
   );
   expect(inputOf(form, "Name").getAttribute("aria-invalid")).toBe("true");
   // Nothing was made, and the form kept what was typed, to be put right.
@@ -655,7 +655,7 @@ test("a_changed_value_does_not_clear_the_words_save_put_up", async () => {
   await unlocked();
   const form = await openForm("Key");
   const refusedName =
-    "That isn't a name Lockbox can use for a key. Use letters, digits and underscores (_) only, and don't start with a digit.";
+    "That isn't a name Petalock can use for a key. Use letters, digits and underscores (_) only, and don't start with a digit.";
   // Save with no name says so.
   fireEvent.click(within(form).getByRole("button", { name: "Save" }));
   await waitFor(() => {

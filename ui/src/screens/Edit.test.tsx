@@ -492,7 +492,7 @@ test("an_untouched_website_is_kept_and_a_cleared_one_is_sent_empty", async () =>
   saveForm(form);
   // The shell refuses a website that is not a web address, and the form says so in words and stays as it was.
   expect((await within(form).findByRole("alert")).textContent).toBe(
-    "That isn't a web address Lockbox can open. Use one that starts with http:// or https://.",
+    "That isn't a web address Petalock can open. Use one that starts with http:// or https://.",
   );
   expect(inputOf(form, "Website").value).toBe("ftp://files.example");
   expect(shell.edited).toHaveLength(1);
@@ -613,7 +613,7 @@ test("key_edit_changes_value", async () => {
   typeInto(again, "Name", "bad name");
   saveForm(again);
   expect((await within(again).findByRole("alert")).textContent).toBe(
-    "That isn't a name Lockbox can use for a key. Use letters, digits and underscores (_) only, and don't start with a digit.",
+    "That isn't a name Petalock can use for a key. Use letters, digits and underscores (_) only, and don't start with a digit.",
   );
   expect(inputOf(again, "Name").getAttribute("aria-invalid")).toBe("true");
   expect(inputOf(again, "Value").value).toBe(NEW_TOKEN);

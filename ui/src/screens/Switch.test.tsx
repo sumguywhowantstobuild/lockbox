@@ -39,7 +39,7 @@ beforeEach(() => {
 
 const NEW = "MU-new passphrase 2026";
 const TYPED = "MU-typed in the step";
-const ASK16 = "Your new password was saved, but the vault locked before Lockbox could say so. Unlock with the new one.";
+const ASK16 = "Your new password was saved, but the vault locked before Petalock could say so. Unlock with the new one.";
 const ASK9_HEADING = "Opened from the backup copy of this vault's details";
 // The banner's body, under its heading (4C Task 13b).
 const ASK9 = "If you changed this vault's password recently, it may need your previous password. Change the password again now that it's open.";

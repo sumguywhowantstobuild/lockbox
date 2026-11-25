@@ -1,13 +1,13 @@
-# Lockbox
+# Petalock
 
-Lockbox is a password manager and encrypted file vault for Windows that keeps everything on your own PC: no server, no
+Petalock is a password manager and encrypted file vault for Windows that keeps everything on your own PC: no server, no
 cloud. Besides passwords and notes, it is meant to store real files such as client contracts, design files and project
 archives, grouped by client or project. It is an open-source portfolio project, aiming for production standards: tested,
 documented and honest about its limits.
 
 > **Status: work in progress. Not independently audited. Don't store real passwords in it yet.**
 >
-> No independent security expert has audited Lockbox's code or its encryption, and none is planned.
+> No independent security expert has audited Petalock's code or its encryption, and none is planned.
 > There is no app to install yet (see below), and no release.
 
 ## What exists today
@@ -22,7 +22,7 @@ each with progress and a Stop or Cancel, and closing during a long job asks firs
 it, make a new recovery key, keep several vaults open and switch between them, make a new vault from inside the app,
 rename a vault, take one off the list and add it back, and see a vault's folder in Explorer. You can export a vault to a
 CSV file another password manager imports, empty the trash, and open a short [guide](docs/GUIDE.md) from Help; if
-Lockbox can't start, it says so in plain words. End-to-end tests drive the real app through the main paths. Together
+Petalock can't start, it says so in plain words. End-to-end tests drive the real app through the main paths. Together
 the five plans make up Phase 1, the Windows app (see the
 [phases](docs/PRD.md#phases)).
 
@@ -106,11 +106,11 @@ Their memory limits are only checked on Windows.
 
 ## Before you trust it
 
-- Read [SECURITY.md](SECURITY.md): what Lockbox protects against, what it doesn't, and every known limit. It also says
+- Read [SECURITY.md](SECURITY.md): what Petalock protects against, what it doesn't, and every known limit. It also says
   how to report a vulnerability privately.
 - Use full-disk encryption (BitLocker on Windows Pro and above; "Device encryption" on supported Home PCs). Windows may
   copy secrets to the pagefile (memory it parks on disk), the hibernation file and crash dumps (memory copies saved when
-  a program crashes), and Lockbox cannot control that.
+  a program crashes), and Petalock cannot control that.
 - The design asks for five things before a release counts as "reviewed": passing tests in CI, a clean security scan,
   every change reviewed in a pull request, a written walk-through of `SECURITY.md` against the code signed off before
   each release, and this README stating plainly that the code is not independently audited. Today the tests and the scan
@@ -122,8 +122,8 @@ Their memory limits are only checked on Windows.
 
 | Document | What it is |
 |---|---|
-| [docs/GUIDE.md](docs/GUIDE.md) | The short guide for people using Lockbox, which Help opens: first steps, the recovery key, backups, limits |
-| [docs/PRD.md](docs/PRD.md) | What Lockbox is for: users, features, user stories, how success is measured |
+| [docs/GUIDE.md](docs/GUIDE.md) | The short guide for people using Petalock, which Help opens: first steps, the recovery key, backups, limits |
+| [docs/PRD.md](docs/PRD.md) | What Petalock is for: users, features, user stories, how success is measured |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | How the built core and desktop shell are organised, how data flows, and the rules the code keeps |
 | [SECURITY.md](SECURITY.md) | Threat model, the encryption used, honest limits, how to report a vulnerability |
 | [Design spec](docs/design/2026-10-07-lockbox-design.md) | The full technical design: cryptography, file formats, error handling, tests |
@@ -132,6 +132,6 @@ Their memory limits are only checked on Windows.
 
 ## Licence
 
-Lockbox is released under the MIT licence; see [LICENSE](LICENSE). The password generator's word list comes from the
+Petalock is released under the MIT licence; see [LICENSE](LICENSE). The password generator's word list comes from the
 Electronic Frontier Foundation under a Creative Commons licence, and the desktop app uses open-source libraries; credit
 and details are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

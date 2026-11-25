@@ -1,6 +1,6 @@
-# Contributing to Lockbox
+# Contributing to Petalock
 
-Lockbox is a local-only password manager and encrypted file vault for Windows (see [README.md](README.md)). These
+Petalock is a local-only password manager and encrypted file vault for Windows (see [README.md](README.md)). These
 rules apply to everyone who changes the code.
 
 Found a security problem? Don't open a public issue; follow [SECURITY.md](SECURITY.md).
@@ -9,7 +9,7 @@ Found a security problem? Don't open a public issue; follow [SECURITY.md](SECURI
 - **Stack:** Tauri 2 with a Rust core and a React + TypeScript UI. All encryption and keys stay in the Rust core.
 - **Phase 1 targets Windows only.** Keep the Rust core (`crates/lockbox-core`) separate from the app so a later
   Android app can reuse it.
-- **Design first:** what Lockbox does is in [docs/PRD.md](docs/PRD.md), how it's built in
+- **Design first:** what Petalock does is in [docs/PRD.md](docs/PRD.md), how it's built in
   [ARCHITECTURE.md](ARCHITECTURE.md), and the full design (encryption, file formats) in
   [docs/design/2026-10-07-lockbox-design.md](docs/design/2026-10-07-lockbox-design.md).
   A change that alters the design updates those documents in the same pull request. New design specs go in
@@ -69,7 +69,7 @@ because one of them reads the built style sheet (it fails, saying to build first
 [docs/SETUP.md](docs/SETUP.md#security-scan) for what it reports and how to handle a finding.
 
 ## Running the app against a test state
-A local end-to-end or hands-on run must never touch your own Lockbox data. `e2e/lib/state.mjs` renames the app's
+A local end-to-end or hands-on run must never touch your own Petalock data. `e2e/lib/state.mjs` renames the app's
 state folders, its web-view folders and the default vault folder aside (each gets a sentinel file naming the run), puts a
 test state in their place, and renames everything back when the run ends. It finds those folders through Windows
 (and refuses if `%LOCALAPPDATA%`, `%APPDATA%` or `%USERPROFILE%` say something else), refuses while any
@@ -108,10 +108,10 @@ temp folder (never the default vault folder), and the run stops at the first spe
 
 The run keeps the app's window off your screen and puts the real folders back when it ends; if it is cut short,
 `node e2e/lib/state.mjs recover` does. Each spec's test state stays beside the real folders as `<folder>.test-<run>-s<n>`
-(the run prints where; nothing it parked is ever deleted, since someone may have opened Lockbox meanwhile), so delete
-those by hand when you are done. Look inside each one first: if you opened Lockbox while a run had its test state in
+(the run prints where; nothing it parked is ever deleted, since someone may have opened Petalock meanwhile), so delete
+those by hand when you are done. Look inside each one first: if you opened Petalock while a run had its test state in
 place and made a real vault, that vault is in there. Only the run's own folder in the temp folder is deleted. A second run started while one
-is going is refused and leaves the first alone. The run sends one mouse event that moves nothing, because Lockbox's idle
+is going is refused and leaves the first alone. The run sends one mouse event that moves nothing, because Petalock's idle
 lock counts the session's input and would otherwise lock a vault that nobody has touched for minutes. The steps that use
 the clipboard, the keyboard (the save shortcut is pressed as real keys) or the browser (`sign-in` opens a made-up
 `.example` address) run on the GitHub job (which sets `LOCKBOX_E2E_CI=1`; the generic `CI=true` changes nothing here)

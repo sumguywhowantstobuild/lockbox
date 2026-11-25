@@ -332,7 +332,7 @@ fn export_verify_then_publish() {
         .unwrap()
         .to_string_lossy()
         .into_owned();
-    assert!(temp_name.starts_with('.') && temp_name.ends_with(".lockbox-partial"));
+    assert!(temp_name.starts_with('.') && temp_name.ends_with(".petalock-partial"));
     assert_eq!(calls[0].1.parent().unwrap(), out.path());
     drop(calls);
 

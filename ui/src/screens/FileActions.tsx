@@ -97,7 +97,7 @@ function ReplaceQuestion({ name, onNo, onYes }: { name: string | null; onNo: () 
         if (!open) onNo();
       }}
       title={`Replace ${name ?? ""}?`}
-      description="Lockbox will delete the stored file and keep the new one in its place. Backups you already made still hold the old one."
+      description="Petalock will delete the stored file and keep the new one in its place. Backups you already made still hold the old one."
       initialFocus={cancel}
     >
       <Button ref={cancel} onClick={onNo}>

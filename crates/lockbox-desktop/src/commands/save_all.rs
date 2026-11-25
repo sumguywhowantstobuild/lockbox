@@ -1910,7 +1910,7 @@ mod tests {
                         .file_name()
                         .unwrap()
                         .to_string_lossy()
-                        .ends_with(".lockbox-partial")
+                        .ends_with(".petalock-partial")
                 );
                 record.borrow_mut().push(entries[0].exists());
             }),
@@ -1920,7 +1920,7 @@ mod tests {
         assert_eq!(ts.journal(), Vec::<PathBuf>::new());
 
         // A crash after the entry was written and the temp made: the next launch's sweep removes it.
-        let leftover = dest.join(".0123456789abcdef.lockbox-partial");
+        let leftover = dest.join(".0123456789abcdef.petalock-partial");
         fs::write(&leftover, b"half a file").unwrap();
         fs::write(
             &ts.shell.paths.outputs,

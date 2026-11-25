@@ -1,4 +1,4 @@
-//! Non-Windows file operations. Lockbox ships on Windows first; this keeps the crate
+//! Non-Windows file operations. Petalock ships on Windows first; this keeps the crate
 //! building and tested on Linux CI and ready for other platforms.
 
 use std::fs::{self, File, OpenOptions};

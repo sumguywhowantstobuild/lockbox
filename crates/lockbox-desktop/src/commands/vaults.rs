@@ -56,7 +56,7 @@ pub struct UnlockView {
     pub info: SessionInfo,
     /// Opened from `vault.json.bak`, which may still need the previous password.
     pub used_backup_header: bool,
-    /// The header was changed outside Lockbox: `accept_header` once the user agrees.
+    /// The header was changed outside Petalock: `accept_header` once the user agrees.
     pub header_mac_mismatch: bool,
     /// The other header copy could not be repaired; the next unlock tries again.
     pub header_repair_failed: bool,
@@ -478,7 +478,7 @@ impl Shell {
             Ok(dir) => dir,
             Err(e) => {
                 // Not on the list (its write failed, or it would grow too large): removed again, so no vault is left
-                // that Lockbox cannot show and whose recovery key was never shown. The vault closes first, freeing its
+                // that Petalock cannot show and whose recovery key was never shown. The vault closes first, freeing its
                 // `.lock`; only the folder this create made is removed. If that fails too, the vault (or part of
                 // it) stays on disk: `VAULT_NOT_LISTED` tells the user, who knows its password, to add it. Its mark
                 // stays: the key was never shown.
@@ -1012,7 +1012,7 @@ impl Shell {
             })
     }
 
-    /// Accepts a header changed outside Lockbox (after `header_mac_mismatch`), once the user agreed.
+    /// Accepts a header changed outside Petalock (after `header_mac_mismatch`), once the user agreed.
     pub fn accept_header(&self, session: SessionId, generation: u64) -> ShellResult<Tagged<()>> {
         self.sessions
             .write(session, generation, |vault, _| Ok(vault.accept_header()?))
@@ -1478,7 +1478,7 @@ mod tests {
         VaultLock::acquire(dir).is_ok()
     }
 
-    /// Changes the vault's header outside Lockbox (its name, which the header MAC covers), in both copies.
+    /// Changes the vault's header outside Petalock (its name, which the header MAC covers), in both copies.
     fn change_header(dir: &Path) {
         let mut header = parse_header(&fs::read(dir.join(HEADER_FILE)).unwrap()).unwrap();
         header.name = "Renamed".to_owned();
@@ -1574,7 +1574,7 @@ mod tests {
         let entries = ts.shell.registry.entries();
         assert_eq!(entries.len(), 1);
         let (id, dir) = entries[0].clone();
-        let parent = ts.env.folder(KnownFolder::Profile).join("Lockbox Vaults");
+        let parent = ts.env.folder(KnownFolder::Profile).join("Petalock Vaults");
         assert_eq!(
             dir.parent(),
             Some(fs::canonicalize(&parent).unwrap().as_path())
@@ -2037,7 +2037,7 @@ mod tests {
         }
         let entries = ts.shell.registry.entries();
         assert_eq!(entries.len(), MAX_VAULTS);
-        let default = ts.env.folder(KnownFolder::Profile).join("Lockbox Vaults");
+        let default = ts.env.folder(KnownFolder::Profile).join("Petalock Vaults");
         let on_disk: Vec<_> = [vault_folders(&default), vault_folders(&elsewhere)].concat();
         assert_eq!(on_disk.len(), 1, "no vault left off the list");
         let on_disk = fs::canonicalize(&on_disk[0]).unwrap();
@@ -2049,7 +2049,7 @@ mod tests {
     #[test]
     fn create_whose_listing_fails_leaves_nothing() {
         let ts = TestShell::new();
-        let default = ts.env.folder(KnownFolder::Profile).join("Lockbox Vaults");
+        let default = ts.env.folder(KnownFolder::Profile).join("Petalock Vaults");
         failpoint::observe(
             "create.before_rename",
             Box::new(|| failpoint::arm("atomic_write.before_replace")),
@@ -2092,7 +2092,7 @@ mod tests {
     #[test]
     fn vault_left_off_the_list_is_reported() {
         let ts = TestShell::new();
-        let default = ts.env.folder(KnownFolder::Profile).join("Lockbox Vaults");
+        let default = ts.env.folder(KnownFolder::Profile).join("Petalock Vaults");
         let held: Rc<RefCell<Option<fs::File>>> = Rc::default();
         let hold = Rc::clone(&held);
         let parent = default.clone();
@@ -2325,7 +2325,7 @@ mod tests {
     #[test]
     fn a_vault_written_but_not_registered_answers_so() {
         let ts = TestShell::new();
-        let default = ts.env.folder(KnownFolder::Profile).join("Lockbox Vaults");
+        let default = ts.env.folder(KnownFolder::Profile).join("Petalock Vaults");
         let held: Rc<RefCell<Option<fs::File>>> = Rc::default();
         let hold = Rc::clone(&held);
         let parent = default.clone();
@@ -2386,7 +2386,7 @@ mod tests {
         )
         .unwrap();
         let full = json!({ "code": "too_large", "what": "vault list" });
-        let default = ts.env.folder(KnownFolder::Profile).join("Lockbox Vaults");
+        let default = ts.env.folder(KnownFolder::Profile).join("Petalock Vaults");
 
         let answer = heavy(|| ts.shell.create_vault("Family".into(), secret(PW), false));
         assert_eq!(
@@ -2673,7 +2673,7 @@ mod tests {
             heavy(|| ts.shell.create_vault("Work".into(), secret(PW), false)).err(),
             Some(ShellError::Locked)
         );
-        let default = ts.env.folder(KnownFolder::Profile).join("Lockbox Vaults");
+        let default = ts.env.folder(KnownFolder::Profile).join("Petalock Vaults");
         assert!(
             !default.exists() || vault_folders(&default).is_empty(),
             "nothing made"
@@ -2687,7 +2687,7 @@ mod tests {
     fn create_refuses_a_name_windows_would_change() {
         let ts = TestShell::new();
         let local = ts.env.folder(KnownFolder::LocalAppData);
-        ts.dialogs.answer(Some(local.join("Lockbox.")));
+        ts.dialogs.answer(Some(local.join("Petalock.")));
         assert_eq!(
             ts.shell
                 .create_vault("Family".into(), secret(PW), true)
@@ -2766,7 +2766,7 @@ mod tests {
         assert!(!again.data.used_backup_header && !again.data.header_mac_mismatch);
         assert_eq!(again.data.cleanup, CleanupView::default());
 
-        // The header changed outside Lockbox: reported, and accepted through the session.
+        // The header changed outside Petalock: reported, and accepted through the session.
         ts.shell.sessions.lock_all(LockReason::Manual);
         change_header(&dir);
         let tagged = heavy(|| ts.shell.unlock_vault(ts.vault(id), secret(PW))).unwrap();
@@ -3368,7 +3368,7 @@ mod tests {
         let (id, dir, recovery) = registered(&ts);
         let original = headers(&dir);
 
-        // The header changed outside Lockbox after a clean check: the person has not been asked about it.
+        // The header changed outside Petalock after a clean check: the person has not been asked about it.
         let checked = check(&ts, id, &recovery).unwrap();
         assert_eq!(checked.kind, RecoveryCheckKind::Checked);
         change_header(&dir);
@@ -4031,7 +4031,7 @@ mod tests {
     #[test]
     fn no_key_made_if_mark_cannot_be_written() {
         let ts = TestShell::new();
-        let default = ts.env.folder(KnownFolder::Profile).join("Lockbox Vaults");
+        let default = ts.env.folder(KnownFolder::Profile).join("Petalock Vaults");
         let reached = Rc::new(Cell::new(false));
         let seen = Rc::clone(&reached);
         failpoint::observe("create.before_rename", Box::new(move || seen.set(true)));
@@ -4092,7 +4092,7 @@ mod tests {
     fn a_create_that_made_nothing_leaves_no_mark() {
         let ts = TestShell::new();
         // The engine refuses (a name that is only spaces): refused after the mark, so the mark is taken back.
-        let default = ts.env.folder(KnownFolder::Profile).join("Lockbox Vaults");
+        let default = ts.env.folder(KnownFolder::Profile).join("Petalock Vaults");
         let answer = heavy(|| ts.shell.create_vault("   ".into(), secret(PW), false));
         assert!(answer.is_err());
         assert_eq!(state_file(&ts)["vaults"], json!([]));
@@ -4244,7 +4244,7 @@ mod tests {
         let dir = listed_dir(&ts);
         assert!(ts.shell.vault_state.is_unconfirmed(&dir));
         let backups = ts.folder("Backups");
-        let backup = backups.join("Family.lockbox-backup");
+        let backup = backups.join("Family.petalock-backup");
         ts.dialogs.answer(Some(backup.clone()));
         done(
             heavy(|| ts.shell.backup_vault(session, generation, 1))
@@ -4330,7 +4330,7 @@ mod tests {
         assert!(ts.shell.vault_state.is_unconfirmed(&dir));
         // A read-only copy is refused (also in `read_only_copy_with_same_id_never_shows_the_mark`).
         let (session, generation) = ts.open_vault("Work");
-        let backup = ts.folder("Backups").join("Work.lockbox-backup");
+        let backup = ts.folder("Backups").join("Work.petalock-backup");
         ts.dialogs.answer(Some(backup.clone()));
         done(
             heavy(|| ts.shell.backup_vault(session, generation, 1))
@@ -4718,7 +4718,7 @@ mod tests {
     /// partial-write hook of `vault_stays_usable_after_a_partial_header_write`: after `vault.json`, before `.bak`). The
     /// change did happen, so the person must not be told it didn't: the vault is locked and the answer is
     /// `LockedAfterChange` with its registry ID and nothing else, which the page shows as "Your new password was saved, but
-    /// the vault locked before Lockbox could say so." (true). Another vault stays open.
+    /// the vault locked before Petalock could say so." (true). Another vault stays open.
     #[test]
     fn a_change_that_landed_though_its_write_failed_locks_the_vault_and_says_so() {
         let ts = TestShell::new();
@@ -5388,7 +5388,7 @@ mod tests {
         }
 
         // A read-only copy: refused, and nothing is written for it or anything else.
-        let backup = ts.folder("Backups").join("Family.lockbox-backup");
+        let backup = ts.folder("Backups").join("Family.petalock-backup");
         ts.dialogs.answer(Some(backup.clone()));
         done(
             heavy(|| ts.shell.backup_vault(session, generation, 1))
@@ -5590,7 +5590,7 @@ mod tests {
         (tagged.session, tagged.generation)
     }
 
-    /// Edits `vault.json` alone, outside Lockbox.
+    /// Edits `vault.json` alone, outside Petalock.
     fn edit_main(dir: &Path, edit: impl FnOnce(&mut lockbox_core::internals::header::VaultHeader)) {
         let mut header = parse_header(&fs::read(dir.join(HEADER_FILE)).unwrap()).unwrap();
         edit(&mut header);
@@ -5648,7 +5648,7 @@ mod tests {
         assert_eq!(session_line(&ts, session).0, "Family");
 
         // A read-only copy: refused, and nothing is written for it or anything else.
-        let backup = ts.folder("Backups").join("Family.lockbox-backup");
+        let backup = ts.folder("Backups").join("Family.petalock-backup");
         ts.dialogs.answer(Some(backup.clone()));
         done(
             heavy(|| ts.shell.backup_vault(session, generation, 1))
@@ -5853,7 +5853,7 @@ mod tests {
             error
         };
 
-        // A header changed outside Lockbox, not yet accepted.
+        // A header changed outside Petalock, not yet accepted.
         let (_, dir, _) = registered(&ts);
         edit_main(&dir, |h| h.name = "Changed".to_owned());
         let vault = heavy(|| Vault::unlock_with_password(&dir, PW)).unwrap().0;
@@ -6127,7 +6127,7 @@ mod tests {
         // A backup opened read-only: the rename is refused and the list is not touched.
         let (session, generation) = confirmed_session(&ts, "Work");
         let work_id = registry_id(&ts, session);
-        let backup = ts.folder("Backups").join("Work.lockbox-backup");
+        let backup = ts.folder("Backups").join("Work.petalock-backup");
         ts.dialogs.answer(Some(backup.clone()));
         done(
             heavy(|| ts.shell.backup_vault(session, generation, 1))

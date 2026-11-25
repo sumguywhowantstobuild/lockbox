@@ -68,8 +68,8 @@ async function openVaultMenu(vault = "My vault") {
 }
 
 const IDLE_WORDS = "Your items stay encrypted until you enter the password.";
-const FIRST_CLOSE_TITLE = "Lockbox stays by the clock";
-const FIRST_CLOSE_FIRST = "Closing the window locks every vault, and Lockbox keeps running so the save shortcut works.";
+const FIRST_CLOSE_TITLE = "Petalock stays by the clock";
+const FIRST_CLOSE_FIRST = "Closing the window locks every vault, and Petalock keeps running so the save shortcut works.";
 const FIRST_CLOSE_SECOND =
   "To stop it completely, right-click its icon by the clock and choose Quit. This message shows once.";
 

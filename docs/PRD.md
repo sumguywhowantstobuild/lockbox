@@ -1,13 +1,13 @@
-# Lockbox — Product Requirements
+# Petalock — Product Requirements
 
-This is the product side of Lockbox: who it is for, what it does, and how we will know it works. The purpose, phases,
+This is the product side of Petalock: who it is for, what it does, and how we will know it works. The purpose, phases,
 scope and screens below were moved here from the [design spec](design/2026-10-07-lockbox-design.md); the spec
 keeps the engineering side (architecture, cryptography, file formats, error handling, tests). Numbers such as 5.3 or R3
 refer to sections and requirements of that spec.
 
 ## Purpose
 
-Lockbox is a local-only password manager and encrypted file vault for Windows, with no server. Besides passwords and
+Petalock is a local-only password manager and encrypted file vault for Windows, with no server. Besides passwords and
 notes, it stores real files (client contracts, design files, project archives), grouped by client or project. Its
 differentiators are a better UI and file storage organised by client/project.
 
@@ -23,7 +23,7 @@ about its limits.
 - **Someone who builds software or automations** and keeps API keys, bot tokens and integration keys from `.env` files,
   grouped by project, and wants to save one the moment a website shows it.
 - **Anyone judging the project** (it is an open-source portfolio piece): they should find clear documents, tests and an
-  honest account of what Lockbox does not protect against.
+  honest account of what Petalock does not protect against.
 
 Not for v1: people who need browser autofill, sync between devices, a phone app, sharing between people, or import from
 other password managers (see "Not in v1" under [Scope](#scope)).
@@ -44,7 +44,7 @@ deletion conflicts, partially copied files, or two devices changing the password
 conflict handling, deletion tombstones and an authenticated manifest; the container version (spec 6.1) is the upgrade
 path.
 
-**Who the screens are for.** They are designed for strangers who download Lockbox, not only for Ariel (Ariel,
+**Who the screens are for.** They are designed for strangers who download Petalock, not only for Ariel (Ariel,
 2026-11-04). When downloads happen, in v1 or in Phase 2, is still open, and with it the installer's signing and updates.
 
 ## Scope
@@ -60,19 +60,19 @@ path.
 - **Trash:** a deleted item can be restored. Nothing is removed for good unless the user asks, and items there for 30
   days or more are offered for deletion.
 - **Logins:** username, password and website. A website typed without `https://` gets it on save, and can be opened from
-  Lockbox. Each login keeps its last few passwords, encrypted, for when a website rejects a change.
+  Petalock. Each login keeps its last few passwords, encrypted, for when a website rejects a change.
 - **Keys:** an environment-variable name (such as `OPENAI_API_KEY`) and a value protected like a password: hidden until
   revealed, copied with the same clipboard clearing, and the value left out of search.
 - **Files:** pick one or many at once, with real progress and a Cancel button. Adding says the original is still
   unprotected on disk. Open, Save a copy and Replace file on each. All of a folder's files can be saved out together to
   one place, with one progress bar and a Stop button, and an existing file is never overwritten.
-- **Save from the clipboard:** a Windows-wide keyboard shortcut brings Lockbox forward with a save box holding what was
+- **Save from the clipboard:** a Windows-wide keyboard shortcut brings Petalock forward with a save box holding what was
   just copied, hidden. It reads the clipboard only when the shortcut is pressed, and again if asked to clear it, to check
   it still holds the same value. It asks for the vault's password first if the vault is locked. Saving offers to clear the
   clipboard.
 - **`.env` in and out:** paste a whole `.env` to save one key per line; copy all of a project's keys in `.env` form, or
   save them as a `.env` file, with a warning that the saved file is not encrypted.
-- **Tray:** closing the window locks every vault and leaves Lockbox in the system tray so the shortcut keeps working.
+- **Tray:** closing the window locks every vault and leaves Petalock in the system tray so the shortcut keeps working.
   Quit is in the tray menu.
 - **Password generator:** length, character sets, passphrase mode; beside a password field or on its own, with a vault
   unlocked.
@@ -105,13 +105,13 @@ path.
 - **Asking first:** a warning before a file with an unencrypted result goes to a cloud-synced folder (an export, a saved
   `.env`, a recovery key PDF, all of a folder's files), and a question before closing or quitting during a long job.
 - **Help:** a Help link, a short "what to do first" on an empty vault, and a short guide on the landing page covering
-  getting started, moving in, backups and what Lockbox doesn't protect against.
+  getting started, moving in, backups and what Petalock doesn't protect against.
 - **For everyone:** every screen works fully by keyboard and with a screen reader, in Windows high contrast, and in a
   small laptop's window (1093×534).
 
 ### v1.1 (next, after v1)
 Rotate vault key (re-encrypt everything) · password health check · built-in 2FA codes (TOTP) · Windows Hello unlock ·
-delete a vault from inside Lockbox (in v1: remove it from the list, show it in Explorer, and delete the folder by hand) ·
+delete a vault from inside Petalock (in v1: remove it from the list, show it in Explorer, and delete the folder by hand) ·
 the password generator with every vault locked (in v1: unlock a vault first).
 
 ### Not in v1
@@ -139,7 +139,7 @@ Each story is one thing a person can do with a v1 feature. Engineering detail li
 6. **Find things fast.** As a user with many items, I want Ctrl+K or Ctrl+F to search across my unlocked vaults and offer
    quick actions (copy password, copy username, copy key, open a file, new item, lock all), so that I reach an item
    without browsing. (Quick search)
-7. **Stay safe when I walk away.** As a user, I want Lockbox to lock after idle time and when Windows locks, sleeps or
+7. **Stay safe when I walk away.** As a user, I want Petalock to lock after idle time and when Windows locks, sleeps or
    hibernates, and to clear the clipboard after I copy a secret, so that a forgotten session does not leave my data
    open. (Auto-lock, clipboard clearing)
 8. **Recover and change access.** As a user, I want to change my password, set a new one with my recovery key if I
@@ -148,13 +148,13 @@ Each story is one thing a person can do with a v1 feature. Engineering detail li
 9. **Back up and restore.** As a user, I want an encrypted backup of a vault, to restore it later, and to open a backup
    read-only to browse it or copy single items out, so that one bad day does not cost me my data. (Backup and restore,
    read-only open)
-10. **Move a vault.** As a user who moved a vault folder, I want to add it back to Lockbox, so that I do not have to
+10. **Move a vault.** As a user who moved a vault folder, I want to add it back to Petalock, so that I do not have to
     recreate it. (Add existing vault folder)
 11. **Keep a project's keys together.** As someone who builds software, I want to keep each project's API keys under
     their environment-variable names, hidden until I reveal or copy them, so that they are not sitting in plain text
     files. (Keys)
 12. **Save a key the moment I copy it.** As a user who just copied a key from a website, I want to press a shortcut and
-    save it to a project without opening Lockbox first, so that it does not get lost or left on the clipboard. (Save
+    save it to a project without opening Petalock first, so that it does not get lost or left on the clipboard. (Save
     from the clipboard, tray)
 13. **Move a whole `.env`.** As a user setting a project up, I want to paste a whole `.env` in and get all of its keys
     back in the same form, so that I do not handle them one by one. (`.env` in and out)
@@ -164,12 +164,12 @@ Each story is one thing a person can do with a v1 feature. Engineering detail li
     login, so that I am not locked out if the website rejected the change. (Logins)
 16. **Change computers.** As a user with a new PC, I want to be taken from a backup or a copied folder to an unlocked
     vault, one vault at a time, so that I do not have to work out the order. (Move to a new computer)
-17. **Be reminded to back up.** As a user who forgets, I want Lockbox to tell me when a vault has gone 30 days without a
+17. **Be reminded to back up.** As a user who forgets, I want Petalock to tell me when a vault has gone 30 days without a
     backup, so that one bad day does not cost me a month. (Backup reminder)
 18. **Leave.** As a user moving to another password manager, I want my logins, keys and notes in a file it can read, and
     to be told plainly that the file isn't protected, so that I am never trapped. (Export)
 19. **Use it my way.** As a user who works by keyboard, with a screen reader, in high contrast, or on a small laptop, I
-    want every screen to work for me, so that Lockbox is not only for people with big screens and a mouse. (For everyone)
+    want every screen to work for me, so that Petalock is not only for people with big screens and a mouse. (For everyone)
 
 ## Success measures
 
@@ -196,7 +196,7 @@ The security requirements R1–R7 and the definition of a "reviewed" release sta
 reviews cite them by number:
 
 - [Security requirements (v1)](design/2026-10-07-lockbox-design.md#security-requirements-v1)
-- [What "reviewed" means for Lockbox](design/2026-10-07-lockbox-design.md#what-reviewed-means-for-lockbox)
+- [What "reviewed" means for Petalock](design/2026-10-07-lockbox-design.md#what-reviewed-means-for-lockbox)
 
 ## Screens
 

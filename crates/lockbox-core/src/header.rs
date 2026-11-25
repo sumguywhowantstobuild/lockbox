@@ -20,6 +20,7 @@ pub const CONTAINER_VERSION: u16 = 1;
 /// Largest `vault.json` accepted.
 pub const MAX_HEADER_BYTES: usize = 65_536;
 
+// Fixed format label (it keys the header MAC), not the product name: never renamed, or every vault stops opening.
 const MAC_INFO: &[u8] = b"lockbox header mac v1";
 /// File names inside a vault folder.
 pub const HEADER_FILE: &str = "vault.json";
@@ -52,7 +53,7 @@ pub struct VaultHeader {
 }
 
 /// Reads `vault.json`. Order matters: size and depth first (before any parsing), then
-/// only the version fields, so a newer vault with new fields says "update Lockbox"
+/// only the version fields, so a newer vault with new fields says "update Petalock"
 /// rather than "damaged"; the strict parse and slot rules come last.
 pub fn parse_header(bytes: &[u8]) -> Result<VaultHeader> {
     const DAMAGED: CoreError = CoreError::Damaged {
@@ -101,6 +102,7 @@ fn mac_message(h: &VaultHeader) -> Vec<u8> {
         .migration
         .map(|m| serde_json::to_vec(&m).expect("a migration always serializes"))
         .unwrap_or_default();
+    // Fixed format label, not the product name: never renamed, or every vault stops opening.
     encode_ad(
         "lockbox/header",
         &[

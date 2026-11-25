@@ -14,14 +14,14 @@ use crate::shell::Shell;
 /// The `Run` entry's name: the app's product name (`productName` in `tauri.conf.json`), exactly as Tauri's NSIS
 /// uninstaller deletes it (`DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${PRODUCTNAME}"`), so
 /// removing the app removes the entry too.
-pub const RUN_VALUE: &str = "Lockbox";
+pub const RUN_VALUE: &str = "Petalock";
 
 /// The argument the `Run` entry starts the app with: the window stays hidden, in the tray, until it is opened.
 pub const HIDDEN_ARGUMENT: &str = "--hidden";
 
-/// What the page learns of starting with Windows: `{ on, turned_off_in_windows }`. `on` is whether Lockbox's `Run` entry
-/// is there. `turned_off_in_windows` is whether Windows' own Startup settings say Lockbox must not start (the person's
-/// choice there wins, and Lockbox never writes it): the page then shows it off and says where to turn it on.
+/// What the page learns of starting with Windows: `{ on, turned_off_in_windows }`. `on` is whether Petalock's `Run` entry
+/// is there. `turned_off_in_windows` is whether Windows' own Startup settings say Petalock must not start (the person's
+/// choice there wins, and Petalock never writes it): the page then shows it off and says where to turn it on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct StartupState {
     pub on: bool,
@@ -50,8 +50,8 @@ pub fn approved_is_off(data: Option<&[u8]>) -> bool {
         .is_some_and(|first| first % 2 == 1)
 }
 
-/// The state from Lockbox's `Run` entry (`on`: whether it is there) and Windows' own entry for it (`approved`, as for
-/// [`approved_is_off`]). Windows' "off" counts only while Lockbox's entry is there: a mark left behind after Lockbox's
+/// The state from Petalock's `Run` entry (`on`: whether it is there) and Windows' own entry for it (`approved`, as for
+/// [`approved_is_off`]). Windows' "off" counts only while Petalock's entry is there: a mark left behind after Petalock's
 /// entry was removed is not something the person can see in Windows' Startup settings, so it is not reported.
 pub fn state_of(on: bool, approved: Option<&[u8]>) -> StartupState {
     StartupState {
@@ -86,14 +86,14 @@ pub fn run_command(exe: &Path) -> Option<OsString> {
 }
 
 impl Shell {
-    /// Whether Lockbox starts with Windows, as the registry says now. A registry that cannot be read is
+    /// Whether Petalock starts with Windows, as the registry says now. A registry that cannot be read is
     /// [`STARTUP_FAILED`], whatever Windows said.
     pub fn startup(&self) -> ShellResult<StartupState> {
         self.os.startup.read().map_err(|_| STARTUP_FAILED)
     }
 
     /// Turns the `Run` entry on or off and answers the state read back: what Windows will do, which is not always what
-    /// was asked (the person may have turned it off in Windows' own settings, and Lockbox never undoes that). A
+    /// was asked (the person may have turned it off in Windows' own settings, and Petalock never undoes that). A
     /// registry that cannot be written, or read back, is [`STARTUP_FAILED`].
     pub fn set_startup(&self, on: bool) -> ShellResult<StartupState> {
         self.os.startup.write(on).map_err(|_| STARTUP_FAILED)?;
@@ -137,15 +137,15 @@ mod tests {
         assert_eq!(ts.startup.writes(), [true, false, false]);
         assert!(!ts.startup.entry_present());
 
-        // The registry changed behind Lockbox's back: the next read shows it.
+        // The registry changed behind Petalock's back: the next read shows it.
         ts.startup.set_entry_elsewhere(true);
         assert_eq!(ts.shell.startup(), Ok(state(true, false)));
         ts.startup.set_entry_elsewhere(false);
         assert_eq!(ts.shell.startup(), Ok(state(false, false)));
     }
 
-    /// Turned off in Windows' own Startup settings: the answer says so while Lockbox's entry is there, and turning
-    /// Lockbox's own switch on does not undo it (Lockbox never writes Windows' setting): the answer still says off. With
+    /// Turned off in Windows' own Startup settings: the answer says so while Petalock's entry is there, and turning
+    /// Petalock's own switch on does not undo it (Petalock never writes Windows' setting): the answer still says off. With
     /// the entry removed, the mark Windows left behind is not reported ([`state_of`], which the fake uses too).
     #[test]
     fn startup_turned_off_in_windows_shows_off() {
@@ -215,7 +215,7 @@ mod tests {
         assert!(!approved_is_off(Some(&[0x02, 0x03, 0x03])));
     }
 
-    /// Windows' "off" is reported only while Lockbox's own entry is there: a mark left behind after the entry was
+    /// Windows' "off" is reported only while Petalock's own entry is there: a mark left behind after the entry was
     /// removed is not shown as "turned off in Windows".
     #[test]
     fn turned_off_in_windows_only_while_the_entry_is_there() {
@@ -237,7 +237,7 @@ mod tests {
     fn hidden_argument_is_exactly_one() {
         assert!(hidden_launch(args(&["lockbox.exe", "--hidden"])));
         assert!(hidden_launch([
-            "C:\\Program Files\\Lockbox\\lockbox.exe",
+            "C:\\Program Files\\Petalock\\lockbox.exe",
             "--hidden"
         ]));
         // The program's own name is never looked at.
@@ -278,11 +278,11 @@ mod tests {
     /// refused rather than written with its quoting broken.
     #[test]
     fn run_command_quotes_the_path() {
-        let exe = PathBuf::from("C:\\Program Files\\Lockbox\\lockbox.exe");
+        let exe = PathBuf::from("C:\\Program Files\\Petalock\\lockbox.exe");
         assert_eq!(
             run_command(&exe),
             Some(OsString::from(
-                "\"C:\\Program Files\\Lockbox\\lockbox.exe\" --hidden"
+                "\"C:\\Program Files\\Petalock\\lockbox.exe\" --hidden"
             ))
         );
         let plain = PathBuf::from("C:\\x\\lockbox.exe");
@@ -293,6 +293,6 @@ mod tests {
         assert_eq!(run_command(Path::new("C:\\x\"y\\lockbox.exe")), None);
         assert_eq!(run_command(Path::new("")), None);
         // What is written reads back as hidden launch: the program and then the argument.
-        assert_eq!(RUN_VALUE, "Lockbox");
+        assert_eq!(RUN_VALUE, "Petalock");
     }
 }

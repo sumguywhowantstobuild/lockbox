@@ -19,11 +19,11 @@ export const WHERE_IT_LIVES = "Where it lives";
 
 /** What 18c says about a folder that a cloud service syncs, naming the service the shell found ("OneDrive syncs this folder."; "A cloud service" when it can't name it). */
 export function cloudWarning(provider: CloudProvider): string {
-  return `${providerName(provider)} syncs this folder. Lockbox doesn't support vaults in cloud folders. Choose a folder on this PC, or continue anyway.`;
+  return `${providerName(provider)} syncs this folder. Petalock doesn't support vaults in cloud folders. Choose a folder on this PC, or continue anyway.`;
 }
 
 /** 18c's line where the path was drawn: the folder's place in words, as 18b says it (the session's words). */
-export const IN_THE_USUAL_FOLDER = "Kept in your Lockbox Vaults folder.";
+export const IN_THE_USUAL_FOLDER = "Kept in your Petalock Vaults folder.";
 export const IN_THE_PICKED_FOLDER = "Kept in the folder you picked.";
 
 /** What the shell refuses a create's folder with (`invalid_input`, `what`; `locations.rs`): 18c says it under "Where it lives". */

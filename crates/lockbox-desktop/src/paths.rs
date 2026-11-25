@@ -16,7 +16,7 @@ use crate::os::{Env, KnownFolder};
 /// The largest state file the shell reads: anything bigger is damaged.
 pub const MAX_STATE_FILE: u64 = 1024 * 1024;
 
-/// The state folder, `%LOCALAPPDATA%\Lockbox\`, and the files in it. No vault, export or backup may be placed inside
+/// The state folder, `%LOCALAPPDATA%\Petalock\`, and the files in it. No vault, export or backup may be placed inside
 /// it.
 #[derive(Clone)]
 pub struct StatePaths {
@@ -36,7 +36,9 @@ pub struct StatePaths {
 
 /// The state folder from the known folder `LocalAppData`, never an environment variable.
 pub fn state_paths(env: &dyn Env) -> io::Result<StatePaths> {
-    let root = env.known_folder(KnownFolder::LocalAppData)?.join("Lockbox");
+    let root = env
+        .known_folder(KnownFolder::LocalAppData)?
+        .join("Petalock");
     Ok(StatePaths {
         journal: root.join("restore-journal.json"),
         registry: root.join("vaults.json"),
@@ -48,11 +50,11 @@ pub fn state_paths(env: &dyn Env) -> io::Result<StatePaths> {
     })
 }
 
-/// Where new vaults go unless the user picks a folder: `<Profile>\Lockbox Vaults\`.
+/// Where new vaults go unless the user picks a folder: `<Profile>\Petalock Vaults\`.
 pub fn default_vault_parent(env: &dyn Env) -> io::Result<PathBuf> {
     Ok(env
         .known_folder(KnownFolder::Profile)?
-        .join("Lockbox Vaults"))
+        .join("Petalock Vaults"))
 }
 
 /// The `"version"` of every state file: written as `1`, and only `1` is read back.
@@ -141,29 +143,45 @@ mod tests {
         CoreError::Damaged { what }.into()
     }
 
+    /// Plan 5, Task 0c, `new_vaults_default_to_petalock_vaults`: `<Profile>\Petalock Vaults`, and no other name.
     #[test]
-    fn default_parent_is_profile_lockbox_vaults() {
+    fn new_vaults_default_to_petalock_vaults() {
         let temp = TempDir::new();
         let env = FakeEnv::new(temp.path());
         let profile = env.known_folder(KnownFolder::Profile).unwrap();
         let parent = default_vault_parent(&env).unwrap();
-        assert!(parent.to_string_lossy().ends_with("\\Lockbox Vaults"));
+        assert_eq!(parent, profile.join("Petalock Vaults"));
+        assert!(parent.to_string_lossy().ends_with("\\Petalock Vaults"));
         assert_eq!(parent.parent(), Some(profile.as_path()));
     }
 
+    /// Plan 5, Task 0c, `state_folder_is_petalock`: `%LOCALAPPDATA%\Petalock`, and all six entries under it.
     #[test]
-    fn state_folder_is_local_app_data_lockbox() {
+    fn state_folder_is_petalock() {
         let temp = TempDir::new();
         let env = FakeEnv::new(temp.path());
         let local = env.known_folder(KnownFolder::LocalAppData).unwrap();
         let paths = state_paths(&env).unwrap();
-        assert_eq!(paths.root, local.join("Lockbox"));
+        assert_eq!(paths.root, local.join("Petalock"));
         assert_eq!(paths.journal, paths.root.join("restore-journal.json"));
         assert_eq!(paths.registry, paths.root.join("vaults.json"));
         assert_eq!(paths.outputs, paths.root.join("pending-outputs.json"));
         assert_eq!(paths.settings, paths.root.join("settings.json"));
         assert_eq!(paths.vault_state, paths.root.join("vault-state.json"));
         assert_eq!(paths.open, paths.root.join("open"));
+        // All six sit under the one root, and none under the name the product had before.
+        const OLD_NAME: &str = "Lockbox";
+        for entry in [
+            &paths.journal,
+            &paths.registry,
+            &paths.outputs,
+            &paths.settings,
+            &paths.vault_state,
+            &paths.open,
+        ] {
+            assert!(entry.starts_with(local.join("Petalock")), "{entry:?}");
+            assert!(!entry.starts_with(local.join(OLD_NAME)), "{entry:?}");
+        }
     }
 
     #[test]

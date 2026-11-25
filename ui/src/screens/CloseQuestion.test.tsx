@@ -1,4 +1,4 @@
-// Plan 4B Task 12's page: the question the shell asks when the window is closed, or Lockbox is quit, while a job runs (33b, Ask 15).
+// Plan 4B Task 12's page: the question the shell asks when the window is closed, or Petalock is quit, while a job runs (33b, Ask 15).
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "../App";
@@ -55,7 +55,7 @@ const WAITING_TITLE = "A restore is waiting for your answer";
 const WAITING_TEXT = "Closing cancels it. Your vault stays as it is, and you can start the restore again.";
 const SWAP_TITLE = "A restore is finishing";
 const SWAP_TEXT =
-  "It's past the point of cancelling. If you close now, Lockbox finishes or undoes it the next time it opens, so nothing is lost.";
+  "It's past the point of cancelling. If you close now, Petalock finishes or undoes it the next time it opens, so nothing is lost.";
 
 /** The shell asks; the number it gave the question is returned (the shell mints it, the first is 1). */
 function asked(reason: "close" | "quit", running: string[], pastSwap = false, restoreWaiting = false): number {
@@ -247,7 +247,7 @@ test("close_anyway_on_a_close_answers_yes_once_and_the_close_goes_on", async () 
     await Promise.resolve();
   });
   // Today's close path ran: the vault locked, and the first close is explained (5b), as it is without a question.
-  expect(await screen.findByRole("dialog", { name: "Lockbox stays by the clock" })).toBeTruthy();
+  expect(await screen.findByRole("dialog", { name: "Petalock stays by the clock" })).toBeTruthy();
   expect(screen.queryByRole("dialog", { name: BACKUP_TITLE })).toBeNull();
   expect(shell.closeAnswers()).toEqual([true]);
   expect(shell.sessionOf(7)?.unlocked).toBe(false);
@@ -496,7 +496,7 @@ test("a_waiting_restore_alone_is_a_question", async () => {
   asked("close", ["format_disk"], false, true);
   const again = await screen.findByRole("dialog", { name: WAITING_TITLE });
   fireEvent.click(within(again).getByRole("button", { name: ANYWAY }));
-  expect(await screen.findByRole("dialog", { name: "Lockbox stays by the clock" })).toBeTruthy();
+  expect(await screen.findByRole("dialog", { name: "Petalock stays by the clock" })).toBeTruthy();
   expect(answersSent()).toEqual([
     ["close_answer", { question: 1, go: false }],
     ["close_answer", { question: 2, go: true }],

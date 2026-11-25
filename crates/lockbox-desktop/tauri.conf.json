@@ -1,6 +1,6 @@
 {
-  "productName": "Lockbox",
-  "identifier": "io.github.sumguywhowantstobuild.lockbox",
+  "productName": "Petalock",
+  "identifier": "io.github.sumguywhowantstobuild.petalock",
   "build": {
     "devUrl": "http://localhost:5173",
     "frontendDist": "../../ui/dist",

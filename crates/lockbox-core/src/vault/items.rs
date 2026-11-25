@@ -460,7 +460,7 @@ impl Vault {
     }
 
     /// Whether `item` is in the trash with a deletion time at or before `cutoff` ("30 days or more"). String order is
-    /// time order: Lockbox writes every timestamp in this one fixed UTC format.
+    /// time order: Petalock writes every timestamp in this one fixed UTC format.
     pub fn trashed_by(item: &Item, cutoff: &str) -> bool {
         item.trashed_at.as_deref().is_some_and(|t| t <= cutoff)
     }

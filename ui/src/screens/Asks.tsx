@@ -34,10 +34,10 @@ import { shortcutText } from "../shortcut";
 
 /** Ask 3's message after its first sentence, which names the vault. */
 const DETAILS_CHANGED =
-  "Its name, or other details kept beside your items, don't match what Lockbox last saved. Moving a vault or restoring a backup doesn't cause this. If you edited that file yourself, accept it. If you didn't, lock it and check your PC first; restoring a backup you trust is the safer way back. Backups stay off until you accept.";
+  "Its name, or other details kept beside your items, don't match what Petalock last saved. Moving a vault or restoring a backup doesn't cause this. If you edited that file yourself, accept it. If you didn't, lock it and check your PC first; restoring a backup you trust is the safer way back. Backups stay off until you accept.";
 
 /** What Ask 3 says is wrong, in the design's words: also the first sentences of an older copy's warning. */
-const DETAILS_DIFFER = "Its name, or other details kept beside your items, don't match what Lockbox last saved.";
+const DETAILS_DIFFER = "Its name, or other details kept beside your items, don't match what Petalock last saved.";
 
 /** Ask 9's words: what an unlock from the spare copy of the details means (its heading, as drawn), and what to do about it (the design's, word for word). */
 const SPARE_TITLE = "Opened from the backup copy of this vault's details";
@@ -45,7 +45,7 @@ const SPARE_DETAILS = "If you changed this vault's password recently, it may nee
 const CHANGE_AGAIN = "Change the password again now that it's open.";
 
 /** Ask 5's list refused by the shell: this opens the banner's words, and the refusal's own words follow. */
-export const LIST_FAILED = "Lockbox couldn't list the leftover files.";
+export const LIST_FAILED = "Petalock couldn't list the leftover files.";
 
 /** The one word that fits one or many. */
 function count(n: number, one: string, many: string): string {
@@ -114,7 +114,7 @@ export function DetailsChangedAsk({ data }: { data: SessionData }) {
     <Dialog
       open={asks.detailsChanged}
       onOpenChange={() => undefined}
-      title={`${data.name}'s details were changed outside Lockbox.`}
+      title={`${data.name}'s details were changed outside Petalock.`}
       description={DETAILS_CHANGED}
       initialFocus={lock}
     >
@@ -163,7 +163,7 @@ export function VaultBanners({ data }: { data: SessionData }) {
     <>
       {asks.unreadable > 0 && open("unreadable") ? (
         <Notice
-          text={`${String(asks.unreadable)} ${count(asks.unreadable, "item in this vault can't be read. Everything else works. It may be damaged", "items in this vault can't be read. Everything else works. They may be damaged")}, so Lockbox left all stored files where they are until this is sorted.`}
+          text={`${String(asks.unreadable)} ${count(asks.unreadable, "item in this vault can't be read. Everything else works. It may be damaged", "items in this vault can't be read. Everything else works. They may be damaged")}, so Petalock left all stored files where they are until this is sorted.`}
           actions={[
             // A backup can bring the vault back, beside it. A copy opened from a backup is not a vault on the list, so it has none.
             ...(data.readOnly
@@ -250,10 +250,10 @@ export function VaultBanners({ data }: { data: SessionData }) {
         />
       ) : null}
       {asks.headerChanged && open("details") ? (
-        // An older copy opened read-only whose details were changed outside Lockbox. Ask 3's first sentences, for a copy that can't change: there is nothing to
+        // An older copy opened read-only whose details were changed outside Petalock. Ask 3's first sentences, for a copy that can't change: there is nothing to
         // accept, and nothing is locked or turned off, so it is a banner. The last two sentences are this screen's own words.
         <Notice
-          text={`${data.name}'s details were changed outside Lockbox. ${DETAILS_DIFFER} Nothing in this older copy can change. If you didn't edit its files yourself, check your PC first.`}
+          text={`${data.name}'s details were changed outside Petalock. ${DETAILS_DIFFER} Nothing in this older copy can change. If you didn't edit its files yourself, check your PC first.`}
           actions={[{ name: "Close", onPress: close("details") }]}
         />
       ) : null}
@@ -281,7 +281,7 @@ function CloudAsk({ data, provider, onKeep }: { data: SessionData; provider: Clo
   };
   return (
     <Notice
-      text={`${providerName(provider)} syncs ${data.name}'s folder. Lockbox doesn't support vaults in cloud folders. To stop this message, move the vault to a folder on this PC.`}
+      text={`${providerName(provider)} syncs ${data.name}'s folder. Petalock doesn't support vaults in cloud folders. To stop this message, move the vault to a folder on this PC.`}
       actions={[
         { name: "Keep it there", onPress: onKeep },
         ...(listed
@@ -306,7 +306,7 @@ function CloudAsk({ data, provider, onKeep }: { data: SessionData; provider: Clo
 }
 
 /**
- * Ask 11, "Lost track of opened files": the record of files the person opened is damaged, so Lockbox can't clean them
+ * Ask 11, "Lost track of opened files": the record of files the person opened is damaged, so Petalock can't clean them
  * up. Its one button sets the record aside; it has no Close, since backing up, Save a copy and Open stay off until then.
  * Shown on the lock screen and in the vault. A refusal of the button is said under the words.
  */
@@ -328,7 +328,7 @@ export function LostOutputsAsk() {
   };
   return (
     <Notice
-      text="Lockbox lost track of some opened files. Its record of files you opened is damaged, so it can't clean them up. Until you set the record aside, backing up, Save a copy and Open stay off."
+      text="Petalock lost track of some opened files. Its record of files you opened is damaged, so it can't clean them up. Until you set the record aside, backing up, Save a copy and Open stay off."
       actions={[
         {
           name: "Set it aside",
@@ -396,19 +396,19 @@ export function OpenFilesAsk() {
 /**
  * The save shortcut (Ctrl+Shift+L unless changed in Settings) is off: another app holds it, or it could not be turned on for another reason.
  * Words and a Close; shown on the lock screen and in the vault until it is closed or a shortcut is saved in Settings, and told again only when
- * Lockbox starts again.
+ * Petalock starts again.
  */
 export function ShortcutAsk() {
   const { shortcut } = useNotices();
-  // The shortcut Lockbox tried to take at launch is the saved one, which Settings can change.
+  // The shortcut Petalock tried to take at launch is the saved one, which Settings can change.
   const saved = shortcutText(useSettings().shortcut);
   if (shortcut === null) return null;
   return (
     <Notice
       text={
         shortcut === "taken"
-          ? `${saved} is used by another app, so the save shortcut is off. Close that app and restart Lockbox to use it.`
-          : "The save shortcut couldn't be turned on. Restart Lockbox to try again."
+          ? `${saved} is used by another app, so the save shortcut is off. Close that app and restart Petalock to use it.`
+          : "The save shortcut couldn't be turned on. Restart Petalock to try again."
       }
       actions={[{ name: "Close", onPress: dismissShortcutNotice }]}
     />
@@ -425,7 +425,7 @@ export function LockNote({ vault }: { vault: number | null }) {
 }
 
 /**
- * What the lock screen says beside the password: a restore that Lockbox finished at launch (the vault's name as the notice gave it, and an Unlock
+ * What the lock screen says beside the password: a restore that Petalock finished at launch (the vault's name as the notice gave it, and an Unlock
  * button that closes the notice and leaves that vault chosen with its password box focused; unlocking clears it too), and a refusal that the vault
  * it was about has locked before (Ask 16, "Locked before it could say"; words, no button): kept for one vault, shown while that vault is the one chosen
  * (`chosen`, its registry ID, or `null` for none) and used up by that vault's unlock alone. `onUnlock` is the lock screen's: it gets the vault the notice

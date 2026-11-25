@@ -1,6 +1,6 @@
 [package]
 name = "lockbox-desktop"
-description = "Lockbox desktop app: the Tauri shell between the screens and the vault engine"
+description = "Petalock desktop app: the Tauri shell between the screens and the vault engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -25,7 +25,7 @@ zeroize = { version = "1.9", features = ["serde"] }
 # The clipboard (spec §7.3), called from Rust only (`os::win`): one opening per write or clear, its formats marking
 # a copy to stay out of clipboard history and cloud sync. No feature needed.
 clipboard-win = "5.4.3"
-# File dialogs and the notice shown when Lockbox can't start, called from Rust only (`os::win`). The file dialogs need no
+# File dialogs and the notice shown when Petalock can't start, called from Rust only (`os::win`). The file dialogs need no
 # feature. `common-controls-v6`: the notice's two buttons of our own words are a task dialog (`TaskDialogIndirect`),
 # which needs Common Controls 6, as the app's manifest and the test programs' (`build.rs`) have it; without the
 # feature the notice would be a plain box whose buttons are not ours.

@@ -480,7 +480,7 @@ impl PreparedRestore {
     /// is still the vault this restore was prepared for, and picks the first free
     /// `<folder>.before-restore[-2..=99]` name. The lock is dropped again, because Windows
     /// cannot rename a folder with an open handle inside it.
-    // shortcut: the lock is released before the rename, so another process could open T in that instant (the rename then fails with nothing moved, the journal goes back to `extracting` and the restore is re-armed for a retry); upgrade if Lockbox ever allows more than one instance (Plan 3 makes it single-instance).
+    // shortcut: the lock is released before the rename, so another process could open T in that instant (the rename then fails with nothing moved, the journal goes back to `extracting` and the restore is re-armed for a retry); upgrade if Petalock ever allows more than one instance (Plan 3 makes it single-instance).
     fn choose_before_restore(&self) -> Result<Option<PathBuf>> {
         let Some(existing) = &self.existing else {
             return Ok(None);
@@ -904,7 +904,7 @@ pub(super) mod tests {
         f.vault.new_item(ItemKind::Note, "note", None).unwrap();
         let (item, _) = f.file_item(b"hello");
         f.attach(&item, &vec![7u8; MIB + 5]);
-        let backup = f.backup("a.lockbox-backup");
+        let backup = f.backup("a.petalock-backup");
         (f, backup)
     }
 
@@ -1099,7 +1099,7 @@ pub(super) mod tests {
     fn malformed_archive_refused_before_any_write() {
         let mut f = Fixture::new();
         let (item, _) = f.file_item(b"x");
-        let backup = f.backup("a.lockbox-backup");
+        let backup = f.backup("a.petalock-backup");
         let item = item_name(&item);
         let copy = |name: &str| {
             let path = f.out().join(name);
@@ -1109,7 +1109,7 @@ pub(super) mod tests {
         let d = Dest::new();
 
         // A traversal name in the central directory.
-        let traversal = copy("traversal.lockbox-backup");
+        let traversal = copy("traversal.petalock-backup");
         let mut bytes = fs::read(&traversal).unwrap();
         let at = central_offset(&bytes, &item) + 46;
         patch(
@@ -1125,7 +1125,7 @@ pub(super) mod tests {
         d.assert_not_written();
 
         // An entry the manifest does not list.
-        let mismatch = copy("mismatch.lockbox-backup");
+        let mismatch = copy("mismatch.petalock-backup");
         let extra = crate::vault::source::blob_name(&crate::ids::FileId::random());
         rewrite_backup(
             &mismatch,
@@ -1141,7 +1141,7 @@ pub(super) mod tests {
         d.assert_not_written();
 
         // An entry that runs one byte into the next.
-        let overlap = copy("overlap.lockbox-backup");
+        let overlap = copy("overlap.petalock-backup");
         let mut bytes = fs::read(&overlap).unwrap();
         resize_entry(&mut bytes, &item, 1);
         fs::write(&overlap, bytes).unwrap();
@@ -1501,7 +1501,7 @@ pub(super) mod tests {
     fn tampered_blob_refused_during_extraction() {
         let mut f = Fixture::new();
         f.file_item(&vec![1u8; 2 * MIB]);
-        let backup = f.backup("a.lockbox-backup");
+        let backup = f.backup("a.petalock-backup");
         let mode = ManifestMode::Rehash { key: Some(f.key()) };
         rewrite_backup(&backup, flip_blob_second_chunk, mode);
 
@@ -1521,7 +1521,7 @@ pub(super) mod tests {
         let mut bytes = fs::read(&path).unwrap();
         bytes[MIB + 100] ^= 1;
         fs::write(&path, bytes).unwrap();
-        let backup = f.backup("a.lockbox-backup");
+        let backup = f.backup("a.petalock-backup");
 
         let d = Dest::new();
         let p = d.prepare(&backup, Credential::Password(PW)).unwrap();
@@ -1538,7 +1538,7 @@ pub(super) mod tests {
     fn damaged_item_refused() {
         let mut f = Fixture::new();
         f.file_item(b"x");
-        let backup = f.backup("a.lockbox-backup");
+        let backup = f.backup("a.petalock-backup");
         rewrite_backup(
             &backup,
             flip_item,
@@ -1555,7 +1555,7 @@ pub(super) mod tests {
     fn unexpected_blob_refused() {
         let mut f = Fixture::new();
         f.file_item(b"x");
-        let backup = f.backup("a.lockbox-backup");
+        let backup = f.backup("a.petalock-backup");
         let extra = crate::vault::source::blob_name(&crate::ids::FileId::random());
         rewrite_backup(
             &backup,
@@ -3437,7 +3437,7 @@ pub(super) mod tests {
             failpoint::disarm_all();
         }
         let d = Dest::new();
-        let missing = d.parent().join("no such backup.lockbox-backup");
+        let missing = d.parent().join("no such backup.petalock-backup");
         let destination = RestoreDestination::NewFolder("CON".into());
         assert_folder_name_refused(d.prepare_to(&missing, d.parent(), destination), "first");
     }

@@ -238,7 +238,7 @@ pub(super) fn write_journal(path: &Path, j: &RestoreJournal) -> Result<()> {
 }
 
 /// Reads the journal at `path`; a missing file is `None`. Order matters, as for the header:
-/// size and depth first, then only the version (so a newer journal says "update Lockbox",
+/// size and depth first, then only the version (so a newer journal says "update Petalock",
 /// not "damaged"), then the strict parse. Serde's own messages are never passed on.
 pub(super) fn read_journal(path: &Path) -> Result<Option<RestoreJournal>> {
     let bytes = match read_retry(path, MAX_JOURNAL_BYTES) {

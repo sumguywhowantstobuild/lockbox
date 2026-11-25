@@ -23,7 +23,7 @@ pub static GUIDE_URL: LazyLock<tauri::Url> = LazyLock::new(|| {
         .expect("the guide's address is a valid URL")
 });
 
-/// Opens the guide in the default browser. Used by Help, and by the notice shown when Lockbox can't start.
+/// Opens the guide in the default browser. Used by Help, and by the notice shown when Petalock can't start.
 pub fn open_guide(launcher: &dyn Launcher) -> io::Result<()> {
     launcher.open_url(&GUIDE_URL)
 }

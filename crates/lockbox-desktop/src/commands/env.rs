@@ -718,7 +718,7 @@ impl Shell {
         // Written like the PDF: a temp beside the destination, journaled before it exists, then moved into place only while
         // the session is still unlocked in the generation that asked. An existing file is untouched until then.
         let journal = self.outputs.for_call(&self.sessions, session, generation);
-        let temp = hidden_temp_path(docs, ".lockbox-partial");
+        let temp = hidden_temp_path(docs, ".petalock-partial");
         journal.finish(journal.record(&temp))?;
         let written = write_new(&temp, text.as_bytes());
         drop(text);
@@ -757,7 +757,7 @@ impl Shell {
     }
 
     /// Removes a readable file's temp (the `.env` file's, the CSV's) by the launch sweep's own rules (no link on the way,
-    /// Lockbox's own name); what cannot be removed now stays in the journal for the next launch.
+    /// Petalock's own name); what cannot be removed now stays in the journal for the next launch.
     pub(super) fn discard_env_temp(&self, temp: &Path) {
         self.outputs.remove_leftover(temp, LAUNCH_OPEN_TRIES);
     }
@@ -1788,7 +1788,7 @@ mod tests {
         at("file_written", move || {
             for entry in fs::read_dir(&look_in).unwrap() {
                 let path = entry.unwrap().path();
-                if path.to_string_lossy().ends_with(".lockbox-partial") {
+                if path.to_string_lossy().ends_with(".petalock-partial") {
                     seen.borrow_mut().push(is_hidden(Some(&path)));
                 }
             }

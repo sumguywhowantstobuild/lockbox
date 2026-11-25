@@ -14,9 +14,9 @@ export function FirstClose() {
     <Dialog
       open={firstClose}
       onOpenChange={() => undefined}
-      title="Lockbox stays by the clock"
+      title="Petalock stays by the clock"
       description={[
-        "Closing the window locks every vault, and Lockbox keeps running so the save shortcut works.",
+        "Closing the window locks every vault, and Petalock keeps running so the save shortcut works.",
         "To stop it completely, right-click its icon by the clock and choose Quit. This message shows once.",
       ]}
     >

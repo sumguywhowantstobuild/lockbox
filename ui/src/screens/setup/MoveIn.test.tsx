@@ -29,7 +29,7 @@ const SAY = "Your vault comes with you as a backup or a folder.";
 const SUB = "Either works on a new computer. Backups and folders need the password or recovery key from when they were made.";
 const COPY_FIRST = "That folder is on a removable drive. Copy it to this PC first, then choose the copy.";
 const WRONG_DRIVE = "A vault can't live on a removable, FAT32 or network drive. Choose a folder on this PC.";
-const NOT_A_VAULT = "That folder isn't a Lockbox vault. Choose the vault's own folder.";
+const NOT_A_VAULT = "That folder isn't a Petalock vault. Choose the vault's own folder.";
 const NEXT = "Each vault comes across on its own. If you had more than one, bring in the next.";
 const LABEL = "Password or recovery key from when it was made";
 
@@ -53,7 +53,7 @@ function sent(cmd: string): unknown[] {
 /** The first screen, then 26a. */
 async function toWhatDoYouHave(vaults: FakeVault[] = []) {
   const view = start(vaults);
-  await heading("Welcome to Lockbox");
+  await heading("Welcome to Petalock");
   press(LINK);
   await heading("What do you have?");
   return view;
@@ -82,7 +82,7 @@ function oldVault(id: number, name: string): FakeVault {
 
 test("first_screen_offers_a_backup_or_a_folder", async () => {
   start();
-  await heading("Welcome to Lockbox");
+  await heading("Welcome to Petalock");
   // 21a's second way in, in the design's words, and it opens nothing by itself.
   expect(screen.queryByRole("button", { name: "I already have a vault" })).toBeNull();
   press(LINK);
@@ -98,7 +98,7 @@ test("first_screen_offers_a_backup_or_a_folder", async () => {
   expect(document.activeElement).toBe(screen.getByRole("heading", { level: 1, name: "What do you have?" }));
   // Back is the first screen again.
   press("Back");
-  await heading("Welcome to Lockbox");
+  await heading("Welcome to Petalock");
   expect(screen.getByRole("button", { name: LINK })).toBeTruthy();
 });
 
@@ -158,7 +158,7 @@ test("restore_from_the_first_screen_suggests_the_usual_folder", async () => {
   await toTheFolder();
   // The pick, with nothing sent but the pick's own; the folder step names the usual folder, as a restore from the lock screen does.
   expect(sent("restore_pick")).toEqual([{ choice: null, vault: null }]);
-  expect(screen.getByText("C:\\Users\\Someone\\Lockbox Vaults\\My vault")).toBeTruthy();
+  expect(screen.getByText("C:\\Users\\Someone\\Petalock Vaults\\My vault")).toBeTruthy();
   expect(screen.getByRole("button", { name: "Choose another" })).toBeTruthy();
   expect(sent("restore_choose_folder")).toEqual([]);
 });
@@ -304,7 +304,7 @@ test("a_folder_in_a_cloud_folder_asks_and_cancel_goes_back_to_what_do_you_have",
 
 test("first_screen_restore_works_with_no_vaults_listed", async () => {
   start();
-  await heading("Welcome to Lockbox");
+  await heading("Welcome to Petalock");
   expect(debugState().vaults).toEqual([]);
   press(LINK);
   await heading("What do you have?");
@@ -319,7 +319,7 @@ test("first_screen_restore_works_with_no_vaults_listed", async () => {
   await heading("My vault is here");
   expect((debugState().vaults ?? []).map((vault) => vault.name)).toEqual(["My vault"]);
   // The first screen is not what shows now that a vault is listed.
-  expect(screen.queryByRole("heading", { level: 1, name: "Welcome to Lockbox" })).toBeNull();
+  expect(screen.queryByRole("heading", { level: 1, name: "Welcome to Petalock" })).toBeNull();
   press("Unlock My vault");
   await heading("My vault is restored");
 });

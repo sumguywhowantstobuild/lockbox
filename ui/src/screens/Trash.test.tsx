@@ -42,7 +42,7 @@ beforeEach(() => {
   vi.setSystemTime(new Date("2026-11-10T12:00:00Z"));
 });
 
-const NOTHING_REMOVED = "Nothing here is removed until you say so. Lockbox never empties the trash by itself.";
+const NOTHING_REMOVED = "Nothing here is removed until you say so. Petalock never empties the trash by itself.";
 const CHANGED_MEANWHILE = "This item changed while you were editing it. Nothing was saved. Cancel, then open it again to see the change.";
 const GONE_FOLDER = itemId(40);
 const MEMBER_A = itemId(41);
@@ -263,7 +263,7 @@ test("a_move_is_refused_in_words_for_a_folder_that_went_to_the_trash_meanwhile",
   fireEvent.click(within(menu).getByRole("menuitemradio", { name: "Lineproof" }));
   const alert = await screen.findByRole("alert");
   expect(alert.textContent).not.toContain("Moved to");
-  expect(alert.textContent).toContain("Lockbox can't use that.");
+  expect(alert.textContent).toContain("Petalock can't use that.");
   expect(stored.find((one) => one.id === itemId(1))?.collection).toBe(FOLDER);
 });
 
@@ -1004,7 +1004,7 @@ test("a_refused_delete_for_good_is_said_in_words_and_the_row_stays", async () =>
   const dialog = await screen.findByRole("dialog", { name: "Delete Old CRM login for good?" });
   fireEvent.click(within(dialog).getByRole("button", { name: "Delete for good" }));
   const alert = await screen.findByRole("alert");
-  expect(alert.textContent).toContain("Lockbox couldn't reach that folder or file.");
+  expect(alert.textContent).toContain("Petalock couldn't reach that folder or file.");
   expect(screen.getByRole("button", { name: /^Login:\s*Old CRM login/ })).toBeTruthy();
 });
 
@@ -1520,7 +1520,7 @@ test("a_refused_empty_trash_is_said_in_words_and_the_rows_stay", async () => {
   const dialog = await askToEmpty();
   fireEvent.click(within(dialog).getByRole("button", { name: "Empty trash" }));
   const alert = await screen.findByRole("alert");
-  expect(alert.textContent).toContain("Lockbox couldn't reach that folder or file.");
+  expect(alert.textContent).toContain("Petalock couldn't reach that folder or file.");
   expect(thePage()).not.toContain("Trash emptied");
   expect(stored.filter((item) => item.trashed === true)).toHaveLength(IN_TRASH);
 });
@@ -1650,7 +1650,7 @@ test("a_refused_folder_name_is_said_in_words_under_the_box", async () => {
   shell.refuseNext("new_item", { code: "too_large", what: "title" });
   fireEvent.keyDown(box, { key: "Enter" });
   const alert = await within(nav).findByRole("alert");
-  expect(alert.textContent).toContain("That is too big for Lockbox to keep.");
+  expect(alert.textContent).toContain("That is too big for Petalock to keep.");
   // The box keeps what was typed, is marked, and points to the words.
   expect((box as HTMLInputElement).value).toBe("Quote parser");
   expect(box.getAttribute("aria-invalid")).toBe("true");
@@ -2127,7 +2127,7 @@ test("no_style_element_or_inline_style_is_made_by_the_new_parts", async () => {
 
 // ---- The fix round: a write that fails partway, an older list answer, a cancelled dialog, and Undo's focus ----
 
-const IO_WORDS = "Lockbox couldn't reach that folder or file.";
+const IO_WORDS = "Petalock couldn't reach that folder or file.";
 
 /** Waits for the shell to have been sent `count` of `cmd`. */
 async function sentTimes(cmd: string, count: number) {

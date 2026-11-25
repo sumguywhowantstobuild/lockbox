@@ -6,7 +6,7 @@
 //!
 //! The PDF is WebView2's print-to-PDF of the page as it shows, so the key reaches it only through the printed page, and
 //! no command carries it. WebView2 refuses an existing hidden file and writes straight over the path it is given, so
-//! the printer gets a new file inside a new hidden folder beside the destination, both with Lockbox's own temp names and
+//! the printer gets a new file inside a new hidden folder beside the destination, both with Petalock's own temp names and
 //! both written in the journal before they exist. The `.env` file's bytes are made in Rust (`commands::env`), written to
 //! one journaled temp beside the destination and published the same way. A vault's export as a readable CSV is the same
 //! kind of file: its rows are made in Rust (`export_csv`) after the destination is approved, and the vault's password
@@ -57,7 +57,10 @@ const PDF_FILTER: (&str, &[&str]) = ("PDF", &["pdf"]);
 const CSV_FILTER: (&str, &[&str]) = ("CSV", &["csv"]);
 
 /// What a vault's export is called when the vault's name leaves nothing to name it by.
-const EXPORT_FALLBACK_NAME: &str = "Lockbox export.csv";
+pub(crate) const EXPORT_FALLBACK_NAME: &str = "Petalock export.csv";
+
+/// What the recovery key's PDF is called in the save dialog.
+pub(crate) const RECOVERY_PDF_NAME: &str = "Petalock recovery key.pdf";
 
 /// A readable file to write: the dialog's title and suggested name, and what goes in it.
 pub struct ReadableJob {
@@ -87,7 +90,7 @@ impl ReadableJob {
     pub fn recovery_pdf() -> ReadableJob {
         ReadableJob {
             title: "Save the recovery key as a PDF",
-            file_name: "Lockbox recovery key.pdf".to_owned(),
+            file_name: RECOVERY_PDF_NAME.to_owned(),
             kind: ReadableKind::RecoveryPdf,
         }
     }
@@ -138,7 +141,7 @@ impl Shell {
     /// Saves a readable file where the user picks. Refused first, before any dialog: for a session that is locked,
     /// stale or not ours (`Locked`, `NotFound`), for a read-only one (`ReadOnly`: a read-only copy never shows a
     /// recovery key), and while the output journal is damaged. The save dialog opens outside every lock (`Dismissed`
-    /// when it is closed); the destination is then refused inside a vault folder or Lockbox's own state folder, and a
+    /// when it is closed); the destination is then refused inside a vault folder or Petalock's own state folder, and a
     /// folder a cloud provider syncs asks first (`Confirm::CloudFolder`), the job and destination parked for
     /// [`save_readable_confirm`](Self::save_readable_confirm). Nothing is written until the question is answered.
     pub fn save_readable(
@@ -261,7 +264,7 @@ impl Shell {
             .parent()
             .ok_or(ShellError::InvalidInput { what: "file name" })?;
         let journal = self.outputs.for_call(&self.sessions, session, generation);
-        let temp = hidden_temp_path(docs, ".lockbox-partial");
+        let temp = hidden_temp_path(docs, ".petalock-partial");
         journal.finish(journal.record(&temp))?;
         #[cfg(test)]
         reached("export_temp_recorded");
@@ -323,7 +326,7 @@ impl Shell {
             .inspect_err(|_| pending.close_saved_folder(&output))
     }
 
-    /// The printers Lockbox offers for the recovery key, read from Windows now: the ones that send a page to a device,
+    /// The printers Petalock offers for the recovery key, read from Windows now: the ones that send a page to a device,
     /// not the ones that make a file through a box of their own (see
     /// [`InstalledPrinter::writes_a_file_of_its_own`](crate::os::InstalledPrinter::writes_a_file_of_its_own)), and the
     /// default only when it is among them. Needs no session: it holds nothing of a vault. Names are not put in an error
@@ -339,7 +342,7 @@ impl Shell {
     /// PDF or another print runs (the one printer is shared). The answer waits for WebView2's own: `Ok` when the printer
     /// took the job, `PRINT_NOT_SENT` for a refusal, any other status or no answer in time. A lock at any point
     /// answers `Locked` and the page shows no error; WebView2 cannot cancel a print, so a job already sent is the
-    /// printer's. Lockbox writes no file on this path.
+    /// printer's. Petalock writes no file on this path.
     pub fn print_recovery_key(
         &self,
         session: SessionId,
@@ -448,7 +451,7 @@ impl Shell {
             self.discard_pdf(&folder, None);
             return Err(error.into());
         }
-        let file = hidden_temp_path(&folder, ".lockbox-partial");
+        let file = hidden_temp_path(&folder, ".petalock-partial");
         if let Err(error) = journal.finish(journal.record(&file)) {
             self.discard_pdf(&folder, None);
             return Err(error);
@@ -495,7 +498,7 @@ impl Shell {
     }
 
     /// Removes the PDF's temp `file` (when it may be there) and then its folder, by the launch sweep's own rules: no
-    /// link on the way, Lockbox's own names, and the folder only while it is empty. What cannot be removed now stays in
+    /// link on the way, Petalock's own names, and the folder only while it is empty. What cannot be removed now stays in
     /// the journal for the next launch.
     fn discard_pdf(&self, folder: &Path, file: Option<&Path>) {
         let file_gone =
@@ -638,7 +641,7 @@ pub(super) async fn export_repick(
     blocking(move || shell.export_repick(&token)).await
 }
 
-/// The printers Lockbox offers for the recovery key, and the default one when it is among them. Reads Windows' list on
+/// The printers Petalock offers for the recovery key, and the default one when it is among them. Reads Windows' list on
 /// the blocking pool (a network printer's server can be slow to answer).
 #[tauri::command]
 pub(super) async fn list_printers(
@@ -693,8 +696,8 @@ mod tests {
     const PDF: &[u8] = b"%PDF-1.7 a made-up stand-in";
     /// What is at the destination before the save.
     const OLD: &[u8] = b"the earlier pdf";
-    const NAME: &str = "Lockbox recovery key.pdf";
-    const FOLDER_SUFFIX: &str = ".lockbox-partial-folder";
+    const NAME: &str = "Petalock recovery key.pdf";
+    const FOLDER_SUFFIX: &str = ".petalock-partial-folder";
 
     type Saved = ShellResult<Tagged<Outcome<SavedView>>>;
 
@@ -806,7 +809,7 @@ mod tests {
         assert!(folder_hex.is_some_and(is_hex16), "{folder_name}");
         let file_hex = file_name
             .strip_prefix('.')
-            .and_then(|n| n.strip_suffix(".lockbox-partial"));
+            .and_then(|n| n.strip_suffix(".petalock-partial"));
         assert!(file_hex.is_some_and(is_hex16), "{file_name}");
         assert_eq!(
             ts.journal(),
@@ -955,7 +958,7 @@ mod tests {
         assert!(!ts.shell.paths.outputs.exists(), "no journal change");
     }
 
-    /// Lockbox's own state folder is refused, before anything is written or printed.
+    /// Petalock's own state folder is refused, before anything is written or printed.
     #[test]
     fn state_folder_refused() {
         let ts = TestShell::new();
@@ -1266,7 +1269,7 @@ mod tests {
         print
     }
 
-    /// The printers Lockbox offers leave out the ones that write a file through a box of their own, and fax and OneNote
+    /// The printers Petalock offers leave out the ones that write a file through a box of their own, and fax and OneNote
     /// printers; the default is the one Windows names.
     #[test]
     fn list_printers_leaves_out_file_and_fax_printers() {
@@ -1336,7 +1339,7 @@ mod tests {
     }
 
     /// Print goes to the printer that was named, and only to it; the page that asked is told once the printer has the
-    /// job; Lockbox writes no file and keeps no journal entry for it; the printer is free after.
+    /// job; Petalock writes no file and keeps no journal entry for it; the printer is free after.
     #[test]
     fn print_sends_to_the_named_printer() {
         let ts = TestShell::new();
@@ -1524,7 +1527,7 @@ mod tests {
     }
 
     /// The same for Save as PDF: a lock between queueing and submission means WebView2 is never asked, no PDF is
-    /// made, the earlier file is as it was, and what Lockbox had journaled is cleaned up.
+    /// made, the earlier file is as it was, and what Petalock had journaled is cleaned up.
     #[test]
     fn a_pdf_queued_before_a_lock_is_never_submitted() {
         let ts = TestShell::new();

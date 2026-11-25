@@ -40,7 +40,7 @@ const OLDER = "My vault.before-restore";
 const TOO_LONG = "That name is too long. A vault name can have up to 200 characters.";
 const NAME_FIRST = "Give the vault a name.";
 const THEN_RENAME = {
-  changed: "Its details were changed outside Lockbox. Look at that change and accept it first, then rename it.",
+  changed: "Its details were changed outside Petalock. Look at that change and accept it first, then rename it.",
   unchecked: "Lock this vault and open it again, then rename it.",
   password: "Change this vault's password once more, then rename it.",
   recovery: "Make a new recovery key for this vault, then rename it.",
@@ -391,14 +391,14 @@ test("rename_refused_shows_the_reason_in_words", async () => {
     { name: "recovery key copies disagree", refuse: RECOVERY_KEY_COPIES_DISAGREE, says: THEN_RENAME.recovery },
     { name: "busy", refuse: { code: "busy", what: "operation in progress" }, says: "That vault is busy. Wait for what it's doing to finish, then try again." },
     { name: "read-only", refuse: { code: "read_only" }, says: "This vault is read-only. It was opened from a backup, so nothing in it can change." },
-    { name: "unknown session", refuse: { code: "not_found" }, says: "Lockbox can't find that. It may have been moved or deleted." },
-    { name: "malformed", refuse: { code: "invalid_input", what: "request" }, says: "Lockbox can't use that. Check what you entered and try again." },
+    { name: "unknown session", refuse: { code: "not_found" }, says: "Petalock can't find that. It may have been moved or deleted." },
+    { name: "malformed", refuse: { code: "invalid_input", what: "request" }, says: "Petalock can't use that. Check what you entered and try again." },
     {
       name: "the disk (with a path the page must not show)",
       refuse: { code: "core", kind: "io", message: "C:\\Users\\MU-secret\\Home\\vault.json" },
-      says: "Lockbox couldn't reach that folder or file. Check that the drive is connected, then try again.",
+      says: "Petalock couldn't reach that folder or file. Check that the drive is connected, then try again.",
     },
-    { name: "the header too big", refuse: { code: "core", kind: "too_large", what: "vault header" }, says: "That is too big for Lockbox to keep." },
+    { name: "the header too big", refuse: { code: "core", kind: "too_large", what: "vault header" }, says: "That is too big for Petalock to keep." },
   ];
   for (const one of cases) {
     const typed = one.typed ?? "Cabin";
@@ -653,7 +653,7 @@ test("a_rename_refused_for_one_of_the_backup_reasons_offers_the_way_forward", as
       name: "details changed",
       header: true,
       button: "See the change",
-      opens: () => screen.findByRole("dialog", { name: "Home's details were changed outside Lockbox." }),
+      opens: () => screen.findByRole("dialog", { name: "Home's details were changed outside Petalock." }),
     },
   ];
   for (const one of cases) {

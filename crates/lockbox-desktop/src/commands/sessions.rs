@@ -86,9 +86,9 @@ pub(super) async fn close_answer(
     blocking(move || shell.answer_claimed(question, go)).await
 }
 
-/// 2c's Clear now, on any copy message: takes Lockbox's last copy off the clipboard if it is still there (see
+/// 2c's Clear now, on any copy message: takes Petalock's last copy off the clipboard if it is still there (see
 /// [`Clipboard::clear_now`](crate::clipboard::Clipboard::clear_now)). It takes no session: it reads no vault and can only
-/// remove what Lockbox itself put on the clipboard.
+/// remove what Petalock itself put on the clipboard.
 #[tauri::command]
 pub(super) async fn clear_copied(
     shell: State<'_, Arc<Shell>>,
@@ -150,7 +150,7 @@ mod tests {
         get_ipc_response(window, request).map(|body| body.deserialize().expect("a JSON answer"))
     }
 
-    /// 2c's Clear now through the real command: "cleared" while Lockbox's copy is on the clipboard, "gone" once it
+    /// 2c's Clear now through the real command: "cleared" while Petalock's copy is on the clipboard, "gone" once it
     /// isn't, and a body with anything in it refused.
     #[test]
     fn clear_copied_answers_what_it_found() {

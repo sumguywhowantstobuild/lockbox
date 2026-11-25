@@ -92,7 +92,7 @@ pub(super) async fn set_settings(
     blocking(move || shell.set_settings(settings)).await
 }
 
-/// Whether Lockbox starts with Windows, as the registry says now (`{ on, turned_off_in_windows }`).
+/// Whether Petalock starts with Windows, as the registry says now (`{ on, turned_off_in_windows }`).
 #[tauri::command]
 pub(super) async fn get_startup(
     shell: State<'_, Arc<Shell>>,
@@ -110,7 +110,7 @@ struct SetStartup {
     on: bool,
 }
 
-/// Turns Lockbox's `Run` entry on or off and answers the state read back (`{ on, turned_off_in_windows }`), which is
+/// Turns Petalock's `Run` entry on or off and answers the state read back (`{ on, turned_off_in_windows }`), which is
 /// not always what was asked: Windows' own Startup settings may have it turned off.
 #[tauri::command]
 pub(super) async fn set_startup(

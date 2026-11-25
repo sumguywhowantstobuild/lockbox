@@ -229,7 +229,7 @@ export interface ForgotFlow {
   /** The identity of the list the vault was read from, with `vault` the row the key check names (Task 9). */
   list: number;
   /**
-   * `key`: 28a, and 28b when `problem` says what was wrong with the key; `no_key`: 28c; `changed`: the question about details changed outside Lockbox, over 28a,
+   * `key`: 28a, and 28b when `problem` says what was wrong with the key; `no_key`: 28c; `changed`: the question about details changed outside Petalock, over 28a,
    * asked before the new password; `password`: 28d; `done`: 28e, with the vault open under it.
    */
   phase: "key" | "no_key" | "changed" | "password" | "done";
@@ -245,7 +245,7 @@ export interface ForgotFlow {
   choice: string | null;
   /** The vault's name from the details the key opened, once checked. */
   name: string | null;
-  /** The person said yes to details changed outside Lockbox: it goes with the new password. */
+  /** The person said yes to details changed outside Petalock: it goes with the new password. */
   accepted: boolean;
   /** The session the new password opened, once it has: 28e's Back up now is for it. */
   session: number | null;
@@ -393,10 +393,10 @@ export type Banner = "unreadable" | "leftover" | "spare" | "cloud" | "backup" | 
  * the rest, and the next unlock is told again by the shell: the page keeps no memory that would hide a question.
  */
 export interface SessionAsks {
-  /** Ask 3 waits: the vault's details were changed outside Lockbox. */
+  /** Ask 3 waits: the vault's details were changed outside Petalock. */
   detailsChanged: boolean;
   /**
-   * An older copy opened read-only whose details were changed outside Lockbox (the shell's `header_changed`). It is no question, since nothing in a read-only
+   * An older copy opened read-only whose details were changed outside Petalock (the shell's `header_changed`). It is no question, since nothing in a read-only
    * copy can be accepted: a banner says it, and closes (`"details"`).
    */
   headerChanged: boolean;
@@ -453,13 +453,13 @@ export interface Notices {
   /** What a restore that didn't finish left (launch's notice, or what a refused restore or a Try again found), or `null`: the screens for it are `RestoreNotices` and the lock screen's. */
   restore: RestoreAsk | null;
   /**
-   * The window was closed for the first time: every vault is locked, the window stayed, and 5b says why Lockbox is still
+   * The window was closed for the first time: every vault is locked, the window stayed, and 5b says why Petalock is still
    * running. It is only ever heard as an event (never at launch), and it goes with the shell's `explain: false`.
    */
   firstClose: boolean;
   /**
    * The save shortcut is off: `taken` (another app holds it) or `not_set` (it could not be turned on for another reason). Both stay until the
-   * person closes the message, and are told again only when Lockbox starts again.
+   * person closes the message, and are told again only when Petalock starts again.
    */
   shortcut: "taken" | "not_set" | null;
   /** How many opened copies of stored files another program still holds after a cleanup (10e): the count of the last `open_cleanup`, 0 for none. */
@@ -1834,7 +1834,7 @@ export async function retryOpenFiles(): Promise<void> {
   }
 }
 
-/** Closes the message that the save shortcut is off. It comes back only when Lockbox starts again, or if the shell tells it again. */
+/** Closes the message that the save shortcut is off. It comes back only when Petalock starts again, or if the shell tells it again. */
 export function dismissShortcutNotice(): void {
   set({ ...state, notices: { ...state.notices, shortcut: null } });
 }
@@ -2470,7 +2470,7 @@ export async function makeNewRecoveryKey(session: number, currentPassword: strin
 // ---- Export to a readable file (Plan 4D Task 2: 34a to 34c) ----
 //
 // Asked for from inside a writable vault, with the vault's password checked in the same call. The form (34a) is the vault's own, as the new recovery key's is: what is
-// typed lives in the form and is wiped as it is sent. Rust opens Windows' save dialog, refuses a vault's folder and Lockbox's own, and writes the CSV; the page hears
+// typed lives in the form and is wiped as it is sent. Rust opens Windows' save dialog, refuses a vault's folder and Petalock's own, and writes the CSV; the page hears
 // the folder to say, counts, and the titles of the rows whose values have line breaks, and nothing else of the vault. A cloud-synced folder asks first (34b) by a
 // token the shell parked: Continue and Pick another folder send that token alone, never the password, and Cancel lets it go. The file's folder is never sent back.
 
@@ -2706,7 +2706,7 @@ export function putBackupAside(session: number): void {
 }
 
 /**
- * Ask 2's "See the change": the details were changed outside Lockbox and not accepted, which is Ask 3's question. It opens for this vault, and
+ * Ask 2's "See the change": the details were changed outside Petalock and not accepted, which is Ask 3's question. It opens for this vault, and
  * its Accept or Lock this vault answer it as they do after an unlock.
  */
 export function seeTheChange(session: number): void {
@@ -2716,7 +2716,7 @@ export function seeTheChange(session: number): void {
 }
 
 /**
- * The rename box's "See the change" (4C Task 13b): the shell refused the rename because this vault's details were changed outside Lockbox, so Ask 3 opens for it, as Ask 2's
+ * The rename box's "See the change" (4C Task 13b): the shell refused the rename because this vault's details were changed outside Petalock, so Ask 3 opens for it, as Ask 2's
  * button does for a backup. A vault opened read-only has nothing to accept.
  */
 export function openDetailsChanged(session: number): void {
@@ -4162,7 +4162,7 @@ export function clearForgotProblem(): void {
  * the answer. The key's own refusals (a typo, a word that is no listed word, a wrong count) and every other refusal come back to 28a with their words, the key
  * still in the box to be mended (Plan 4C Task 13c); an accepted key moves the flow on, and the screen wipes it; the shell's
  * `wrong_password` is the page's "doesn't open this vault", since it is the same to the person for another vault's key and an old one. A key that opens
- * the vault goes to 28d, or to the question about details changed outside Lockbox first when the shell says so.
+ * the vault goes to 28d, or to the question about details changed outside Petalock first when the shell says so.
  */
 export async function checkRecoveryKey(key: string): Promise<void> {
   const flow = state.forgot;
@@ -4194,7 +4194,7 @@ export async function checkRecoveryKey(key: string): Promise<void> {
 }
 
 /**
- * The question about details changed outside Lockbox (Ask 3's words), asked before the new password. Yes goes to 28d, and the yes goes to the shell with the
+ * The question about details changed outside Petalock (Ask 3's words), asked before the new password. Yes goes to 28d, and the yes goes to the shell with the
  * password; No lets the key go and is 28a again, with nothing changed.
  */
 export function answerChangedDetails(yes: boolean): void {
@@ -4394,7 +4394,7 @@ export type OlderOpen = "opened" | "changed" | "stale";
 /**
  * Open read-only, with what was typed in one box (a password or a recovery key; the shell tries a well-formed key as a key, then as a password). A wrong one is
  * thrown, for the step to say in the field. The copy opens as a read-only session of its own whose place on the list is `NOT_ON_THE_LIST`, so the live vault does
- * not show as unlocked because of it. The listing is read again afterwards. A copy whose details were changed outside Lockbox (`header_changed`) opens all the
+ * not show as unlocked because of it. The listing is read again afterwards. A copy whose details were changed outside Petalock (`header_changed`) opens all the
  * same, with a banner that says so. An open that was walked away from (`abandonOlderOpens`) before its answer came shows nothing: the session the shell made is
  * locked again, and `"stale"` is the answer.
  */
@@ -6191,7 +6191,7 @@ export function saveChoiceValue(choice: SaveChoice): string {
   return choice.kind === "open" ? `s:${String(choice.session)}` : `v:${String(choice.list)}:${String(choice.vault)}`;
 }
 
-/** Whether an open vault is waiting on a step the design says shows nothing of the vault yet: its recovery key (21f, 29b) or Ask 3 (its details changed outside Lockbox). */
+/** Whether an open vault is waiting on a step the design says shows nothing of the vault yet: its recovery key (21f, 29b) or Ask 3 (its details changed outside Petalock). */
 function waitsOnStep(entry: SessionData): boolean {
   return entry.recovery !== null || entry.asks.detailsChanged;
 }
@@ -6759,7 +6759,7 @@ export async function openFromSearch(session: number, id: string): Promise<void>
 }
 
 /**
- * 2c's Clear now, on a copy message: asks the shell to take Lockbox's copy off the clipboard, and says what it found in place of the
+ * 2c's Clear now, on a copy message: asks the shell to take Petalock's copy off the clipboard, and says what it found in place of the
  * countdown. A message that changed meanwhile (a newer copy, anything else) is left as it is.
  */
 export async function clearCopiedNow(): Promise<void> {
@@ -6774,7 +6774,7 @@ export async function clearCopiedNow(): Promise<void> {
         ? "Clipboard cleared"
         : found === "gone"
           ? "It's no longer on the clipboard"
-          : "Another app is using the clipboard. Lockbox clears it as soon as it can.",
+          : "Another app is using the clipboard. Petalock clears it as soon as it can.",
     );
   } catch (error) {
     if (state.toast === shown) sayFailure(shown.session, error);

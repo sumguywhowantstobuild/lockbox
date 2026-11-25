@@ -282,7 +282,7 @@ mod tests {
 
         // No file yet: the defaults. A refused value is neither saved nor put in effect.
         let temp = TempDir::new();
-        let file = temp.path().join("Lockbox").join("settings.json");
+        let file = temp.path().join("Petalock").join("settings.json");
         let store = SettingsStore::load(file.clone());
         assert_eq!(store.get(), defaults);
         for refused in [idle(0), idle(61), clipboard(9), clipboard(301)] {
@@ -443,7 +443,7 @@ mod tests {
     #[test]
     fn new_settings_are_saved_and_read_back() {
         let temp = TempDir::new();
-        let file = temp.path().join("Lockbox").join("settings.json");
+        let file = temp.path().join("Petalock").join("settings.json");
         let store = SettingsStore::load(file.clone());
         let chosen = Settings {
             theme: Theme::Dark,
@@ -557,7 +557,7 @@ mod tests {
     #[test]
     fn close_explained_is_saved_with_the_settings_and_kept() {
         let temp = TempDir::new();
-        let file = temp.path().join("Lockbox").join("settings.json");
+        let file = temp.path().join("Petalock").join("settings.json");
         let store = SettingsStore::load(file.clone());
         assert!(!store.close_explained());
 

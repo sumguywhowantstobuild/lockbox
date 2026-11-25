@@ -17,7 +17,7 @@ const stamp = String(Date.now());
 const PASSWORD = ["MU", "e2e", "capture", stamp].join("-");
 const KEY_NAME = "MU_E2E_CAPTURED_KEY";
 const KEY_VALUE = ["mu", "e2e", "key", stamp].join("-");
-// copied after the shortcut: Lockbox must not read the clipboard again when it saves
+// copied after the shortcut: Petalock must not read the clipboard again when it saves
 const LATER_VALUE = ["mu", "e2e", "later", stamp].join("-");
 const clipboard = app.clipboardSteps(env);
 

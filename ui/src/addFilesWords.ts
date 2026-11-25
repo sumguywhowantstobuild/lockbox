@@ -30,8 +30,8 @@ export function verbs(into: AddInto): { action: string; doing: string; done: str
 /** 9c's sentence that the originals stay: "The originals are still unprotected on your PC. ..." (one file: "The original ... it"). */
 export function originalsStay(count: number): string {
   return count === 1
-    ? "The original is still unprotected on your PC. Lockbox didn't change or delete it, so remove it yourself if you no longer need it."
-    : "The originals are still unprotected on your PC. Lockbox didn't change or delete them, so remove them yourself if you no longer need them.";
+    ? "The original is still unprotected on your PC. Petalock didn't change or delete it, so remove it yourself if you no longer need it."
+    : "The originals are still unprotected on your PC. Petalock didn't change or delete them, so remove them yourself if you no longer need them.";
 }
 
 /** What a batch left out says about the originals that were never stored, `count` of them: keep them (one: "Keep the file … It isn't … its original … it"). */
@@ -107,7 +107,7 @@ export function refusalWords(error: unknown, files: readonly PickedFile[]): { te
     if (over.length > 0) {
       const limit = formatBytes(MAX_FILE_BYTES);
       return {
-        text: over.map((file) => `${file.name} is ${formatBytes(file.size)}. Lockbox can keep a file up to ${limit}.`).join(" "),
+        text: over.map((file) => `${file.name} is ${formatBytes(file.size)}. Petalock can keep a file up to ${limit}.`).join(" "),
         size: true,
       };
     }

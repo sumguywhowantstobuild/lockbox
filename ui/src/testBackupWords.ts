@@ -17,7 +17,7 @@ const OTHER_VAULT = new Set(["backup: wrong vault"]);
  * 23d's sentence for a damaged backup, from the refusal the shell sent (`{ code: "core", kind: "damaged", what }`). Only the whats listed above get a
  * sentence of their own: a stored file, an item, another vault's backup. Everything else (the archive's own structure: `not a backup archive`,
  * `central directory`, `end record`, `local header` and the rest of the `backup: ...` whats of `archive.rs`; the signatures: `manifest mac`, `header mac`,
- * `no header`, `no manifest`; and any word nobody listed) is the one that says the file is not a whole Lockbox backup, since none of them can be trusted.
+ * `no header`, `no manifest`; and any word nobody listed) is the one that says the file is not a whole Petalock backup, since none of them can be trusted.
  */
 export function damagedWords(error: unknown): string {
   const what = typeof error === "object" && error !== null ? (error as { what?: unknown }).what : undefined;
@@ -30,7 +30,7 @@ export function damagedWords(error: unknown): string {
     }
     if (OTHER_VAULT.has(what)) return `This backup was made from a different vault. ${USE_ANOTHER}`;
   }
-  return `This file isn't a whole Lockbox backup, or its contents were changed after it was made, so it can't be trusted. ${USE_ANOTHER}`;
+  return `This file isn't a whole Petalock backup, or its contents were changed after it was made, so it can't be trusted. ${USE_ANOTHER}`;
 }
 
 /** 23b: how many attached files the backup did not hold, when it did not hold some. `null` when it held them all. */

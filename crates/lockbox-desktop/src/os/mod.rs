@@ -74,7 +74,7 @@ pub trait Hotkey: Send + Sync {
     fn set(&self, shortcut: Option<Shortcut>) -> Result<(), HotkeyTaken>;
 }
 
-/// Whether Lockbox starts when the person signs in to Windows: the current user's `Run` entry, and Windows' own Startup
+/// Whether Petalock starts when the person signs in to Windows: the current user's `Run` entry, and Windows' own Startup
 /// settings, which can turn it off. Fails with the OS's error, which the shell turns into fixed text
 /// ([`STARTUP_FAILED`](crate::startup::STARTUP_FAILED)): no path or registry data is kept in it.
 pub trait StartupEntry: Send + Sync {
@@ -86,13 +86,13 @@ pub trait StartupEntry: Send + Sync {
 }
 
 /// A copy's own tag (spec §7.3): 16 random bytes from the OS, written beside the copy in [`TAG_FORMAT`]. Not secret
-/// and not derived from the copied value; it only tells Lockbox's copy apart from anything copied since.
+/// and not derived from the copied value; it only tells Petalock's copy apart from anything copied since.
 pub type CopyTag = [u8; 16];
 
-/// The clipboard as Lockbox uses it (spec §7.3). Each method is one clipboard opening: tried every
+/// The clipboard as Petalock uses it (spec §7.3). Each method is one clipboard opening: tried every
 /// [`CLIPBOARD_RETRY`], at most [`CLIPBOARD_TRIES`] times, then [`CLIPBOARD_BUSY`]. The clipboard is opened with no
 /// owner window, so a program that holds it open with no window of its own does not make it busy (Windows' rule);
-/// Lockbox's own openings take turns ([`ClipboardSteps`]), so none overlaps another.
+/// Petalock's own openings take turns ([`ClipboardSteps`]), so none overlaps another.
 pub trait ClipboardBackend: Send + Sync {
     /// Puts `text` on the clipboard with `tag` in [`TAG_FORMAT`] and the three [`EXCLUSION_FORMATS`] that keep it out
     /// of clipboard history, cloud sync and clipboard monitors, all in one opening. The text goes last, so it is never
@@ -109,7 +109,7 @@ pub trait ClipboardBackend: Send + Sync {
     fn read_text(&self, until: Option<Instant>) -> ShellResult<Option<Zeroizing<String>>>;
     /// Empties the clipboard only while its text is exactly `expected`, read and emptied in the same opening: whether
     /// it did. Anything else (other text, no text, text too large to be `expected`) is left alone. This is for a
-    /// value Lockbox did not copy itself, so it has no tag to check.
+    /// value Petalock did not copy itself, so it has no tag to check.
     fn clear_if_text(&self, expected: &str, until: Option<Instant>) -> ShellResult<bool>;
     /// Like [`clear_if_text`](Self::clear_if_text), reading a line break as one: CRLF and a lone CR count as LF on
     /// both sides, and the text is otherwise compared exactly. For a text the page pasted, which may not have kept
@@ -168,8 +168,8 @@ pub const EXCLUSION_FORMATS: [&str; 3] = [
     "CanIncludeInClipboardHistory",
     "CanUploadToCloudClipboard",
 ];
-/// Lockbox's own format, holding the copy's [`CopyTag`].
-pub const TAG_FORMAT: &str = "Lockbox.CopyTag";
+/// Petalock's own format, holding the copy's [`CopyTag`].
+pub const TAG_FORMAT: &str = "Petalock.CopyTag";
 
 /// The clipboard's single steps, as Windows offers them. [`ClipboardSteps`] puts them in order, so the order and its
 /// failure paths are the same for the real clipboard and the tests' fake.
@@ -204,8 +204,8 @@ pub trait ClipboardCalls: Send + Sync {
 pub struct ClipboardSteps<C> {
     calls: Arc<C>,
     clock: Arc<dyn Clock>,
-    /// Held for as long as one of Lockbox's own openings is: Windows lets a second opener with no owner window in
-    /// while the first is open, so Lockbox's threads (the timer's clear, a lock hook, a copy, the save shortcut's read)
+    /// Held for as long as one of Petalock's own openings is: Windows lets a second opener with no owner window in
+    /// while the first is open, so Petalock's threads (the timer's clear, a lock hook, a copy, the save shortcut's read)
     /// take turns here instead.
     turn: Mutex<()>,
 }
@@ -227,7 +227,7 @@ impl<C: ClipboardCalls> ClipboardSteps<C> {
     }
 
     /// One opening: tried every [`CLIPBOARD_RETRY`], at most [`CLIPBOARD_TRIES`] times. A try needs the turn (so one
-    /// of Lockbox's own openings under way makes it fail, like a program holding the clipboard) and then Windows' open.
+    /// of Petalock's own openings under way makes it fail, like a program holding the clipboard) and then Windows' open.
     /// With `until`, no try starts at or after it and no wait runs past it: [`CLIPBOARD_BUSY`] once it has come.
     fn open(&self, until: Option<Instant>) -> ShellResult<Opening<'_, C::Opened>> {
         for tried in 1..=CLIPBOARD_TRIES {
@@ -394,7 +394,7 @@ fn same_lines(a: &str, b: &str) -> bool {
 }
 
 /// Whether `held`, what [`TAG_FORMAT`] holds, is exactly `tag`: the 16 bytes, then nothing, or only zeros (a block
-/// may be rounded up to a larger size, `GlobalSize`, and Lockbox's blocks are zero-filled). Anything shorter, or
+/// may be rounded up to a larger size, `GlobalSize`, and Petalock's blocks are zero-filled). Anything shorter, or
 /// anything else after the tag, is not this copy's.
 fn is_tag(held: &[u8], tag: &CopyTag) -> bool {
     held.split_at_checked(tag.len())
@@ -428,8 +428,8 @@ pub struct InstalledPrinter {
 
 impl InstalledPrinter {
     /// Whether this printer makes a file through a save box or a window of its own instead of sending a page to a device,
-    /// which Lockbox does not offer: that box (opened by WebView2's own process) would keep the job outside Lockbox
-    /// after a lock, and the recovery key's page with it. Save as PDF is Lockbox's own way to make a file.
+    /// which Petalock does not offer: that box (opened by WebView2's own process) would keep the job outside Petalock
+    /// after a lock, and the recovery key's page with it. Save as PDF is Petalock's own way to make a file.
     ///
     /// Chosen from what Windows says about the printer, by Microsoft's documentation, in this order of evidence:
     /// - its port: `PORTPROMPT:` (the port of Microsoft Print to PDF and the Microsoft XPS Document Writer) and `FILE:`
@@ -463,7 +463,7 @@ pub struct InstalledPrinters {
 }
 
 impl InstalledPrinters {
-    /// What Lockbox offers: the printers that are not [`writes_a_file_of_its_own`](InstalledPrinter::writes_a_file_of_its_own),
+    /// What Petalock offers: the printers that are not [`writes_a_file_of_its_own`](InstalledPrinter::writes_a_file_of_its_own),
     /// in Windows' order, and the default only when it is among them (`None` when it was left out, or there is none).
     pub fn offered(&self) -> PrinterList {
         let printers: Vec<String> = self
@@ -481,8 +481,8 @@ impl InstalledPrinters {
 /// on the page (R5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrintFailed {
-    /// A job of Lockbox's own is still running; WebView2 was not asked. (Microsoft's reference says a second job at
-    /// once fails; Lockbox answers before it gets that far.)
+    /// A job of Petalock's own is still running; WebView2 was not asked. (Microsoft's reference says a second job at
+    /// once fails; Petalock answers before it gets that far.)
     Busy,
     /// WebView2 was not asked, or refused to start the job. `code` is the `HRESULT` it gave; 0 when there was no
     /// window to ask.
@@ -671,7 +671,7 @@ impl Timer for ThreadTimer {
         #[cfg(test)]
         let waits = lock(&self.waits).clone();
         thread::Builder::new()
-            .name("lockbox-timer".into())
+            .name("petalock-timer".into())
             .spawn(move || {
                 run_timer(
                     jobs,
@@ -867,7 +867,7 @@ pub enum NoticeAnswer {
     Dismissed,
 }
 
-/// The one notice Lockbox shows when it can't start ([`launch::cant_start`](crate::launch::cant_start)): a message with
+/// The one notice Petalock shows when it can't start ([`launch::cant_start`](crate::launch::cant_start)): a message with
 /// two buttons and an error icon, over no window (there may be none). Waits for the person. Only an answer of
 /// [`NoticeAnswer::OpenGuide`] means the first button was pressed; anything unclear is [`NoticeAnswer::Dismissed`].
 pub trait StartupNotice: Send + Sync {
@@ -1158,7 +1158,7 @@ mod tests {
         assert_eq!(fake.text().as_deref(), Some("theirs"));
     }
 
-    /// Fix round 1 (1): another program copies the instant Lockbox's write closes the clipboard. Its copy has no tag,
+    /// Fix round 1 (1): another program copies the instant Petalock's write closes the clipboard. Its copy has no tag,
     /// so no clear ever takes it.
     #[test]
     fn copy_right_after_the_close_is_never_cleared() {
@@ -1332,7 +1332,7 @@ mod tests {
         );
     }
 
-    /// A program that opens the clipboard with no owner window gets in during Lockbox's opening (Windows lets it), and
+    /// A program that opens the clipboard with no owner window gets in during Petalock's opening (Windows lets it), and
     /// can put a bigger text there between the look at the size and the copy. The copy measures the block it reads, so
     /// that text is refused before any of it is copied, by a read and by a clear alike.
     #[test]
@@ -1563,7 +1563,7 @@ mod tests {
         assert_eq!(steps.clear_if_text_lines("a\nb", None), Ok(true));
     }
 
-    /// Windows lets a second opener with no owner window in while the first is open, so Lockbox's own threads take
+    /// Windows lets a second opener with no owner window in while the first is open, so Petalock's own threads take
     /// turns: an opening tried from inside another (the save shortcut's read landing in the middle of a clear or a
     /// copy) is busy, whichever calls are involved, and the outer opening is not disturbed.
     #[test]
@@ -1778,7 +1778,7 @@ mod tests {
         }
     }
 
-    /// The printers Lockbox offers are the ones that send a page to a device: not one on the file prompt's ports, not a
+    /// The printers Petalock offers are the ones that send a page to a device: not one on the file prompt's ports, not a
     /// fax printer (by attribute, or by a driver named for fax), not a OneNote printer (by driver or port). A pool is
     /// left out when any port in it is a file port. Case does not matter, and names that only look alike stay.
     #[test]

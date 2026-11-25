@@ -252,7 +252,7 @@ test("a_refusal_before_the_start_is_said_in_words_and_nothing_starts", async () 
   shell.refuseNext("save_all_files", { code: "invalid_input", what: "state folder" });
   await pressSaveAll();
   await waitFor(() => {
-    expect(toast()).toContain("Lockbox won't save that in its own settings folder. Choose another folder.");
+    expect(toast()).toContain("Petalock won't save that in its own settings folder. Choose another folder.");
   });
   expect(sent("save_all_start")).toEqual([]);
   expect(screen.queryByRole("complementary")).toBeNull();
@@ -496,13 +496,13 @@ test("show_in_explorer_that_fails_is_said_and_one_that_lost_its_handle_says_to_o
   shell.explorerFailsNext();
   fireEvent.click(within(ended).getByRole("button", { name: "Show in Explorer" }));
   await waitFor(() => {
-    expect(toast()).toContain("Lockbox couldn't reach that folder or file.");
+    expect(toast()).toContain("Petalock couldn't reach that folder or file.");
   });
   expect(toast()).not.toContain(SAVE_ALL_FOLDER);
   shell.dropParkedChoices();
   fireEvent.click(within(ended).getByRole("button", { name: "Show in Explorer" }));
   await waitFor(() => {
-    expect(toast()).toContain("Lockbox can't open that folder now. Open it from Windows.");
+    expect(toast()).toContain("Petalock can't open that folder now. Open it from Windows.");
   });
 });
 

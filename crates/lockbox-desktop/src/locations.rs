@@ -236,7 +236,7 @@ fn known_cloud_folders(env: &dyn Env) -> Vec<(CloudProvider, PathBuf)> {
 const MAX_DROPBOX_INFO: u64 = 1024 * 1024;
 
 /// The folders Dropbox's `info.json` lists: `{ "<account>": { "path": "<folder>", .. }, .. }`. Dropbox's own file, so
-/// fields Lockbox does not use are allowed; anything unreadable gives nothing.
+/// fields Petalock does not use are allowed; anything unreadable gives nothing.
 fn dropbox_folders(info: &Path) -> Vec<PathBuf> {
     #[derive(Deserialize)]
     struct Account {
@@ -422,7 +422,7 @@ mod tests {
         assert!(!ts.shell.paths.root.exists());
         let local = ts.env.folder(KnownFolder::LocalAppData);
         assert_eq!(
-            check(&ts, &local.join("Lockbox.")).err(),
+            check(&ts, &local.join("Petalock.")).err(),
             refused("folder").err()
         );
     }

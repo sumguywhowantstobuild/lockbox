@@ -34,8 +34,8 @@ use crate::session::{Location, OpenStep, Opened, SessionId, SessionInfo, Tagged,
 use crate::shell::Shell;
 
 /// A backup file's extension, and the dialogs' filter for it (the extensions it shows, without dots).
-pub(crate) const EXTENSION: &str = ".lockbox-backup";
-pub(crate) const FILTER: (&str, &[&str]) = ("Lockbox backup", &["lockbox-backup"]);
+pub(crate) const EXTENSION: &str = ".petalock-backup";
+pub(crate) const FILTER: (&str, &[&str]) = ("Petalock backup", &["petalock-backup"]);
 
 /// What a finished backup holds and left out (spec §6.7: the report counts each kind), and the file's size.
 #[derive(Debug, Serialize)]
@@ -305,7 +305,7 @@ pub(crate) fn display_name(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// Whether `dest`'s file name ends in `.lockbox-backup`, in any case.
+/// Whether `dest`'s file name ends in `.petalock-backup`, in any case.
 fn has_backup_extension(dest: &Path) -> bool {
     let name = dest.file_name().unwrap_or_default().to_string_lossy();
     let name = name.as_bytes();
@@ -317,7 +317,7 @@ impl Shell {
     /// Writes a backup of the open vault where the user picks (spec §6.7). Refused first, in this order: while the
     /// output journal is damaged (the backup's temp must be recorded in it), and for a read-only session. Then the
     /// save dialog, outside every lock, suggesting the vault's name and today's date (`Dismissed` when closed); a name
-    /// that does not end in `.lockbox-backup` (any case) is refused as `"backup extension"`, a place inside the state
+    /// that does not end in `.petalock-backup` (any case) is refused as `"backup extension"`, a place inside the state
     /// folder as `"state folder"`, both before anything is written. Then the engine's check, which refuses everything
     /// that can be refused before a byte is written (below), with no job begun and nothing sent to the page. Then, in
     /// a long job the page's `request` names
@@ -1311,7 +1311,7 @@ mod tests {
             .new_item(s, g, NewKind::Login, "Bank".into(), None, None)
             .unwrap()
             .data;
-        let dest = backup_file(&ts, "family.lockbox-backup");
+        let dest = backup_file(&ts, "family.petalock-backup");
         let source = ts.temp.path().join("extra.bin");
         fs::write(&source, b"extra").unwrap();
 
@@ -1357,14 +1357,14 @@ mod tests {
         assert!(busy.contains(&(Some(s), vec!["backup"])), "{busy:?}");
     }
 
-    /// Only a name ending in `.lockbox-backup` (any case) is written, and never into the state folder; a read-only
+    /// Only a name ending in `.petalock-backup` (any case) is written, and never into the state folder; a read-only
     /// session and a damaged output journal are refused before the dialog; a closed dialog does nothing.
     #[test]
     fn backup_extension_enforced() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
         let folder = ts.folder("Backups");
-        for name in ["x.zip", "x", "x.lockbox-backup.zip", "x.lockbox-backups"] {
+        for name in ["x.zip", "x", "x.petalock-backup.zip", "x.petalock-backups"] {
             ts.dialogs.answer(Some(folder.join(name)));
             assert_eq!(
                 ts.shell.backup_vault(s, g, 1).err(),
@@ -1376,7 +1376,7 @@ mod tests {
         assert!(!ts.shell.paths.outputs.exists(), "no journal change");
 
         fs::create_dir_all(&ts.shell.paths.root).unwrap();
-        let in_state = ts.shell.paths.root.join("x.lockbox-backup");
+        let in_state = ts.shell.paths.root.join("x.petalock-backup");
         ts.dialogs.answer(Some(in_state.clone()));
         assert_eq!(
             ts.shell.backup_vault(s, g, 1).err(),
@@ -1386,10 +1386,10 @@ mod tests {
         );
         assert!(!in_state.exists());
 
-        let shouting = folder.join("FAMILY.LOCKBOX-BACKUP");
+        let shouting = folder.join("FAMILY.PETALOCK-BACKUP");
         let view = back_up(&ts, s, g, &shouting);
         assert_eq!(view.items, 0);
-        assert_eq!(names(&folder), ["FAMILY.LOCKBOX-BACKUP"]);
+        assert_eq!(names(&folder), ["FAMILY.PETALOCK-BACKUP"]);
 
         // A closed dialog: `Dismissed`, tagged.
         let closed = ts.shell.backup_vault(s, g, 1).unwrap();
@@ -1416,7 +1416,7 @@ mod tests {
 
     /// A backup of a fresh vault, written into the folder [`SECRET_FOLDER`].
     fn secret_backup(ts: &TestShell, s: SessionId, g: u64) -> PathBuf {
-        let dest = ts.folder(SECRET_FOLDER).join("family.lockbox-backup");
+        let dest = ts.folder(SECRET_FOLDER).join("family.petalock-backup");
         back_up(ts, s, g, &dest);
         dest
     }
@@ -1444,7 +1444,7 @@ mod tests {
         let (s, g) = ts.open_vault("Family");
         ts.stored_file(s, g, "report.pdf", b"report");
         let key = ts.shell.regenerate_recovery(s, g).unwrap().data.words;
-        let dest = backup_file(&ts, "family.lockbox-backup");
+        let dest = backup_file(&ts, "family.petalock-backup");
         back_up(&ts, s, g, &dest);
 
         let picked = pick(&ts, &dest);
@@ -1481,7 +1481,7 @@ mod tests {
         // fallback to a password can open the backup with it.
         let (other, og) = ts.open_vault("Other");
         let other_key = ts.shell.regenerate_recovery(other, og).unwrap().data.words;
-        let dest = backup_file(&ts, "family.lockbox-backup");
+        let dest = backup_file(&ts, "family.petalock-backup");
         back_up(&ts, s, g, &dest);
         ts.shell
             .change_password(
@@ -1491,7 +1491,7 @@ mod tests {
                 Zeroizing::new(other_key.to_string()),
             )
             .unwrap();
-        let by_new_password = backup_file(&ts, "second.lockbox-backup");
+        let by_new_password = backup_file(&ts, "second.petalock-backup");
         back_up(&ts, s, g, &by_new_password);
 
         // The key opens the first backup as a key, though its text is a good password for no one.
@@ -1535,7 +1535,7 @@ mod tests {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
         ts.stored_file(s, g, "report.pdf", &vec![3u8; 300_000]);
-        let dest = backup_file(&ts, "family.lockbox-backup");
+        let dest = backup_file(&ts, "family.petalock-backup");
         back_up(&ts, s, g, &dest);
         // The backup's own offer to be tested is held too.
         let base = ts.shell.sessions.pending().len();
@@ -1561,7 +1561,7 @@ mod tests {
 
         // Damaged: the answer says so, and the choice stays.
         let len = fs::metadata(&dest).unwrap().len();
-        let copy = backup_file(&ts, "damaged.lockbox-backup");
+        let copy = backup_file(&ts, "damaged.petalock-backup");
         fs::copy(&dest, &copy).unwrap();
         for at in len - 900..len - 10 {
             flip_byte(&copy, at).unwrap();
@@ -1592,7 +1592,7 @@ mod tests {
         let (s, g) = ts.open_vault("Family");
         let bytes: Vec<u8> = (0..3 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
         ts.stored_file(s, g, "report.pdf", &bytes);
-        let dest = backup_file(&ts, "family.lockbox-backup");
+        let dest = backup_file(&ts, "family.petalock-backup");
         back_up(&ts, s, g, &dest);
         let picked = pick(&ts, &dest);
         let (shell, flag) = (
@@ -1622,14 +1622,14 @@ mod tests {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
         ts.stored_file(s, g, "report.pdf", &vec![3u8; 300_000]);
-        let dest = ts.folder(SECRET_FOLDER).join("family.lockbox-backup");
+        let dest = ts.folder(SECRET_FOLDER).join("family.petalock-backup");
         ts.dialogs.answer(Some(dest.clone()));
         let made = ts.shell.backup_vault(s, g, 1).unwrap().data;
         let mut seen = vec![serde_json::to_string(&made).unwrap()];
         let made = done(made);
         let picked = pick(&ts, &dest);
         seen.push(serde_json::to_string(&picked).unwrap());
-        assert_eq!(picked.file_name, "family.lockbox-backup");
+        assert_eq!(picked.file_name, "family.petalock-backup");
         for credential in [typed("another long password"), typed(TEST_PASSWORD)] {
             let answer = test_with(&ts, &picked, credential);
             seen.push(match answer {
@@ -2036,7 +2036,7 @@ mod tests {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
         let first = secret_backup(&ts, s, g);
-        let second = backup_file(&ts, "second.lockbox-backup");
+        let second = backup_file(&ts, "second.petalock-backup");
         back_up(&ts, s, g, &second);
         // Each backup's own offer to be tested is held too.
         let base = ts.shell.sessions.pending().len();
@@ -2054,7 +2054,7 @@ mod tests {
 
         ts.dialogs.answer(Some(second.clone()));
         let new = done(ts.shell.test_backup_pick(Some(&old.choice)).unwrap());
-        assert_eq!(new.file_name, "second.lockbox-backup");
+        assert_eq!(new.file_name, "second.petalock-backup");
         assert_eq!(new.size, fs::metadata(&second).unwrap().len());
         assert_ne!(
             serde_json::to_value(&new.choice).unwrap(),
@@ -2076,14 +2076,14 @@ mod tests {
         let (s, g) = ts.open_vault("Family");
         ts.stored_file(s, g, "report.pdf", b"report");
         let folder = ts.folder("Backups");
-        let dest = folder.join("family.lockbox-backup");
+        let dest = folder.join("family.petalock-backup");
         let opened = ts.dialogs.opened();
         let view = back_up(&ts, s, g, &dest);
-        assert_eq!(view.test.file_name, "family.lockbox-backup");
+        assert_eq!(view.test.file_name, "family.petalock-backup");
         assert_eq!(view.test.size, fs::metadata(&dest).unwrap().len());
         assert_eq!(view.test.size, view.size_on_disk);
         let json = serde_json::to_value(&view).unwrap();
-        assert_eq!(json["test"]["file_name"], "family.lockbox-backup");
+        assert_eq!(json["test"]["file_name"], "family.petalock-backup");
         assert!(
             json["test"]["choice"]
                 .as_str()
@@ -2269,7 +2269,7 @@ mod tests {
     fn lock_during_open_backup_picker() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
-        let dest = backup_file(&ts, "family.lockbox-backup");
+        let dest = backup_file(&ts, "family.petalock-backup");
         back_up(&ts, s, g, &dest);
         let base = ts.shell.sessions.pending().len();
         let first = open_pick(&ts, &dest);
@@ -2302,7 +2302,7 @@ mod tests {
         let _cleanup = Cleanup;
         let (s, g) = ts.open_vault("Family");
         ts.stored_file(s, g, "report.pdf", b"report");
-        let dest = backup_file(&ts, "family.lockbox-backup");
+        let dest = backup_file(&ts, "family.petalock-backup");
         fs::write(&dest, b"old backup").unwrap();
         let shell = Arc::clone(&ts.shell);
         // The engine's last step before the rename.
@@ -2313,7 +2313,7 @@ mod tests {
         ts.dialogs.answer(Some(dest.clone()));
         assert_eq!(ts.shell.backup_vault(s, g, 1).err(), LOCKED);
         assert_eq!(fs::read(&dest).unwrap(), b"old backup");
-        assert_eq!(names(dest.parent().unwrap()), ["family.lockbox-backup"]);
+        assert_eq!(names(dest.parent().unwrap()), ["family.petalock-backup"]);
         assert_eq!(ts.journal(), Vec::<PathBuf>::new());
     }
 
@@ -2329,7 +2329,7 @@ mod tests {
         let files = vault_dir(&ts).join("files");
         fs::remove_file(files.join(format!("{first}.blob"))).unwrap();
         fs::remove_file(files.join(format!("{third}.blob"))).unwrap();
-        let dest = backup_file(&ts, "family.lockbox-backup");
+        let dest = backup_file(&ts, "family.petalock-backup");
         let view = back_up(&ts, s, g, &dest);
         assert_eq!((view.items, view.files, view.missing_files), (1, 1, 2));
         let (bs, bg) = open_backup(&ts, &dest);
@@ -2382,7 +2382,7 @@ mod tests {
         let (s, g) = ts.open_vault("Family");
         let bytes: Vec<u8> = (0..3 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
         let (id, _) = ts.stored_file(s, g, "report.pdf", &bytes);
-        let dest = backup_file(&ts, "family.lockbox-backup");
+        let dest = backup_file(&ts, "family.petalock-backup");
         back_up(&ts, s, g, &dest);
         let (bs, bg) = open_backup(&ts, &dest);
         let files = vault_dir(&ts).join("files");
@@ -2461,7 +2461,7 @@ mod tests {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
         ts.stored_file(s, g, "report.pdf", &vec![3u8; 300_000]);
-        let dest = backup_file(&ts, "family.lockbox-backup");
+        let dest = backup_file(&ts, "family.petalock-backup");
         back_up(&ts, s, g, &dest);
         // The backup's own offer to be tested is held too.
         let base = ts.shell.sessions.pending().len();
@@ -2494,7 +2494,7 @@ mod tests {
 
         // Damaged, and the file gone: each is answered as what it is, and the choice stays for a retry.
         let len = fs::metadata(&dest).unwrap().len();
-        let copy = backup_file(&ts, "damaged.lockbox-backup");
+        let copy = backup_file(&ts, "damaged.petalock-backup");
         fs::copy(&dest, &copy).unwrap();
         for at in len - 900..len - 10 {
             flip_byte(&copy, at).unwrap();
@@ -2528,7 +2528,7 @@ mod tests {
 
         // A well-formed recovery key opens it too, from the one box; one that is no key is refused before a job begins.
         let key = ts.shell.regenerate_recovery(s, g).unwrap().data.words;
-        let by_key = backup_file(&ts, "by-key.lockbox-backup");
+        let by_key = backup_file(&ts, "by-key.petalock-backup");
         back_up(&ts, s, g, &by_key);
         let picked = open_pick(&ts, &by_key);
         let started = ts.events.started().len();
@@ -2601,7 +2601,7 @@ mod tests {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
         let first = secret_backup(&ts, s, g);
-        let second = backup_file(&ts, "second.lockbox-backup");
+        let second = backup_file(&ts, "second.petalock-backup");
         back_up(&ts, s, g, &second);
         let pending = ts.shell.sessions.pending();
         let base = pending.len();
@@ -2612,7 +2612,7 @@ mod tests {
         ts.dialogs.answer(Some(second.clone()));
         let new = done(ts.shell.open_backup_pick(Some(&old.choice)).unwrap());
         seen.push(serde_json::to_string(&new).unwrap());
-        assert_eq!(new.file_name, "second.lockbox-backup");
+        assert_eq!(new.file_name, "second.petalock-backup");
         assert_eq!(new.size, fs::metadata(&second).unwrap().len());
         assert_eq!(open_with(&ts, &old, typed(TEST_PASSWORD)).err(), EXPIRED);
         assert_eq!(pending.len(), base + 1);
@@ -2717,8 +2717,8 @@ mod tests {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
         ts.stored_file(s, g, "report.pdf", b"report");
-        let named = backup_file(&ts, "Task 14 check 2026-11-17.lockbox-backup");
-        let shouting = backup_file(&ts, "FAMILY ARCHIVE.LOCKBOX-BACKUP");
+        let named = backup_file(&ts, "Task 14 check 2026-11-17.petalock-backup");
+        let shouting = backup_file(&ts, "FAMILY ARCHIVE.PETALOCK-BACKUP");
         let bare = backup_file(&ts, "no extension");
         for dest in [&named, &shouting] {
             back_up(&ts, s, g, dest);
@@ -2727,7 +2727,7 @@ mod tests {
         fs::copy(&named, &bare).unwrap();
 
         let picked = open_pick(&ts, &named);
-        assert_eq!(picked.file_name, "Task 14 check 2026-11-17.lockbox-backup");
+        assert_eq!(picked.file_name, "Task 14 check 2026-11-17.petalock-backup");
         assert_eq!(picked.size, fs::metadata(&named).unwrap().len());
         let opened = done(open_with(&ts, &picked, typed(TEST_PASSWORD)).unwrap());
         assert_eq!(opened.data.name, "Task 14 check 2026-11-17");
@@ -2781,7 +2781,7 @@ mod tests {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
         let (id, _) = ts.stored_file(s, g, "report.pdf", b"report");
-        let dest = backup_file(&ts, "family.lockbox-backup");
+        let dest = backup_file(&ts, "family.petalock-backup");
         back_up(&ts, s, g, &dest);
         let (bs, bg) = open_backup(&ts, &dest);
         let read_only = Some(ShellError::ReadOnly);
@@ -2945,7 +2945,7 @@ mod tests {
             .new_item(s, g, NewKind::Note, "PIN".into(), Some(work.clone()), None)
             .unwrap()
             .data;
-        let dest = backup_file(&ts, "family.lockbox-backup");
+        let dest = backup_file(&ts, "family.petalock-backup");
         back_up(&ts, s, g, &dest);
         let (bs, bg) = open_backup(&ts, &dest);
         let other = new_folder(&ts, s, g, "Other");
@@ -2992,7 +2992,7 @@ mod tests {
         let (id, _) = ts.stored_file(s, g, "report.pdf", b"report");
         let (t, tg) = ts.open_vault("Other");
         let theirs = new_folder(&ts, t, tg, "Theirs");
-        let dest = backup_file(&ts, "family.lockbox-backup");
+        let dest = backup_file(&ts, "family.petalock-backup");
         back_up(&ts, s, g, &dest);
         let (bs, bg) = open_backup(&ts, &dest);
         let files = vault_dir(&ts).join("files");
@@ -3091,7 +3091,7 @@ mod tests {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
         let (id, _) = ts.stored_file(s, g, "report.pdf", b"report");
-        let dest = backup_file(&ts, "family.lockbox-backup");
+        let dest = backup_file(&ts, "family.petalock-backup");
         back_up(&ts, s, g, &dest);
         let (bs, bg) = open_backup(&ts, &dest);
         let files = vault_dir(&ts).join("files");
@@ -3347,7 +3347,7 @@ mod tests {
     fn a_read_only_session_of_a_folder_is_an_older_copy_and_a_backup_is_not() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
-        let dest = backup_file(&ts, "family.lockbox-backup");
+        let dest = backup_file(&ts, "family.petalock-backup");
         back_up(&ts, s, g, &dest);
         let (bs, _) = open_backup(&ts, &dest);
         let kinds: Vec<(SessionId, SessionKind, bool)> = ts
@@ -3373,7 +3373,7 @@ mod tests {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
         ts.stored_file(s, g, "report.pdf", b"report");
-        let dest = backup_file(&ts, "family.lockbox-backup");
+        let dest = backup_file(&ts, "family.petalock-backup");
         back_up(&ts, s, g, &dest);
 
         ts.dialogs.answer(None);
@@ -3420,7 +3420,7 @@ mod tests {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
         ts.stored_file(s, g, "report.pdf", &vec![7u8; 200_000]);
-        let dest = backup_file(&ts, "family.lockbox-backup");
+        let dest = backup_file(&ts, "family.petalock-backup");
         let view = back_up(&ts, s, g, &dest);
         let on_disk = fs::metadata(&dest).unwrap().len();
         assert_eq!(view.size_on_disk, on_disk);
@@ -3457,7 +3457,7 @@ mod tests {
         .unwrap();
         fs::remove_file(dir.join("files").join(format!("{missing_file}.blob"))).unwrap();
 
-        let dest = backup_file(&ts, "family.lockbox-backup");
+        let dest = backup_file(&ts, "family.petalock-backup");
         let view = back_up(&ts, s, g, &dest);
         assert_eq!(
             (
@@ -3820,7 +3820,7 @@ mod tests {
     fn refused_backup(ts: &TestShell, s: SessionId, g: u64, vault: &Path) -> ShellError {
         let folder = ts.folder("Refused");
         ts.dialogs
-            .answer(Some(folder.join("family.lockbox-backup")));
+            .answer(Some(folder.join("family.petalock-backup")));
         let before = job_marks(ts);
         let refused = ts.shell.backup_vault(s, g, 1).err().expect("refused");
         assert_eq!(
@@ -3842,7 +3842,7 @@ mod tests {
         let _cleanup = Cleanup;
         let (s, g) = ts.open_vault("Family");
         let folder = ts.folder("Backups");
-        let dest = folder.join("family.lockbox-backup");
+        let dest = folder.join("family.petalock-backup");
         wall(&ts, NOW);
         assert_eq!(last_backup(&ts), None);
 
@@ -3878,7 +3878,56 @@ mod tests {
         assert_eq!(last_backup(&ts).as_deref(), Some("2026-12-26T12:00:00Z"));
     }
 
-    /// The save dialog suggests `<vault name> <YYYY-MM-DD>.lockbox-backup`, the date being the person's own local day
+    /// Plan 5, Task 0c, `backups_are_saved_as_petalock_backup`: the save box suggests `.petalock-backup` and filters on
+    /// it ("Petalock backup"), the open box (the one that picks a backup to test) lists the same filter, a name that
+    /// does not end in it (the old ending too: no migration ships) is not written, and the file made is
+    /// named as asked, with nothing else beside it.
+    #[test]
+    fn backups_are_saved_as_petalock_backup() {
+        let filter = Some((
+            "Petalock backup".to_owned(),
+            vec!["petalock-backup".to_owned()],
+        ));
+        assert_eq!(EXTENSION, ".petalock-backup");
+        assert_eq!(FILTER, ("Petalock backup", &["petalock-backup"][..]));
+
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        wall(&ts, NOW);
+        // The save box: a closed one still shows what it suggests and the filter it was given.
+        assert!(matches!(
+            ts.shell.backup_vault(s, g, 1).unwrap().data,
+            Outcome::Dismissed
+        ));
+        let suggested = ts.dialogs.suggested();
+        assert_eq!(suggested.len(), 1);
+        assert!(
+            suggested[0].starts_with("Family ") && suggested[0].ends_with(".petalock-backup"),
+            "{suggested:?}"
+        );
+        assert_eq!(ts.dialogs.filters(), std::slice::from_ref(&filter));
+
+        // The old ending is not written (nothing in the app turns it back on), the new one is.
+        const OLD_ENDING_NAME: &str = "old.lockbox-backup";
+        let folder = ts.folder("Backups");
+        ts.dialogs.answer(Some(folder.join(OLD_ENDING_NAME)));
+        assert_eq!(
+            ts.shell.backup_vault(s, g, 2).err(),
+            Some(NOT_A_BACKUP),
+            "the old ending is refused"
+        );
+        assert!(names(&folder).is_empty());
+        let dest = backup_file(&ts, "family.petalock-backup");
+        back_up(&ts, s, g, &dest);
+        assert_eq!(names(&folder), ["family.petalock-backup"]);
+
+        // The open box lists the same filter, and a pick of the new name shows it as the file's name.
+        let picked = pick(&ts, &dest);
+        assert_eq!(picked.file_name, "family.petalock-backup");
+        assert_eq!(ts.dialogs.pick_filters(), std::slice::from_ref(&filter));
+    }
+
+    /// The save dialog suggests `<vault name> <YYYY-MM-DD>.petalock-backup`, the date being the person's own local day
     /// (not UTC's), and a name that is not safe as a file name is cleaned as it always was.
     #[test]
     fn backup_dialog_suggests_the_name_and_the_local_date() {
@@ -3899,8 +3948,8 @@ mod tests {
         assert_eq!(
             ts.dialogs.suggested(),
             [
-                "Family 2026-11-17.lockbox-backup",
-                "Family 2026-11-16.lockbox-backup"
+                "Family 2026-11-17.petalock-backup",
+                "Family 2026-11-16.petalock-backup"
             ]
         );
         assert_eq!(ts.dialogs.titles(), ["Back up this vault"; 2]);
@@ -3912,7 +3961,7 @@ mod tests {
     fn a_note_that_cannot_be_saved_does_not_fail_a_finished_backup() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
-        let dest = backup_file(&ts, "family.lockbox-backup");
+        let dest = backup_file(&ts, "family.petalock-backup");
         // Where the notes file should be, a folder: it cannot be read or replaced.
         let _ = fs::remove_file(&ts.shell.paths.vault_state);
         fs::create_dir(&ts.shell.paths.vault_state).unwrap();
@@ -3933,7 +3982,7 @@ mod tests {
         let bytes: Vec<u8> = (0..4 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
         ts.stored_file(s, g, "report.pdf", &bytes);
         let folder = ts.folder("Backups");
-        let dest = folder.join("family.lockbox-backup");
+        let dest = folder.join("family.petalock-backup");
         fs::write(&dest, b"old backup").unwrap();
 
         let during = Arc::new(Mutex::new(None));
@@ -3959,7 +4008,7 @@ mod tests {
         let during = during.lock().unwrap().take().expect("stopped part-way");
         assert!(during.len() > 1, "no partial was being written: {during:?}");
         assert_eq!(fs::read(&dest).unwrap(), b"old backup");
-        assert_eq!(names(&folder), ["family.lockbox-backup"]);
+        assert_eq!(names(&folder), ["family.petalock-backup"]);
         assert_eq!(ts.journal(), Vec::<PathBuf>::new());
         assert_eq!(last_backup(&ts), None);
         let started = ts.events.started();
@@ -3984,7 +4033,7 @@ mod tests {
         let (s, g) = ts.open_vault("Family");
         ts.stored_file(s, g, "report.pdf", b"report");
         let folder = ts.folder("Backups");
-        let dest = folder.join("family.lockbox-backup");
+        let dest = folder.join("family.petalock-backup");
         failpoint::arm("backup.before_publish");
         ts.dialogs.answer(Some(dest.clone()));
         let failed = ts.shell.backup_vault(s, g, 1);
@@ -4011,7 +4060,7 @@ mod tests {
         let ts = TestShell::new();
         let _cleanup = Cleanup;
 
-        // A header changed outside Lockbox, not yet accepted.
+        // A header changed outside Petalock, not yet accepted.
         let (dir, _) = closed_vault(&ts);
         edit_header(&dir, |h| h.name = "Renamed".to_owned());
         let (s, g) = by_password(&ts, &dir);
@@ -4109,7 +4158,7 @@ mod tests {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
         let dir = vault_dir(&ts);
-        ts.dialogs.answer(Some(dir.join("inside.lockbox-backup")));
+        ts.dialogs.answer(Some(dir.join("inside.petalock-backup")));
         let before = job_marks(&ts);
         let refused = ts.shell.backup_vault(s, g, 1).err();
         assert_eq!(
@@ -4118,13 +4167,14 @@ mod tests {
                 "code": "core", "kind": "invalid_input", "what": "destination inside vault"
             }))
         );
-        assert!(!dir.join("inside.lockbox-backup").exists());
+        assert!(!dir.join("inside.petalock-backup").exists());
         assert_eq!(job_marks(&ts), before, "refused before writing: no job");
 
         // A destination that is a folder, which could never be replaced, is refused the same way.
         let folder = ts.folder("Backups");
-        fs::create_dir(folder.join("taken.lockbox-backup")).unwrap();
-        ts.dialogs.answer(Some(folder.join("taken.lockbox-backup")));
+        fs::create_dir(folder.join("taken.petalock-backup")).unwrap();
+        ts.dialogs
+            .answer(Some(folder.join("taken.petalock-backup")));
         let refused = ts.shell.backup_vault(s, g, 2).err();
         assert_eq!(
             refused.map(wire),
@@ -4145,10 +4195,10 @@ mod tests {
         let bytes: Vec<u8> = (0..3 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
         ts.stored_file(s, g, "report.pdf", &bytes);
         let folder = ts.folder("Backups");
-        let dest = folder.join("family.lockbox-backup");
+        let dest = folder.join("family.petalock-backup");
         // A backup that is open (read-only) stays open: the one that runs is written beside it.
         let (bs, bg) = {
-            let opened = folder.join("opened.lockbox-backup");
+            let opened = folder.join("opened.petalock-backup");
             back_up(&ts, s, g, &opened);
             open_backup(&ts, &opened)
         };
@@ -4236,19 +4286,19 @@ mod tests {
     fn backup_on_read_only_refused() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
-        let dest = backup_file(&ts, "family.lockbox-backup");
+        let dest = backup_file(&ts, "family.petalock-backup");
         back_up(&ts, s, g, &dest);
         let (bs, bg) = open_backup(&ts, &dest);
         let (opened, started) = (ts.dialogs.opened(), ts.events.started().len());
         ts.dialogs
-            .answer(Some(backup_file(&ts, "again.lockbox-backup")));
+            .answer(Some(backup_file(&ts, "again.petalock-backup")));
         assert_eq!(
             ts.shell.backup_vault(bs, bg, 9).err(),
             Some(ShellError::ReadOnly)
         );
         assert_eq!(ts.dialogs.opened(), opened);
         assert_eq!(ts.events.started().len(), started);
-        assert!(!backup_file(&ts, "again.lockbox-backup").exists());
+        assert!(!backup_file(&ts, "again.petalock-backup").exists());
     }
 
     /// Spec 6.7's reminder: due when the last backup, else the vault's creation, is 30 or more whole days ago. The
@@ -4315,7 +4365,7 @@ mod tests {
 
         // A real backup moves it, through the same clock.
         wall(&ts, created + 50 * DAY);
-        back_up(&ts, s, g, &backup_file(&ts, "family.lockbox-backup"));
+        back_up(&ts, s, g, &backup_file(&ts, "family.petalock-backup"));
         wall(&ts, created + 79 * DAY);
         assert_eq!(due(&ts, s, g), None);
         wall(&ts, created + 80 * DAY);
@@ -4331,7 +4381,7 @@ mod tests {
         let (other, go) = ts.open_vault("Work");
         let created = dates::parse_utc(&header_of(&vault_dir(&ts)).created_at).unwrap();
         wall(&ts, created + 40 * DAY);
-        back_up(&ts, other, go, &backup_file(&ts, "work.lockbox-backup"));
+        back_up(&ts, other, go, &backup_file(&ts, "work.petalock-backup"));
         assert_eq!(due(&ts, other, go), None);
         assert_eq!(due(&ts, s, g), Some(40));
     }
@@ -4358,7 +4408,7 @@ mod tests {
     fn backup_due_is_none_on_read_only() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
-        let dest = backup_file(&ts, "family.lockbox-backup");
+        let dest = backup_file(&ts, "family.petalock-backup");
         back_up(&ts, s, g, &dest);
         let (bs, bg) = open_backup(&ts, &dest);
         wall(&ts, NOW + 400 * DAY);
@@ -4377,7 +4427,7 @@ mod tests {
         let (s, g) = ts.open_vault("Family");
         ts.stored_file(s, g, "report.pdf", &vec![7u8; 300_000]);
         let folder = ts.folder("Backups");
-        let dest = folder.join("family.lockbox-backup");
+        let dest = folder.join("family.petalock-backup");
 
         // With nothing free, the answer says what it needs.
         pretend_free(Some(0));
@@ -4433,7 +4483,7 @@ mod tests {
 
         pretend_free(Some(1024));
         ts.dialogs
-            .answer(Some(folder.join("family.lockbox-backup")));
+            .answer(Some(folder.join("family.petalock-backup")));
         let Some(ShellError::Core(view)) = ts.shell.backup_vault(s, g, 7).err() else {
             panic!("not refused for space");
         };
@@ -4454,10 +4504,10 @@ mod tests {
         // The retry with room, the way 22d sends it: the same session, another destination.
         pretend_free(Some(needed));
         ts.dialogs
-            .answer(Some(elsewhere.join("family.lockbox-backup")));
+            .answer(Some(elsewhere.join("family.petalock-backup")));
         let view = done(ts.shell.backup_vault(s, g, 8).unwrap().data);
         assert_eq!((view.items, view.files), (1, 1));
-        assert!(elsewhere.join("family.lockbox-backup").is_file());
+        assert!(elsewhere.join("family.petalock-backup").is_file());
         let started = ts.events.started();
         assert_eq!(started.len(), 1, "only the backup that ran started a job");
         assert_eq!(started[0]["request"], json!(8));
@@ -4472,7 +4522,7 @@ mod tests {
         let _volume = Volume;
         let (s, g) = ts.open_vault("Family");
         ts.stored_file(s, g, "report.pdf", b"report");
-        let dest = backup_file(&ts, "family.lockbox-backup");
+        let dest = backup_file(&ts, "family.petalock-backup");
         pretend_free(None);
         let view = back_up(&ts, s, g, &dest);
         assert_eq!((view.items, view.files), (1, 1));

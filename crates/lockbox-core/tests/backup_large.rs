@@ -154,7 +154,7 @@ fn backup_restore_over_4_gib() {
     fs::remove_file(&source).unwrap();
     stage("imported", started, &mut previous);
 
-    let backup = out.join("big.lockbox-backup");
+    let backup = out.join("big.petalock-backup");
     let report = vault
         .backup(&backup, &NoJournal, &cancel, &NoProgress)
         .unwrap();

@@ -171,7 +171,7 @@ test("copy_calls_copy_field_and_shows_clear_time", async () => {
 });
 
 // Stage 7 (2026-11-13, the group 2 walk): the approved 2c has Clear now on the copy message. It asks the shell, which clears only
-// Lockbox's own copy, and the message says what it found in place of the countdown.
+// Petalock's own copy, and the message says what it found in place of the countdown.
 test("clear_now_on_the_copy_message_says_what_the_shell_found", async () => {
   await unlocked();
   const panel = await select("Bot admin console");
@@ -179,7 +179,7 @@ test("clear_now_on_the_copy_message_says_what_the_shell_found", async () => {
   const answers = [
     ["cleared", "Clipboard cleared"],
     ["gone", "It's no longer on the clipboard"],
-    ["busy", "Another app is using the clipboard. Lockbox clears it as soon as it can."],
+    ["busy", "Another app is using the clipboard. Petalock clears it as soon as it can."],
   ] as const;
   for (const [answer, words] of answers) {
     fireEvent.click(within(panel).getByRole("button", { name: "Copy password" }));

@@ -1,6 +1,6 @@
 import { useId } from "react";
 
-/** What the tick box's hint says: Windows can keep a copy of what was copied that Lockbox cannot clear. */
+/** What the tick box's hint says: Windows can keep a copy of what was copied that Petalock cannot clear. */
 export const CLEAR_HINT = "Windows clipboard history may keep its own copy, if you've turned it on.";
 
 /**

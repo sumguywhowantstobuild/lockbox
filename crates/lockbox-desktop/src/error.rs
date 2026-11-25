@@ -79,13 +79,13 @@ fn small(count: usize) -> u32 {
 
 pub type ShellResult<T> = Result<T, ShellError>;
 
-/// A print of Lockbox's own is still running (WebView2 takes one at a time): try again once it ends.
+/// A print of Petalock's own is still running (WebView2 takes one at a time): try again once it ends.
 pub const PRINTER_BUSY: ShellError = ShellError::Busy { what: "printer" };
 /// The recovery key PDF did not come: nothing was saved and nothing is left on disk.
 pub const PDF_NOT_MADE: ShellError = ShellError::PrintFailed { what: "pdf" };
 /// The print job could not be sent to the printer that was picked.
 pub const PRINT_NOT_SENT: ShellError = ShellError::PrintFailed { what: "print" };
-/// The printer that was picked is not among the ones Lockbox lists any more.
+/// The printer that was picked is not among the ones Petalock lists any more.
 pub const PRINTER_GONE: ShellError = ShellError::InvalidInput {
     what: "printer name",
 };
@@ -208,13 +208,13 @@ pub enum Outcome<T> {
 /// same command again with its flag set. Each task adds the variants it needs.
 #[derive(Serialize)]
 pub enum Confirm {
-    /// The folder is synced by a cloud provider, which Lockbox does not support (spec §6.10): go on anyway? `provider`
+    /// The folder is synced by a cloud provider, which Petalock does not support (spec §6.10): go on anyway? `provider`
     /// is the one the location check found, a fixed name (never a path), so the question can name it (18c).
     CloudFolder {
         token: Token,
         provider: CloudProvider,
     },
-    /// The vault's header was changed outside Lockbox (spec §5.2): accept it before the recovery goes on.
+    /// The vault's header was changed outside Petalock (spec §5.2): accept it before the recovery goes on.
     HeaderChanged { token: Token },
     /// The stored file is of a type that can run code (spec §7.2): open it anyway? Confirmed by sending `open_file`
     /// again with `confirmed_executable`. Asked before anything is decrypted.

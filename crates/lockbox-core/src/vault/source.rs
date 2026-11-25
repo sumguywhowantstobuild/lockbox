@@ -610,7 +610,7 @@ pub(super) mod tests {
         f.vault.new_item(ItemKind::Note, "note", None).unwrap();
         let (item, _) = f.file_item(b"hello");
         f.attach(&item, &vec![7u8; MIB + 5]);
-        let dest = f.backup("a.lockbox-backup");
+        let dest = f.backup("a.petalock-backup");
 
         // The expected size comes from the vault's own files, not from the backup.
         let dir = f.vault.dir();
@@ -644,7 +644,7 @@ pub(super) mod tests {
         f.vault.new_item(ItemKind::Note, "note", None).unwrap();
         let (item, _) = f.file_item(b"hello");
         f.attach(&item, &vec![7u8; 3 * MIB + 5]);
-        let dest = f.backup("a.lockbox-backup");
+        let dest = f.backup("a.petalock-backup");
 
         let recorder = Recorder::default();
         let summary = verify_backup(
@@ -680,7 +680,7 @@ pub(super) mod tests {
                 .new_item_with_notes(ItemKind::Note, &title, None, notes)
                 .unwrap();
         }
-        let dest = f.backup("a.lockbox-backup");
+        let dest = f.backup("a.petalock-backup");
 
         let recorder = Recorder::default();
         let summary = verify_backup(
@@ -709,7 +709,7 @@ pub(super) mod tests {
 
         let mut f = Fixture::new();
         f.file_item(&vec![5u8; MIB]);
-        let dest = f.backup("a.lockbox-backup");
+        let dest = f.backup("a.petalock-backup");
         let cancel = CancelToken::new();
         let listener = CancelAtFirst(cancel.clone(), Recorder::default());
 
@@ -723,7 +723,7 @@ pub(super) mod tests {
     fn wrong_password_is_wrong_password() {
         let mut f = Fixture::new();
         f.file_item(b"x");
-        let dest = f.backup("a.lockbox-backup");
+        let dest = f.backup("a.petalock-backup");
         let result = verify(&dest, Credential::Password("not the password"));
         assert!(
             matches!(result, Err(CoreError::WrongPassword)),
@@ -737,7 +737,7 @@ pub(super) mod tests {
     fn rewritten_manifest_refused() {
         let mut f = Fixture::new();
         f.file_item(b"x");
-        let dest = f.backup("a.lockbox-backup");
+        let dest = f.backup("a.petalock-backup");
         rewrite_backup(&dest, flip_item, ManifestMode::Rehash { key: None });
         let result = verify(&dest, Credential::Password(PW));
         assert_eq!(refused(result), "backup: manifest mac");
@@ -750,7 +750,7 @@ pub(super) mod tests {
     fn damaged_header_in_archive_is_damage_not_a_wrong_password() {
         let mut f = Fixture::new();
         f.file_item(b"x");
-        let dest = f.backup("a.lockbox-backup");
+        let dest = f.backup("a.petalock-backup");
         rewrite_backup(
             &dest,
             |m| {
@@ -773,7 +773,7 @@ pub(super) mod tests {
     fn tampered_item_found() {
         let mut f = Fixture::new();
         f.file_item(b"x");
-        let dest = f.backup("a.lockbox-backup");
+        let dest = f.backup("a.petalock-backup");
         let key = f.key();
         rewrite_backup(&dest, flip_item, ManifestMode::Rehash { key: Some(key) });
         let result = verify(&dest, Credential::Password(PW));
@@ -786,7 +786,7 @@ pub(super) mod tests {
     fn rolled_back_item_found() {
         let mut f = Fixture::new();
         let id = f.vault.new_item(ItemKind::Note, "first", None).unwrap();
-        let first = f.backup("first.lockbox-backup");
+        let first = f.backup("first.petalock-backup");
         let name = item_name(&id);
         let old = {
             let archive = BackupArchive::open(&first, &CancelToken::new()).unwrap();
@@ -795,7 +795,7 @@ pub(super) mod tests {
         let mut edited = f.vault.get_item(&id).unwrap().clone();
         edited.title = "second".to_owned();
         f.vault.update_item(edited).unwrap();
-        let second = f.backup("second.lockbox-backup");
+        let second = f.backup("second.petalock-backup");
 
         let put_back = old.clone();
         rewrite_backup(
@@ -816,7 +816,7 @@ pub(super) mod tests {
     fn tampered_blob_found() {
         let mut f = Fixture::new();
         f.file_item(&vec![1u8; 2 * MIB]);
-        let dest = f.backup("a.lockbox-backup");
+        let dest = f.backup("a.petalock-backup");
         let key = f.key();
         let mode = ManifestMode::Rehash { key: Some(key) };
         rewrite_backup(&dest, flip_blob_second_chunk, mode);
@@ -828,7 +828,7 @@ pub(super) mod tests {
     fn extra_blob_found() {
         let mut f = Fixture::new();
         f.file_item(b"x");
-        let dest = f.backup("a.lockbox-backup");
+        let dest = f.backup("a.petalock-backup");
         let key = f.key();
         let extra = blob_name(&FileId::random());
         rewrite_backup(
@@ -847,7 +847,7 @@ pub(super) mod tests {
     fn manifest_of_another_vault_refused() {
         let mut f = Fixture::new();
         f.file_item(b"x");
-        let dest = f.backup("a.lockbox-backup");
+        let dest = f.backup("a.petalock-backup");
         let entries: Vec<(String, Vec<u8>)> = {
             let archive = BackupArchive::open(&dest, &CancelToken::new()).unwrap();
             archive
@@ -872,7 +872,7 @@ pub(super) mod tests {
         let mut f = Fixture::new();
         let (_, file) = f.file_item(b"gone");
         fs::remove_file(f.blob_file(&file)).unwrap();
-        let dest = f.backup("a.lockbox-backup");
+        let dest = f.backup("a.petalock-backup");
         let summary = verify(&dest, Credential::Password(PW)).unwrap();
         assert_eq!(
             (summary.items, summary.files, summary.missing_files),
@@ -891,7 +891,7 @@ pub(super) mod tests {
         let mut bytes = fs::read(&path).unwrap();
         bytes[MIB + 100] ^= 1;
         fs::write(&path, bytes).unwrap();
-        let dest = f.backup("a.lockbox-backup");
+        let dest = f.backup("a.petalock-backup");
 
         let summary = verify(&dest, Credential::Password(PW)).unwrap();
         assert_eq!(
@@ -904,7 +904,7 @@ pub(super) mod tests {
     fn verify_writes_nothing() {
         let mut f = Fixture::new();
         f.file_item(&vec![5u8; MIB + 1]);
-        let dest = f.backup("a.lockbox-backup");
+        let dest = f.backup("a.petalock-backup");
         let (bytes, listing) = (fs::read(&dest).unwrap(), names(&f.out()));
         let others = names(f.parent.path());
 
@@ -924,7 +924,7 @@ pub(super) mod tests {
         for title in ["a", "b", "c"] {
             f.vault.new_item(ItemKind::Note, title, None).unwrap();
         }
-        let dest = f.backup("a.lockbox-backup");
+        let dest = f.backup("a.petalock-backup");
         let token = CancelToken::new();
         let seen = Rc::new(Cell::new(0));
         let (counter, cancel) = (seen.clone(), token.clone());
@@ -978,7 +978,7 @@ pub(super) mod tests {
         f.vault.new_item(ItemKind::Note, "note", None).unwrap();
         let (item, _) = f.file_item(b"hello");
         f.attach(&item, &vec![7u8; MIB + 5]);
-        let dest = f.backup("a.lockbox-backup");
+        let dest = f.backup("a.petalock-backup");
 
         let src = VaultSource::Folder(f.vault.dir().to_path_buf());
         let token = CancelToken::new();
@@ -1093,7 +1093,7 @@ pub(super) mod tests {
                 .new_file_item(None, &src, &cancel, &NoProgress)
                 .unwrap();
             let file = vault.get_item(&file_item).unwrap().attachments[0].file_id;
-            let dest = parent.path().join("tiny.lockbox-backup");
+            let dest = parent.path().join("tiny.petalock-backup");
             vault
                 .backup(&dest, &NoJournal, &cancel, &NoProgress)
                 .unwrap();
@@ -1157,7 +1157,7 @@ pub(super) mod tests {
         #[test]
         fn the_tiny_backup_verifies() {
             let dir = TempDir::new();
-            let path = dir.path().join("t.lockbox-backup");
+            let path = dir.path().join("t.petalock-backup");
             fs::write(&path, &TINY.backup).unwrap();
             let recovery = RecoverySecret::parse(&TINY.recovery).unwrap();
             let summary = verify(&path, Credential::Recovery(&recovery)).unwrap();
@@ -1170,7 +1170,7 @@ pub(super) mod tests {
             #[test]
             fn mutated_backup_never_panics(case in cases()) {
                 let dir = TempDir::new();
-                let path = dir.path().join("m.lockbox-backup");
+                let path = dir.path().join("m.petalock-backup");
                 match case {
                     Case::File(bytes) => fs::write(&path, bytes).unwrap(),
                     Case::Entry(i, bytes) => {

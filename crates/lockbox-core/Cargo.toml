@@ -1,6 +1,6 @@
 [package]
 name = "lockbox-core"
-description = "Lockbox core: vault engine, encryption and keys"
+description = "Petalock core: vault engine, encryption and keys"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

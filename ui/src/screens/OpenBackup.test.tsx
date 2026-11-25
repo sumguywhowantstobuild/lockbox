@@ -43,7 +43,7 @@ const BIG = Math.round(1.2 * 1024 ** 3);
 const LABEL = "Password or recovery key from when it was made";
 const WRONG = "Wrong password. It needs the one from the day this backup was made, which may not be today's.";
 const EXPIRED = "That choice has expired. Pick the backup again.";
-/** What the backup's session is called: the file's name without `.lockbox-backup`. */
+/** What the backup's session is called: the file's name without `.petalock-backup`. */
 const BACKUP = "My vault 2026-10-02";
 const BACKUP_MENU = `${BACKUP}, read-only, vault menu`;
 /** The lock screen's step says the file and its size as one line. */
@@ -287,14 +287,14 @@ test("pick_another_sends_the_choice_it_has_and_swaps_the_file", async () => {
   const panel = await openPanel();
   const choice = shell.openChoiceTokens()[0];
   expect(choice).toMatch(/^[0-9a-f]{32}$/);
-  shell.pickBackupNext("Older vault 2026-08-01.lockbox-backup", 5 * MB);
+  shell.pickBackupNext("Older vault 2026-08-01.petalock-backup", 5 * MB);
   press(panel, "Pick another");
-  await within(panel).findByText("Older vault 2026-08-01.lockbox-backup");
+  await within(panel).findByText("Older vault 2026-08-01.petalock-backup");
   expect(sent("open_backup_pick")[1]).toEqual({ choice });
   expect(within(panel).getByText("5 MB")).toBeTruthy();
   expect(within(panel).queryByText(BACKUP_NAME)).toBeNull();
   // The shell forgot the first choice and holds the new one; the page never touched the test's commands.
-  expect(shell.openChoices()).toEqual([{ name: "Older vault 2026-08-01.lockbox-backup", size: 5 * MB }]);
+  expect(shell.openChoices()).toEqual([{ name: "Older vault 2026-08-01.petalock-backup", size: 5 * MB }]);
   expect(sent("test_backup_pick")).toEqual([]);
   // A closed picker leaves the file as it was.
   shell.dismissFileNext();
@@ -305,7 +305,7 @@ test("pick_another_sends_the_choice_it_has_and_swaps_the_file", async () => {
   await act(async () => {
     await new Promise((done) => window.setTimeout(done, 5));
   });
-  expect(within(panel).getByText("Older vault 2026-08-01.lockbox-backup")).toBeTruthy();
+  expect(within(panel).getByText("Older vault 2026-08-01.petalock-backup")).toBeTruthy();
   expect(within(panel).queryByRole("alert")).toBeNull();
 });
 
@@ -580,7 +580,7 @@ test("open_backup_from_the_lock_screen_shows_full_screen", async () => {
   expect(screen.queryByRole("complementary")).toBeNull();
   expect(screen.queryByRole("navigation", { name: "Vault and folders" })).toBeNull();
   expect(container.querySelector(".lock")).not.toBeNull();
-  expect(screen.getByRole("banner").textContent).toContain("Lockbox");
+  expect(screen.getByRole("banner").textContent).toContain("Petalock");
   expect(document.activeElement).toBe(heading);
   // The file's name and size as one line of text, as the restore's first step has them.
   expect(screen.getByText(LOCK_ROW)).toBeTruthy();
@@ -906,12 +906,12 @@ test("a_missing_files_answer_for_another_backup_opens_no_question_and_sends_noth
   const live = await openMenu(screen.getByRole("button", { name: BACKUP_MENU }));
   fireEvent.click(within(live).getByRole("menuitemradio", { name: rowName("My vault") }));
   await screen.findByRole("button", { name: "My vault, vault menu" });
-  shell.pickBackupNext("Other 2026-09-01.lockbox-backup", MB);
+  shell.pickBackupNext("Other 2026-09-01.petalock-backup", MB);
   const panel = await openPanel();
   type(BACKUP_PASSWORD, panel);
   press(panel, "Open read-only");
   await screen.findByRole("button", { name: "Other 2026-09-01, read-only, vault menu" });
-  const second = shell.sessionOfBackup("Other 2026-09-01.lockbox-backup")?.session;
+  const second = shell.sessionOfBackup("Other 2026-09-01.petalock-backup")?.session;
   expect(second).not.toBe(first);
   const item = await select("Bot admin console");
   fireEvent.click(within(item).getByRole("button", { name: "Copy to a vault" }));

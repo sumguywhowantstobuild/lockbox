@@ -20,7 +20,7 @@ const stamp = String(Date.now());
 const PASSWORD = ["MU", "e2e", "restore", stamp].join("-");
 const KEPT = { title: "MU-e2e kept login", username: "MU-e2e-kept-user", password: ["MU", "e2e", "kept", stamp].join("-") };
 const LATER = { title: "MU-e2e later login", username: "MU-e2e-later-user", password: ["MU", "e2e", "later", stamp].join("-") };
-const BACKUP = join(env.LOCKBOX_E2E_FILES_FOLDER ?? "", "MU-e2e.lockbox-backup");
+const BACKUP = join(env.LOCKBOX_E2E_FILES_FOLDER ?? "", "MU-e2e.petalock-backup");
 const pid = () => browser.capabilities["goog:processID"];
 
 describe("back_up_then_restore", () => {

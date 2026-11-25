@@ -27,7 +27,7 @@ const NOTE = "These files have no item that uses them. Their names were kept in 
 // The same sentence for one file and for many: it promises only what the code can keep (a delete changes no backup), not that a backup holds the files.
 const WHOLE = "This can't be undone. Deleting these files won't change your existing backups.";
 const CHANGED = "The leftover files changed. Look at the list again, then delete.";
-const UNREADABLE = "Some items in this vault can't be read, so Lockbox is keeping these files until that's sorted.";
+const UNREADABLE = "Some items in this vault can't be read, so Petalock is keeping these files until that's sorted.";
 const BANNER = "2 leftover files have no item that uses them.";
 const noon = (iso: string) => Date.parse(`${iso}T12:00:00Z`) / 1000;
 
@@ -442,7 +442,7 @@ test("a_list_that_fails_at_unlock_says_so_and_can_be_tried_again", async () => {
   start([vault()]);
   shell.refuseNext("list_orphans", IO);
   await unlockIt();
-  const words = await screen.findByText(/^Lockbox couldn't list the leftover files\./);
+  const words = await screen.findByText(/^Petalock couldn't list the leftover files\./);
   expect(words.textContent).toContain(messageFor(IO).title);
   const notice = words.closest(".ask") as HTMLElement;
   expect(within(notice).getAllByRole("button").map((button) => button.textContent)).toEqual(["Try again", "Close"]);
@@ -494,7 +494,7 @@ test("a_list_that_fails_with_no_earlier_list_is_not_opening_for_ever", async () 
   // The unlock's read and the view's own read are both refused.
   shell.refuseNext("list_orphans", IO, 2);
   await unlockIt();
-  const words = await screen.findByText(/^Lockbox couldn't list the leftover files\./);
+  const words = await screen.findByText(/^Petalock couldn't list the leftover files\./);
   fireEvent.click(within(words.closest(".ask") as HTMLElement).getByRole("button", { name: "See them" }));
   await screen.findByRole("heading", { level: 1, name: "Leftover files" });
   expect(screen.queryByText("Opening…")).toBeNull();

@@ -455,7 +455,7 @@ fn unverified_password_slot_blocks_regeneration_until_it_is_replaced() {
     assert!(Vault::unlock_with_recovery(&dir, &new_recovery).is_ok());
 }
 
-/// Final review, Important 2: until the user accepts a header changed outside Lockbox,
+/// Final review, Important 2: until the user accepts a header changed outside Petalock,
 /// no credential change may overwrite the authentic .bak.
 #[test]
 fn pending_header_change_blocks_credential_changes_until_accepted() {

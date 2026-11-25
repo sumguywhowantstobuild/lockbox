@@ -127,7 +127,7 @@ async function folderMenu(choice: string) {
 /** First-time setup, from Welcome to the filled-in form. */
 async function toTheForm() {
   start([]);
-  await screen.findByRole("heading", { level: 1, name: "Welcome to Lockbox" });
+  await screen.findByRole("heading", { level: 1, name: "Welcome to Petalock" });
   click("Create a vault");
   await screen.findByRole("heading", { level: 1, name: "Create your vault" });
   fireEvent.change(screen.getByLabelText("Vault name"), { target: { value: "My vault" } });
@@ -189,7 +189,7 @@ const CASES: Case[] = [
     shows: ["setup/FirstRun#FirstRun", "setup/Welcome#Welcome", "setup/Frame#Frame"],
     reach: async () => {
       start([]);
-      await screen.findByRole("heading", { level: 1, name: "Welcome to Lockbox" });
+      await screen.findByRole("heading", { level: 1, name: "Welcome to Petalock" });
     },
   },
   {
@@ -197,7 +197,7 @@ const CASES: Case[] = [
     shows: ["setup/MoveIn#MoveIn"],
     reach: async () => {
       start([]);
-      await screen.findByRole("heading", { level: 1, name: "Welcome to Lockbox" });
+      await screen.findByRole("heading", { level: 1, name: "Welcome to Petalock" });
       click("I already have a vault or a backup");
       await screen.findByRole("heading", { level: 1, name: "What do you have?" });
       // 26b: the folder on a USB stick, refused, with its words as the alert.
@@ -211,7 +211,7 @@ const CASES: Case[] = [
     shows: ["setup/MoveIn#MoveIn"],
     reach: async () => {
       start([]);
-      await screen.findByRole("heading", { level: 1, name: "Welcome to Lockbox" });
+      await screen.findByRole("heading", { level: 1, name: "Welcome to Petalock" });
       click("I already have a vault or a backup");
       await screen.findByRole("heading", { level: 1, name: "What do you have?" });
       shell.offerExisting({ id: 40, name: "Old vault", items: [] });
@@ -226,7 +226,7 @@ const CASES: Case[] = [
       shell = installFakeShell(invoke, listen, [{ id: 7, name: "My vault", items: sampleItems() }]);
       shell.damageVaultList();
       render(<App />);
-      await screen.findByRole("heading", { level: 1, name: "Lockbox lost its list of vaults" });
+      await screen.findByRole("heading", { level: 1, name: "Petalock lost its list of vaults" });
     },
   },
   {
@@ -366,10 +366,10 @@ const CASES: Case[] = [
           { kind: "restore", state: "recovered", how: "finished" },
         ],
       );
-      await screen.findByText(/^Lockbox lost track of some opened files/);
+      await screen.findByText(/^Petalock lost track of some opened files/);
       await screen.findByText("Couldn't remove 2 opened files.");
       await screen.findByText(/is used by another app, so the save shortcut is off/);
-      await screen.findByText(/^Lockbox finished restoring a vault/);
+      await screen.findByText(/^Petalock finished restoring a vault/);
     },
   },
   {
@@ -384,7 +384,7 @@ const CASES: Case[] = [
   {
     name: "The vault's details changed (Ask 3)",
     shows: ["Asks#DetailsChangedAsk"],
-    dialogs: [{ id: "Asks#DetailsChangedAsk", name: "My vault's details were changed outside Lockbox." }],
+    dialogs: [{ id: "Asks#DetailsChangedAsk", name: "My vault's details were changed outside Petalock." }],
     reach: async () => {
       start([vault({ headerChanged: true })]);
       await unlockIt(null);
@@ -1329,13 +1329,13 @@ const CASES: Case[] = [
   {
     name: "The first close (5b)",
     shows: ["FirstClose#FirstClose"],
-    dialogs: [{ id: "FirstClose#FirstClose", name: "Lockbox stays by the clock" }],
+    dialogs: [{ id: "FirstClose#FirstClose", name: "Petalock stays by the clock" }],
     reach: async () => {
       await unlocked();
       act(() => {
         shell.closeWindow();
       });
-      await screen.findByRole("dialog", { name: "Lockbox stays by the clock" });
+      await screen.findByRole("dialog", { name: "Petalock stays by the clock" });
     },
   },
   {
@@ -1386,14 +1386,14 @@ const CASES: Case[] = [
   {
     name: "Forgot password on a vault whose details changed asks first (28a, Ask 3)",
     shows: [],
-    dialogs: [{ id: "ForgotPassword#ChangedDetails", name: "My vault's details were changed outside Lockbox." }],
+    dialogs: [{ id: "ForgotPassword#ChangedDetails", name: "My vault's details were changed outside Petalock." }],
     reach: async () => {
       start([vault({ headerChanged: true })]);
       fireEvent.click(await screen.findByRole("button", { name: "Forgot password?" }));
       await screen.findByRole("heading", { level: 1, name: "Forgot password?" });
       fireEvent.change(screen.getByLabelText("Recovery key"), { target: { value: shell.recoveryKeyOf(7) } });
       click("Continue");
-      return screen.findByRole("dialog", { name: "My vault's details were changed outside Lockbox." });
+      return screen.findByRole("dialog", { name: "My vault's details were changed outside Petalock." });
     },
   },
   {

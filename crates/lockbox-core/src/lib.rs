@@ -1,4 +1,4 @@
-//! Lockbox core: the vault engine. All encryption and key handling live here.
+//! Petalock core: the vault engine. All encryption and key handling live here.
 //!
 //! The public surface is what the desktop shell uses: [`Vault`] and [`ReadOnlyVault`], the
 //! reports, the IDs, items (with no serde of their own), the generator and a few file helpers.

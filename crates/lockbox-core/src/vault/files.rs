@@ -339,7 +339,7 @@ fn verified_copy<'j>(
     cancel: &CancelToken,
     meter: &Meter,
 ) -> Result<OutputTemp<'j>> {
-    let mut temp = OutputTemp::create(folder, ".lockbox-partial", journal, "export.after_record")?;
+    let mut temp = OutputTemp::create(folder, ".petalock-partial", journal, "export.after_record")?;
     // The write and the flush are the two places a drive that filled up since the space check shows itself.
     let mut written = || -> Result<()> {
         let mut counted = CountWrite {
@@ -1038,7 +1038,7 @@ pub(super) mod tests {
         let leftovers = fs::read_dir(parent.path())
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .filter(|n| n.ends_with(".lockbox-partial"))
+            .filter(|n| n.ends_with(".petalock-partial"))
             .count();
         assert_eq!(leftovers, 0, "no temp file");
 
@@ -1350,7 +1350,7 @@ pub(super) mod tests {
         let (parent, vault, id, file) = vault_with_file();
         let out = parent.path().join("out");
         fs::create_dir(&out).unwrap();
-        let name = ".0123456789abcdef.lockbox-partial";
+        let name = ".0123456789abcdef.petalock-partial";
         fs::write(out.join(name), b"someone else's").unwrap();
         force_next_temp_name(name);
         let journal = Recorder::default();
@@ -1492,7 +1492,7 @@ pub(super) mod tests {
         assert!(
             file_names(vault.dir())
                 .iter()
-                .all(|n| !n.ends_with(".lockbox-partial"))
+                .all(|n| !n.ends_with(".petalock-partial"))
         );
         // Beside the vault folder is fine.
         let outside = vault.dir().parent().unwrap().join("copy.txt");
@@ -1747,7 +1747,7 @@ pub(super) mod tests {
         full(
             vault
                 .backup(
-                    &out.join("b.lockbox-backup"),
+                    &out.join("b.petalock-backup"),
                     &journal,
                     &cancel,
                     &NoProgress,
@@ -1791,7 +1791,7 @@ pub(super) mod tests {
             .unwrap();
         vault
             .backup(
-                &out.join("b.lockbox-backup"),
+                &out.join("b.petalock-backup"),
                 &*journal,
                 &cancel,
                 &NoProgress,
@@ -1816,7 +1816,7 @@ pub(super) mod tests {
         let (parent, vault, id, file) = vault_with_file();
         let out = parent.path().join("out");
         fs::create_dir(&out).unwrap();
-        let (copy, backup) = (out.join("a.txt"), out.join("b.lockbox-backup"));
+        let (copy, backup) = (out.join("a.txt"), out.join("b.petalock-backup"));
         fs::write(&copy, b"OLD COPY").unwrap();
         fs::write(&backup, b"OLD BACKUP").unwrap();
         let cancel = CancelToken::new();
@@ -1834,7 +1834,7 @@ pub(super) mod tests {
         assert!(made.is_err(), "the panic reaches the caller");
         assert_eq!(fs::read(&copy).unwrap(), b"OLD COPY");
         assert_eq!(fs::read(&backup).unwrap(), b"OLD BACKUP");
-        assert_eq!(file_names(&out), ["a.txt", "b.lockbox-backup"], "no temp");
+        assert_eq!(file_names(&out), ["a.txt", "b.petalock-backup"], "no temp");
         let once = ["record", "publish", "clear"];
         assert_eq!(*journal.calls.borrow(), [once, once].concat());
         assert_eq!(*journal.cleared.borrow(), *journal.recorded.borrow());
@@ -1858,7 +1858,7 @@ pub(super) mod tests {
         let (parent, vault, id, file) = vault_with_file();
         let out = parent.path().join("out");
         fs::create_dir(&out).unwrap();
-        let (copy, backup) = (out.join("a.txt"), out.join("b.lockbox-backup"));
+        let (copy, backup) = (out.join("a.txt"), out.join("b.petalock-backup"));
         fs::write(&copy, b"OLD COPY").unwrap();
         fs::write(&backup, b"OLD BACKUP").unwrap();
         let cancel = CancelToken::new();
@@ -1877,7 +1877,7 @@ pub(super) mod tests {
         assert_eq!(panic_text(&*made.unwrap_err()), "publish panicked");
         assert_eq!(fs::read(&copy).unwrap(), b"OLD COPY");
         assert_eq!(fs::read(&backup).unwrap(), b"OLD BACKUP");
-        assert_eq!(file_names(&out), ["a.txt", "b.lockbox-backup"], "no temp");
+        assert_eq!(file_names(&out), ["a.txt", "b.petalock-backup"], "no temp");
         let once = ["record", "publish", "clear"];
         assert_eq!(*journal.calls.borrow(), [once, once].concat());
     }
@@ -1917,7 +1917,7 @@ pub(super) mod tests {
         let (parent, vault, id, file) = vault_with_file();
         let out = parent.path().join("out");
         fs::create_dir(&out).unwrap();
-        let (copy, backup) = (out.join("a.txt"), out.join("b.lockbox-backup"));
+        let (copy, backup) = (out.join("a.txt"), out.join("b.petalock-backup"));
         fs::write(&copy, b"OLD COPY").unwrap();
         fs::write(&backup, b"OLD BACKUP").unwrap();
         let cancel = CancelToken::new();
@@ -1936,7 +1936,7 @@ pub(super) mod tests {
         assert_eq!(panic_text(&*made.unwrap_err()), "publish panicked");
         assert_eq!(fs::read(&copy).unwrap(), b"OLD COPY");
         assert_eq!(fs::read(&backup).unwrap(), b"OLD BACKUP");
-        assert_eq!(file_names(&out), ["a.txt", "b.lockbox-backup"], "no temp");
+        assert_eq!(file_names(&out), ["a.txt", "b.petalock-backup"], "no temp");
         println!("original panic reached the caller");
     }
 
@@ -1950,7 +1950,7 @@ pub(super) mod tests {
         let (parent, vault, id, file) = vault_with_file();
         let out = parent.path().join("out");
         fs::create_dir(&out).unwrap();
-        let (copy, backup) = (out.join("a.txt"), out.join("b.lockbox-backup"));
+        let (copy, backup) = (out.join("a.txt"), out.join("b.petalock-backup"));
         fs::write(&copy, b"OLD COPY").unwrap();
         fs::write(&backup, b"OLD BACKUP").unwrap();
         let cancel = CancelToken::new();
@@ -1992,7 +1992,7 @@ pub(super) mod tests {
         let (parent, vault, id, file) = vault_with_file();
         let out = parent.path().join("out");
         fs::create_dir(&out).unwrap();
-        let (copy, backup) = (out.join("a.txt"), out.join("b.lockbox-backup"));
+        let (copy, backup) = (out.join("a.txt"), out.join("b.petalock-backup"));
         fs::write(&copy, b"OLD COPY").unwrap();
         fs::write(&backup, b"OLD BACKUP").unwrap();
         let cancel = CancelToken::new();
@@ -2028,7 +2028,7 @@ pub(super) mod tests {
             crate::archive::BackupArchive::open(&backup, &cancel).is_ok(),
             "the backup is published"
         );
-        assert_eq!(file_names(&out), ["a.txt", "b.lockbox-backup"], "no temp");
+        assert_eq!(file_names(&out), ["a.txt", "b.petalock-backup"], "no temp");
         let once = ["record", "publish", "clear"];
         assert_eq!(*journal.calls.borrow(), [once, once].concat());
         assert_eq!(*journal.cleared.borrow(), *journal.recorded.borrow());
@@ -2041,7 +2041,7 @@ pub(super) mod tests {
         let (parent, vault, id, file) = vault_with_file();
         let out = parent.path().join("out");
         fs::create_dir(&out).unwrap();
-        let (copy, backup) = (out.join("a.txt"), out.join("b.lockbox-backup"));
+        let (copy, backup) = (out.join("a.txt"), out.join("b.petalock-backup"));
         fs::write(&copy, b"OLD COPY").unwrap();
         fs::write(&backup, b"OLD BACKUP").unwrap();
         let cancel = CancelToken::new();
@@ -2055,7 +2055,7 @@ pub(super) mod tests {
         assert!(matches!(result, Err(CoreError::Cancelled)), "{result:?}");
         assert_eq!(fs::read(&copy).unwrap(), b"OLD COPY");
         assert_eq!(fs::read(&backup).unwrap(), b"OLD BACKUP");
-        assert_eq!(file_names(&out), ["a.txt", "b.lockbox-backup"], "no temp");
+        assert_eq!(file_names(&out), ["a.txt", "b.petalock-backup"], "no temp");
         let once = ["record", "publish", "clear"];
         assert_eq!(*journal.calls.borrow(), [once, once].concat());
     }
@@ -2546,7 +2546,7 @@ pub(super) mod tests {
         assert!(
             file_names(vault.dir())
                 .iter()
-                .all(|n| !n.ends_with(".lockbox-partial"))
+                .all(|n| !n.ends_with(".petalock-partial"))
         );
     }
 

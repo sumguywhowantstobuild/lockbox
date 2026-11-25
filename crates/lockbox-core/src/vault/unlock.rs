@@ -61,7 +61,7 @@ pub(super) fn load(path: &Path) -> Result<HeaderFile> {
     HeaderFile::from_bytes(read_retry(path, MAX_HEADER_BYTES)?)
 }
 
-/// A newer vault must say "update Lockbox", never be opened from an older `.bak`
+/// A newer vault must say "update Petalock", never be opened from an older `.bak`
 /// (which would then overwrite a half-finished upgrade).
 fn may_try_backup(error: &CoreError) -> bool {
     !matches!(error, CoreError::UnsupportedVersion)
@@ -339,7 +339,7 @@ pub fn read_vault_id(dir: &Path) -> Result<VaultId> {
 
 /// Whether the folder `dir` holds a vault header file and no copy of it can be read because the copies are **damaged**:
 /// refused as corrupt, or too large. A copy that is not there says nothing; a copy that is readable, a newer vault's (it
-/// says "update Lockbox") and a copy the disk would not give up (another program holds it, a drive that does not answer)
+/// says "update Petalock") and a copy the disk would not give up (another program holds it, a drive that does not answer)
 /// all mean "not known to be damaged", and the answer is `false` without reading the other copy (a held file is retried
 /// for seconds). For telling a vault whose details are lost from one that is merely busy; like the name it is not
 /// authenticated.
@@ -510,7 +510,7 @@ mod tests {
         drop(open);
     }
 
-    /// A header changed outside Lockbox (its name, which the MAC covers) opens with the key and says so.
+    /// A header changed outside Petalock (its name, which the MAC covers) opens with the key and says so.
     #[test]
     fn check_recovery_reports_a_changed_header() {
         let parent = TempDir::new();

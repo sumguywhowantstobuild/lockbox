@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "license": "MIT",
   "type": "module",
-  "description": "End-to-end tests that drive the shipped Lockbox window through tauri-driver; run them with node scripts/e2e.mjs",
+  "description": "End-to-end tests that drive the shipped Petalock window through tauri-driver; run them with node scripts/e2e.mjs",
   "devDependencies": {
     "@wdio/cli": "10.2.0",
     "@wdio/local-runner": "10.2.0",

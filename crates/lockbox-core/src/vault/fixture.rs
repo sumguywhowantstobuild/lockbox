@@ -21,7 +21,87 @@ pub const ITEM_TITLE: &str = "Photos";
 pub const KEPT_FILE: &str = "kept.txt";
 pub const LOST_FILE: &str = "lost.txt";
 /// The backup's file name, in the folder it is made in.
-pub const BACKUP_NAME: &str = "missing-a-file.lockbox-backup";
+pub const BACKUP_NAME: &str = "missing-a-file.petalock-backup";
+
+/// A vault, and a backup of one, made by the engine at commit 009c52d, before the product was renamed to Petalock
+/// (made-up data only: `MU-`). Kept as text, one `FILE <path> <hex>` line per file, so the bytes in the repository are
+/// the bytes the old engine wrote.
+const VAULT_BEFORE_THE_RENAME: &str = include_str!("../fixtures/vault-before-the-rename.txt");
+const BACKUP_BEFORE_THE_RENAME: &str = include_str!("../fixtures/backup-before-the-rename.txt");
+
+/// What a "before the rename" fixture was made with, and where it was written.
+#[derive(Debug)]
+pub struct BeforeTheRename {
+    /// The vault's folder, or the backup file.
+    pub path: PathBuf,
+    /// The vault's password.
+    pub password: String,
+    /// The vault's recovery key, as shown to the person (a vault fixture only).
+    pub recovery: Option<String>,
+    /// The vault's name.
+    pub vault_name: String,
+    /// The title of the one item in it.
+    pub title: String,
+}
+
+fn fixture_field<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    text.lines()
+        .find_map(|line| line.strip_prefix(name)?.strip_prefix(' '))
+}
+
+fn unhex(hex: &str) -> Vec<u8> {
+    assert_eq!(hex.len() % 2, 0, "an odd number of hex digits");
+    (0..hex.len() / 2)
+        .map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).expect("hex"))
+        .collect()
+}
+
+/// Writes the `FILE` lines of `text` under `root`, creating the folders they need; how many were written.
+fn write_fixture_files(text: &str, root: &Path, rename: &dyn Fn(&str) -> String) -> usize {
+    let mut written = 0;
+    for line in text.lines().filter_map(|l| l.strip_prefix("FILE ")) {
+        let (name, hex) = line
+            .split_once(' ')
+            .expect("a file line has a name and bytes");
+        let target = root.join(rename(name));
+        fs::create_dir_all(target.parent().expect("a parent")).expect("the folder is made");
+        fs::write(&target, unhex(hex)).expect("the fixture file is written");
+        written += 1;
+    }
+    written
+}
+
+fn described(text: &str, path: PathBuf, vault_name: &str) -> BeforeTheRename {
+    let field = |name: &str| fixture_field(text, name).map(str::to_owned);
+    BeforeTheRename {
+        path,
+        password: field("PASSWORD").expect("the fixture names its password"),
+        recovery: field("RECOVERY"),
+        vault_name: vault_name.to_owned(),
+        title: field("TITLE").expect("the fixture names its item"),
+    }
+}
+
+/// Writes the vault made before the rename into a new folder inside `parent`, as it was written (nothing locked,
+/// nothing opened), and says how to unlock it.
+pub fn vault_before_the_rename(parent: &Path) -> BeforeTheRename {
+    let text = VAULT_BEFORE_THE_RENAME;
+    let folder = parent.join(fixture_field(text, "FOLDER").expect("the fixture names its folder"));
+    let written = write_fixture_files(text, &folder, &|name| name.to_owned());
+    assert!(written > 0, "the vault fixture holds no files");
+    let name = fixture_field(text, "NAME").expect("the fixture names the vault");
+    described(text, folder, name)
+}
+
+/// Writes the backup made before the rename to `dir/file_name` (a test gives it the `.petalock-backup` ending, as a
+/// person would who renamed an old file), and says how to open it.
+pub fn backup_before_the_rename(dir: &Path, file_name: &str) -> BeforeTheRename {
+    let text = BACKUP_BEFORE_THE_RENAME;
+    let written = write_fixture_files(text, dir, &|_| file_name.to_owned());
+    assert_eq!(written, 1, "the backup fixture is one file");
+    let name = fixture_field(text, "VAULT").expect("the fixture names the vault");
+    described(text, dir.join(file_name), name)
+}
 
 /// A backup whose one item refers to a file the backup does not hold.
 #[derive(Debug)]
@@ -117,10 +197,88 @@ pub fn password_slot_wrapping_another_key(vault: &mut Vault, password: &str) {
 mod tests {
     use super::*;
     use crate::fsio::testutil::TempDir;
+    use crate::recovery::RecoverySecret;
     use crate::vault::{Credential, ReadOnlyVault, verify_backup};
     use crate::{CoreError, Result};
 
     const PW: &str = "correct horse battery";
+
+    /// Plan 5, Task 0c, `format_labels_unchanged`: the product's rename touched no label of the vault and backup
+    /// format. A vault and a backup written by the engine at 009c52d, before the rename, still unlock and open: by
+    /// password and by recovery key (the labels `lockbox/header`, `lockbox header mac v1`, `lockbox/slot`,
+    /// `lockbox/item`, `lockbox/chunk`, `lockbox/backup-manifest`, `lockbox backup manifest v1` and
+    /// `lockbox recovery key v1` all go into these checks), and the attached file reads back whole. The known-answer
+    /// tests of each label stay in their own modules, unchanged.
+    #[test]
+    fn format_labels_unchanged() {
+        let parent = TempDir::new();
+        let cancel = CancelToken::new();
+
+        let old = vault_before_the_rename(parent.path());
+        let (vault, report) = Vault::unlock_with_password(&old.path, &old.password).unwrap();
+        assert!(!report.used_backup_header && !report.header_mac_mismatch);
+        assert_eq!(vault.name(), old.vault_name);
+        let items: Vec<_> = vault.items().collect();
+        assert_eq!(items.len(), 1, "the one item of the old vault");
+        assert_eq!(items[0].title, old.title);
+        assert_eq!(items[0].attachments.len(), 1, "and its one file");
+        let copy = parent.path().join("MU-copy.txt");
+        vault
+            .export_file(
+                &items[0].id,
+                &items[0].attachments[0].file_id,
+                &copy,
+                &NoJournal,
+                &cancel,
+                &NoProgress,
+            )
+            .unwrap();
+        assert_eq!(fs::read(&copy).unwrap(), b"MU-attached-file-bytes");
+        drop(vault);
+        let recovery = RecoverySecret::parse(old.recovery.as_deref().unwrap()).unwrap();
+        let (vault, _) = Vault::unlock_with_recovery(&old.path, &recovery).unwrap();
+        assert_eq!(vault.name(), old.vault_name);
+        drop(vault);
+        assert!(matches!(
+            Vault::unlock_with_password(&old.path, "not the password"),
+            Err(CoreError::WrongPassword)
+        ));
+
+        let backup = backup_before_the_rename(parent.path(), "made-before.petalock-backup");
+        let found = verify_backup(
+            &backup.path,
+            Credential::Password(&backup.password),
+            &cancel,
+            &NoProgress,
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                found.name.as_str(),
+                found.items,
+                found.files,
+                found.missing_files
+            ),
+            (backup.vault_name.as_str(), 1, 1, 0)
+        );
+        let opened = ReadOnlyVault::open_backup(
+            &backup.path,
+            Credential::Password(&backup.password),
+            &cancel,
+            &NoProgress,
+        )
+        .unwrap();
+        assert_eq!(opened.items().count(), 1);
+        assert_eq!(opened.items().next().unwrap().title, backup.title);
+        // The vault fixture's recovery key opens the backup too: the same vault, the same recovery slot.
+        ReadOnlyVault::open_backup(
+            &backup.path,
+            Credential::Recovery(&recovery),
+            &cancel,
+            &NoProgress,
+        )
+        .unwrap();
+    }
 
     /// The backup is the engine's own, opens with the password, counts one missing file, and lacks exactly that one:
     /// copying without it asks, and copying with the question answered leaves it out.

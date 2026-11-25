@@ -1,5 +1,7 @@
 # User interface (Plan 4): design
 
+> 2026-11-25: the product is now Petalock; decisions below keep their original wording.
+
 **Date:** 2026-11-05 · **Author:** Ariel Maningas · **Status:** approved by Ariel, 2026-11-05; results of the first build checks added 2026-11-06 ([Results of the risky checks](#results-of-the-risky-checks)), and two changes from Task 5's hands-on and review (the vault mark, what the page does when a lock event is lost)
 
 The product side is in the [PRD](../PRD.md); the engine, vault format and security rules are in the

@@ -15,18 +15,18 @@ use crate::os::{self, Launcher, NoticeAnswer, OsSignal, StartupNotice, StartupWo
 use crate::shell::{Events, Shell};
 use crate::{startup, tray, window};
 
-/// The exit code of a Lockbox that could not start, whatever the person answered.
+/// The exit code of a Petalock that could not start, whatever the person answered.
 pub const EXIT_CANT_START: i32 = 1;
 
 /// The notice, word for word (Ask 14).
 pub const CANT_START: StartupWords = StartupWords {
-    title: "Lockbox",
-    text: "Lockbox can't start. Your vaults aren't affected. Restart your PC and try again. If that doesn't help, the guide says what to check.",
+    title: "Petalock",
+    text: "Petalock can't start. Your vaults aren't affected. Restart your PC and try again. If that doesn't help, the guide says what to check.",
     open_guide: "Open the guide",
     close: "Close",
 };
 
-/// Shows the notice that Lockbox can't start, and returns the exit code to end the process with: never zero. Only the
+/// Shows the notice that Petalock can't start, and returns the exit code to end the process with: never zero. Only the
 /// "Open the guide" button opens the guide; Close, the title bar's close and Esc do not, and a browser that fails to
 /// open changes nothing (the person has read the notice, and there is nothing more to say that is true and fixed).
 /// Nothing is passed in about why: no error, path or name can reach the screen.
@@ -56,7 +56,7 @@ impl From<StepError> for Failed {
 pub enum Claim {
     /// Nothing else runs: this copy goes on.
     Mine,
-    /// Another copy runs and has the claim: this one simply ends (the person asked for Lockbox and it is there).
+    /// Another copy runs and has the claim: this one simply ends (the person asked for Petalock and it is there).
     AlreadyRunning,
 }
 
@@ -163,7 +163,7 @@ pub fn start_up<R: Runtime, S: Steps<R>>(
     steps.start_window(&window, &shell, hidden)?;
 
     // Last, after every step that can fail: a start that fails never holds the save shortcut (a press of it would read
-    // the clipboard while the notice says Lockbox can't start). After the route, so a press that comes at once is
+    // the clipboard while the notice says Petalock can't start). After the route, so a press that comes at once is
     // answered. The app runs whatever Windows says.
     shell.register_save_shortcut();
     Ok(Started::Running)
@@ -463,7 +463,7 @@ mod tests {
 
     /// The process's arguments for a normal start, or for Windows' sign-in start (`--hidden`).
     fn args_of(hidden: bool) -> Vec<OsString> {
-        let mut args = vec![OsString::from("C:\\Program Files\\Lockbox\\lockbox.exe")];
+        let mut args = vec![OsString::from("C:\\Program Files\\Petalock\\lockbox.exe")];
         if hidden {
             args.push(OsString::from("--hidden"));
         }
@@ -602,12 +602,12 @@ mod tests {
     fn cant_start_shows_only_the_designs_words_on_screen_and_in_logs() {
         assert_eq!(
             CANT_START.text,
-            "Lockbox can't start. Your vaults aren't affected. Restart your PC and try again. If that doesn't help, \
+            "Petalock can't start. Your vaults aren't affected. Restart your PC and try again. If that doesn't help, \
              the guide says what to check."
         );
         assert_eq!(
             (CANT_START.title, CANT_START.open_guide, CANT_START.close),
-            ("Lockbox", "Open the guide", "Close")
+            ("Petalock", "Open the guide", "Close")
         );
 
         let app = mock_app();

@@ -539,7 +539,7 @@ impl Os {
             idle: Arc::new(WinIdle),
             window: Arc::new(WinMainWindow { app: app.clone() }),
             hotkey: Arc::new(WinHotkey { app: app.clone() }),
-            startup: Arc::new(WinStartup),
+            startup: Arc::new(WinStartup::real()),
             power: Arc::new(WinPower { app }),
             clock: Arc::new(SystemClock),
             clipboard: Arc::new(ClipboardSteps::new(
@@ -647,10 +647,10 @@ impl ClipboardCalls for WinClipboard {
         }
         // SAFETY: only inside an opening on this thread (`ClipboardSteps`); the handle is the clipboard's own block,
         // read here for its size only and never freed or kept. Windows says the handle is good only until the
-        // clipboard is emptied or closed. Lockbox's own threads cannot do either meanwhile (`ClipboardSteps` gives
+        // clipboard is emptied or closed. Petalock's own threads cannot do either meanwhile (`ClipboardSteps` gives
         // one opening at a time), and a program with an owner window is refused by Windows while this opening is
         // open. A third program that also opens with no owner window is let in by Windows, and could empty the
-        // clipboard: Lockbox cannot stop that.
+        // clipboard: Petalock cannot stop that.
         let block = unsafe { GetClipboardData(CF_UNICODETEXT) };
         if block.is_null() {
             return Err(CLIPBOARD_FAILED);
@@ -696,7 +696,7 @@ impl ClipboardCalls for WinClipboard {
         let units = (0..size / size_of::<u16>()).map(|index| {
             // SAFETY: the block is locked and `size` bytes long, so the `size / 2` units from `at` are readable, and
             // `index` is below that. The block stays as long as the clipboard is neither emptied nor closed, which
-            // Lockbox's own threads and programs with an owner window cannot do during this opening; a third program
+            // Petalock's own threads and programs with an owner window cannot do during this opening; a third program
             // opening with no owner window could (see `text_size`).
             unsafe { at.add(index).read_unaligned() }
         });
@@ -1067,18 +1067,42 @@ fn registry_binary(key: &RegistryKey, name: &[u16]) -> io::Result<Option<Vec<u8>
     }
 }
 
-/// Starting with Windows, in the registry (see [`StartupEntry`]): Lockbox's value in the current user's `Run` key
+/// Starting with Windows, in the registry (see [`StartupEntry`]): Petalock's value in the current user's `Run` key
 /// ([`startup::RUN_VALUE`](crate::startup::RUN_VALUE)), and, read only, Windows' own on/off state for it.
-pub struct WinStartup;
+pub struct WinStartup {
+    /// The key holding the `Run` value: [`RUN_KEY`] for the app (a test points it at a scratch key of its own).
+    run_key: String,
+    /// The key holding Windows' on/off value: [`STARTUP_APPROVED_KEY`] for the app.
+    approved_key: String,
+}
+
+impl WinStartup {
+    /// The app's own: the current user's real `Run` key and Windows' own Startup settings key.
+    pub fn real() -> WinStartup {
+        WinStartup {
+            run_key: RUN_KEY.to_owned(),
+            approved_key: STARTUP_APPROVED_KEY.to_owned(),
+        }
+    }
+
+    /// For a test: the same steps over keys of its own, so the real `Run` key is never touched.
+    #[cfg(test)]
+    fn in_keys(run_key: &str, approved_key: &str) -> WinStartup {
+        WinStartup {
+            run_key: run_key.to_owned(),
+            approved_key: approved_key.to_owned(),
+        }
+    }
+}
 
 impl StartupEntry for WinStartup {
     fn read(&self) -> io::Result<StartupState> {
         let name = registry_text(startup::RUN_VALUE);
-        let on = match open_registry_key(RUN_KEY, KEY_QUERY_VALUE)? {
+        let on = match open_registry_key(&self.run_key, KEY_QUERY_VALUE)? {
             Some(key) => registry_value_exists(&key, &name)?,
             None => false,
         };
-        let approved = match open_registry_key(STARTUP_APPROVED_KEY, KEY_QUERY_VALUE)? {
+        let approved = match open_registry_key(&self.approved_key, KEY_QUERY_VALUE)? {
             Some(key) => registry_binary(&key, &name)?,
             None => None,
         };
@@ -1089,7 +1113,7 @@ impl StartupEntry for WinStartup {
         let name = registry_text(startup::RUN_VALUE);
         if !on {
             // Nothing to remove when the key or the value is not there.
-            let Some(key) = open_registry_key(RUN_KEY, KEY_SET_VALUE)? else {
+            let Some(key) = open_registry_key(&self.run_key, KEY_SET_VALUE)? else {
                 return Ok(());
             };
             // SAFETY: the key is open, and `name` is NUL-terminated and outlives the call.
@@ -1103,7 +1127,7 @@ impl StartupEntry for WinStartup {
         let data: Vec<u16> = command.encode_wide().chain([0]).collect();
         let size = u32::try_from(data.len() * 2)
             .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
-        let path = registry_text(RUN_KEY);
+        let path = registry_text(&self.run_key);
         let mut key: HKEY = ptr::null_mut();
         // SAFETY: `path` is NUL-terminated and outlives the call; the class, security attributes and disposition are
         // optional and null; `key` is writable, and is used only if the call succeeded.
@@ -1538,7 +1562,7 @@ fn wide_text(text: &OsStr) -> io::Result<Vec<u16>> {
 
 /// The name of the mutex that says a copy of the app runs in this sign-in: in the `Local\` namespace, so each sign-in has
 /// its own, and not the single-instance plugin's own name.
-const INSTANCE_NAME: &str = "Local\\io.github.sumguywhowantstobuild.lockbox.instance";
+const INSTANCE_NAME: &str = "Local\\io.github.sumguywhowantstobuild.petalock.instance";
 
 /// A claim on being the app's one running copy: the mutex handle, closed when the guard drops (and by Windows when the
 /// process ends). Kept in the app's state for the life of the process.
@@ -1863,7 +1887,7 @@ impl<R: Runtime> Dialogs for WinDialogs<R> {
     }
 }
 
-/// The notice shown when Lockbox can't start: rfd's `MessageDialog` (Windows' task dialog, which the app's Common
+/// The notice shown when Petalock can't start: rfd's `MessageDialog` (Windows' task dialog, which the app's Common
 /// Controls 6 manifest allows), with an error icon and two buttons of our own words, over no window: at this point the
 /// main window may not exist. Shown on the calling thread, which waits for the person.
 pub struct WinStartupNotice;
@@ -1955,7 +1979,7 @@ thread_local! {
     static HOTKEY: Cell<Option<Registered>> = const { Cell::new(None) };
 }
 
-/// The thread that owns Lockbox's hidden signal window ([`spawn`]). Only dropping it closes the window or undoes its
+/// The thread that owns Petalock's hidden signal window ([`spawn`]). Only dropping it closes the window or undoes its
 /// notices; no message from another program can. The signals stop then, so the app keeps it for as long as it runs.
 pub struct SignalThread {
     shared: Arc<Shared>,
@@ -1977,7 +2001,7 @@ pub struct SignalThread {
 /// `WM_DESTROY` from anywhere else changes nothing.
 pub fn spawn(sink: Sender<OsSignal>) -> io::Result<SignalThread> {
     let number = NEXT_CLASS.fetch_add(1, Ordering::Relaxed);
-    let class: Vec<u16> = format!("Lockbox signal window {number}")
+    let class: Vec<u16> = format!("Petalock signal window {number}")
         .encode_utf16()
         .chain([0])
         .collect();
@@ -1995,7 +2019,7 @@ pub fn spawn(sink: Sender<OsSignal>) -> io::Result<SignalThread> {
     #[cfg(test)]
     let hook = take_test_hook(&class);
     let thread = thread::Builder::new()
-        .name("lockbox-signals".into())
+        .name("petalock-signals".into())
         .spawn(move || {
             #[cfg(test)]
             TEST_HOOK.set(hook);
@@ -3004,7 +3028,7 @@ mod tests {
         );
     }
 
-    /// Windows' real list, on this machine: it can be read, and the default Lockbox offers is always one of the
+    /// Windows' real list, on this machine: it can be read, and the default Petalock offers is always one of the
     /// printers it offers. Needs the print spooler running, so it is run by hand: `cargo test -- --ignored`.
     #[test]
     #[ignore = "needs the Windows print spooler"]
@@ -3460,10 +3484,10 @@ mod tests {
         signal_thread.keep_awake(true);
         flush(window, &signals);
         drop_within(signal_thread, WAIT);
-        assert_eq!(notes(&seen), CLOSED, "undone when Lockbox closes it");
+        assert_eq!(notes(&seen), CLOSED, "undone when Petalock closes it");
     }
 
-    /// Only Lockbox closes the window: another program's `WM_CLOSE` (posted or sent) and `WM_QUIT` (to the window or
+    /// Only Petalock closes the window: another program's `WM_CLOSE` (posted or sent) and `WM_QUIT` (to the window or
     /// to its thread) change nothing.
     #[test]
     fn outside_close_and_quit_do_not_stop_the_signals() {
@@ -3518,7 +3542,7 @@ mod tests {
         );
 
         drop_within(signal_thread, WAIT);
-        assert_eq!(notes(&seen), CLOSED, "undone once, when Lockbox closes it");
+        assert_eq!(notes(&seen), CLOSED, "undone once, when Petalock closes it");
     }
 
     /// `Drop` does not need room in the window's posted-message queue (Windows allows 10,000 messages): with the
@@ -3854,7 +3878,7 @@ mod tests {
     static REAL_CLIPBOARD: Mutex<()> = Mutex::new(());
 
     /// What the real-clipboard tests copy: a made-up value, never a real secret.
-    const SAMPLE: &str = "Lockbox clipboard test 7f3a";
+    const SAMPLE: &str = "Petalock clipboard test 7f3a";
     const TAG: CopyTag = [0x5a; 16];
     const NEWER_TAG: CopyTag = [0xa5; 16];
 
@@ -3881,7 +3905,7 @@ mod tests {
             Some(vec![0; units * 2]),
             "the text block was not wiped"
         );
-        let format = clipboard_win::raw::register_format("Lockbox.CopyTag").unwrap();
+        let format = clipboard_win::raw::register_format("Petalock.CopyTag").unwrap();
         assert!(!WinClipboard.set_bytes(format, &TAG));
         assert_eq!(
             REFUSED.take(),
@@ -4006,14 +4030,14 @@ mod tests {
                     .unwrap_or_else(|_| panic!("{name} is not on the clipboard"));
                 assert_eq!(value, 0u32.to_ne_bytes(), "{name} is not a DWORD 0");
             }
-            let tag_format = clipboard_win::raw::register_format("Lockbox.CopyTag").unwrap();
+            let tag_format = clipboard_win::raw::register_format("Petalock.CopyTag").unwrap();
             let mut tag = Vec::new();
             clipboard_win::raw::get_vec(tag_format.get(), &mut tag).unwrap();
             assert_eq!(&tag[..16], TAG, "the tag");
             assert!(tag[16..].iter().all(|&byte| byte == 0), "more than the tag");
         }
         assert_eq!(clipboard_text().as_deref(), Some(SAMPLE));
-        // Still Lockbox's copy: the clear empties it.
+        // Still Petalock's copy: the clear empties it.
         assert_eq!(clipboard.clear_if(&NEWER_TAG, None), Ok(false));
         assert_eq!(clipboard.clear_if(&TAG, None), Ok(true));
         assert_eq!(clipboard_text(), None);
@@ -4064,7 +4088,7 @@ mod tests {
         let _turn = lock(&REAL_CLIPBOARD);
         let clipboard = real_clipboard();
         clipboard.write_secret(SAMPLE, &TAG).unwrap();
-        // Another thread copies something of its own after Lockbox's write: its copy has no tag, so it stays.
+        // Another thread copies something of its own after Petalock's write: its copy has no tag, so it stays.
         thread::spawn(|| clipboard_win::set_clipboard_string("theirs").unwrap())
             .join()
             .unwrap();
@@ -4072,7 +4096,7 @@ mod tests {
         assert_eq!(clipboard_text().as_deref(), Some("theirs"));
 
         // Another program (with a window, as programs open it) tries to copy between the check and the clear: the
-        // clipboard is still open, so it cannot get in, and the clear takes only Lockbox's copy.
+        // clipboard is still open, so it cannot get in, and the clear takes only Petalock's copy.
         let (signal_thread, _signals) = started();
         let window = window_of(&signal_thread);
         let instrumented = ClipboardSteps::new(
@@ -4162,6 +4186,226 @@ mod tests {
         assert!(claim("Local\\bad\0name").is_err());
         // The real name is a `Local\` one: per sign-in.
         assert!(INSTANCE_NAME.starts_with("Local\\"));
+    }
+
+    /// Plan 5, Task 0c, `one_instance_lock_on_the_new_identifier`: the lock's name is the app's identifier in
+    /// `tauri.conf.json` (the Petalock one, which Tauri also gives the app's data folders and the single-instance
+    /// plugin its own mutex), and a second start finds the first: the same name is refused while the first copy
+    /// holds it. The claim itself runs on a name of this test's own (the real name belongs to a running Petalock),
+    /// built the way the real one is.
+    #[test]
+    fn one_instance_lock_on_the_new_identifier() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../../tauri.conf.json")).unwrap();
+        let identifier = config["identifier"].as_str().unwrap();
+        assert_eq!(identifier, "io.github.sumguywhowantstobuild.petalock");
+        assert_eq!(INSTANCE_NAME, format!("Local\\{identifier}.instance"));
+        // The claim, by the same rule on a name no running copy has.
+        let name = format!("{INSTANCE_NAME}.test-{}", std::process::id());
+        let first = claim(&name).unwrap().expect("the first start gets it");
+        assert!(
+            claim(&name).unwrap().is_none(),
+            "a second start finds the first"
+        );
+        // The old product's lock is another name: it neither blocks nor is taken.
+        let old = format!(
+            "Local\\io.github.sumguywhowantstobuild.lockbox.instance.test-{}",
+            std::process::id()
+        );
+        assert!(
+            claim(&old).unwrap().is_some(),
+            "the old name is its own claim"
+        );
+        drop(first);
+    }
+
+    /// A scratch registry key of this test's own, under the current user's `Software` (never `Run`): removed with
+    /// everything under it when dropped.
+    struct ScratchKeys {
+        root: String,
+    }
+
+    impl ScratchKeys {
+        fn new() -> ScratchKeys {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            ScratchKeys {
+                root: format!(
+                    r"Software\Petalock-test-scratch-{}-{nanos}",
+                    std::process::id()
+                ),
+            }
+        }
+
+        fn run(&self) -> String {
+            format!(r"{}\Run", self.root)
+        }
+
+        fn approved(&self) -> String {
+            format!(r"{}\Approved", self.root)
+        }
+    }
+
+    impl Drop for ScratchKeys {
+        fn drop(&mut self) {
+            use windows_sys::Win32::System::Registry::RegDeleteKeyW;
+            for path in [self.run(), self.approved(), self.root.clone()] {
+                let path = registry_text(&path);
+                // SAFETY: `path` is NUL-terminated and outlives the call; the key has no subkeys when it is
+                // deleted (the two inside go first, and an absent one is simply not found).
+                unsafe { RegDeleteKeyW(HKEY_CURRENT_USER, path.as_ptr()) };
+            }
+        }
+    }
+
+    /// Sets the text value `name` in the scratch key `path`.
+    fn plant(path: &str, name: &str, text: &str) {
+        let wide_path = registry_text(path);
+        let mut key: HKEY = ptr::null_mut();
+        // SAFETY: `wide_path` is NUL-terminated and outlives the call; the optional arguments are null; `key` is
+        // writable and used only on success.
+        let code = unsafe {
+            RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                wide_path.as_ptr(),
+                0,
+                ptr::null(),
+                REG_OPTION_NON_VOLATILE,
+                KEY_SET_VALUE,
+                ptr::null(),
+                &mut key,
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(code, ERROR_SUCCESS);
+        let key = RegistryKey(key);
+        let (name, data) = (registry_text(name), registry_text(text));
+        // SAFETY: the key is open; `name` is NUL-terminated; `data` holds the UTF-16 units and the NUL, which the
+        // call copies.
+        let code = unsafe {
+            RegSetValueExW(
+                key.0,
+                name.as_ptr(),
+                0,
+                REG_SZ,
+                data.as_ptr().cast::<u8>(),
+                (data.len() * 2) as u32,
+            )
+        };
+        assert_eq!(code, ERROR_SUCCESS);
+    }
+
+    /// The names of the values in the scratch key `path`, sorted; `None` when the key is not there.
+    fn value_names(path: &str) -> Option<Vec<String>> {
+        use windows_sys::Win32::System::Registry::RegEnumValueW;
+        let key = open_registry_key(path, windows_sys::Win32::System::Registry::KEY_QUERY_VALUE)
+            .unwrap()?;
+        let mut names = Vec::new();
+        for index in 0.. {
+            let mut buffer = [0u16; 256];
+            let mut size = buffer.len() as u32;
+            // SAFETY: the key is open; `buffer` is writable for `size` units, which the call updates to the name's
+            // length; the type and data are not asked for (null).
+            let code = unsafe {
+                RegEnumValueW(
+                    key.0,
+                    index,
+                    buffer.as_mut_ptr(),
+                    &mut size,
+                    ptr::null(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                )
+            };
+            if code != ERROR_SUCCESS {
+                break;
+            }
+            names.push(String::from_utf16_lossy(&buffer[..size as usize]));
+        }
+        names.sort();
+        Some(names)
+    }
+
+    /// The text of the value `name` in the scratch key `path`, `None` when there is none.
+    fn value_text(path: &str, name: &str) -> Option<String> {
+        value_with_type(path, name).map(|(text, _)| text)
+    }
+
+    /// The text of the value `name` in the scratch key `path` and its registry type (`REG_SZ` and so on), `None` when
+    /// there is no such value.
+    fn value_with_type(path: &str, name: &str) -> Option<(String, u32)> {
+        let key = open_registry_key(path, windows_sys::Win32::System::Registry::KEY_QUERY_VALUE)
+            .unwrap()?;
+        let name = registry_text(name);
+        let mut data = [0u16; 512];
+        let mut size = (data.len() * 2) as u32;
+        let mut kind = 0u32;
+        // SAFETY: the key is open; `name` is NUL-terminated; `kind` is writable; `data` is writable for `size` bytes,
+        // which the call updates to what it wrote.
+        let code = unsafe {
+            RegQueryValueExW(
+                key.0,
+                name.as_ptr(),
+                ptr::null(),
+                &mut kind,
+                data.as_mut_ptr().cast::<u8>(),
+                &mut size,
+            )
+        };
+        (code == ERROR_SUCCESS).then(|| {
+            let units = (size as usize / 2).saturating_sub(1);
+            (String::from_utf16_lossy(&data[..units]), kind)
+        })
+    }
+
+    /// Plan 5, Task 0c, `startup_entry_is_petalock`: the app's `Run` value is named `Petalock`. Turning Start with
+    /// Windows on writes `Petalock` and nothing else; turning it off removes `Petalock` and nothing else, so a
+    /// value of the old name (this PC's own, from before the rename) is never touched by the app, and does not count as the
+    /// entry being on. Run through the real registry steps over a scratch key of this test's own: the real `Run` key
+    /// is never read or written.
+    #[test]
+    fn startup_entry_is_petalock() {
+        // The value name the product had before the rename: planted, never written by the app.
+        const OLD_VALUE: &str = "Lockbox";
+        let scratch = ScratchKeys::new();
+        assert_ne!(scratch.run(), RUN_KEY, "never the real Run key");
+        assert_eq!(startup::RUN_VALUE, "Petalock");
+        let entry = WinStartup::in_keys(&scratch.run(), &scratch.approved());
+        let old = r#""C:\old\lockbox.exe" --hidden"#;
+        plant(&scratch.run(), OLD_VALUE, old);
+        assert_eq!(value_names(&scratch.run()).unwrap(), [OLD_VALUE]);
+        assert!(!entry.read().unwrap().on, "an old entry is not this one");
+
+        entry.write(true).unwrap();
+        assert_eq!(
+            value_names(&scratch.run()).unwrap(),
+            [OLD_VALUE, "Petalock"],
+            "on writes Petalock only"
+        );
+        assert!(entry.read().unwrap().on);
+        // The whole value: this program's own path in quotes, a space and `--hidden`, as text (`REG_SZ`): never another
+        // program, which Windows would start at sign-in.
+        let exe = std::env::current_exe().unwrap();
+        assert_eq!(
+            value_with_type(&scratch.run(), "Petalock"),
+            Some((format!("\"{}\" --hidden", exe.display()), REG_SZ))
+        );
+        assert_eq!(value_text(&scratch.run(), OLD_VALUE).as_deref(), Some(old));
+
+        entry.write(false).unwrap();
+        assert_eq!(
+            value_names(&scratch.run()).unwrap(),
+            [OLD_VALUE],
+            "off removes Petalock only"
+        );
+        assert_eq!(value_text(&scratch.run(), OLD_VALUE).as_deref(), Some(old));
+        assert!(!entry.read().unwrap().on);
+        // Off again with nothing to remove is fine, and still leaves the old value.
+        entry.write(false).unwrap();
+        assert_eq!(value_text(&scratch.run(), OLD_VALUE).as_deref(), Some(old));
     }
 
     /// The real clock's local date is a `YYYY-MM-DD` date, and today in some zone: no more than a day from the UTC

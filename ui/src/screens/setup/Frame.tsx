@@ -18,7 +18,7 @@ export function Frame({ say, points = 9, children }: { say: string; points?: num
       {/* The page's banner: a screen reader moving by landmarks finds the name and its line, not only the steps. */}
       <header className="field">
         <Pattern points={points} className="rose" />
-        <p className="mark">Lockbox</p>
+        <p className="mark">Petalock</p>
         <p className="say">{say}</p>
       </header>
       <main className="plate">
