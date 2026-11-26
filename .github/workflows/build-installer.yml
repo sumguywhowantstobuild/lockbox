@@ -42,8 +42,9 @@ jobs:
   build:
     name: "Installer: build and smoke test (windows)"
     runs-on: windows-2025-vs2026
-    # A first run has no cache: it builds the Tauri CLI, then the app, then runs the smoke checks.
-    timeout-minutes: 90
+    # A first run has no cache: it builds the Tauri CLI, then the app, then runs the smoke checks; then the two candidate
+    # versions (two shorter builds, only the version changes) and their checks (Task 4).
+    timeout-minutes: 120
     outputs:
       sha256: ${{ steps.digest.outputs.sha256 }}
       artifact: petalock-installer
@@ -116,6 +117,10 @@ jobs:
           # A build-cache hit restores target\ with the folder of an earlier run in it. Nothing restored is trusted or reused: the
           # folder goes first, so the bundler finds only what this step downloads and checks.
           if (Test-Path $tools) { Remove-Item -LiteralPath $tools -Recurse -Force }
+          # The same for the bundle folder: a restored one could hold an installer of an earlier run (a candidate version), and
+          # the digest step below takes the one installer it finds there.
+          $bundle = Join-Path $env:GITHUB_WORKSPACE 'target\release\bundle'
+          if (Test-Path $bundle) { Remove-Item -LiteralPath $bundle -Recurse -Force }
           New-Item -ItemType Directory -Force $tools, $inputs | Out-Null
           function Get-Verified($url, $sha256, $path) {
             Invoke-WebRequest $url -OutFile $path
@@ -231,6 +236,42 @@ jobs:
           retention-days: 7
           if-no-files-found: error
           overwrite: true
+      # Plan 5, Task 4: the same commit as two candidate versions, to prove an upgrade, the candidates' order and a downgrade on
+      # this runner. Only the version differs (merged in with --config). They are built after the tested installer is kept,
+      # are never kept or published, and are moved out of the bundle folder at once.
+      - name: Build the same commit as two candidate versions (never published)
+        shell: pwsh
+        working-directory: crates/petalock-desktop
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = Join-Path $env:RUNNER_TEMP 'candidates'
+          New-Item -ItemType Directory -Force $out | Out-Null
+          $bundle = Join-Path $env:GITHUB_WORKSPACE 'target\release\bundle\nsis'
+          foreach ($version in @('0.1.1', '0.1.2')) {
+            $config = Join-Path $out "version-$version.json"
+            [System.IO.File]::WriteAllText($config, '{"version":"' + $version + '"}')
+            $log = Join-Path $env:RUNNER_TEMP "tauri-build-$version.log"
+            cargo tauri build --config tauri.notices.conf.json --config $config --ci --bundles nsis -- --locked *> $log
+            $code = $LASTEXITCODE
+            if ($code -ne 0) { Get-Content $log; throw "the build of candidate $version failed with exit code $code" }
+            # As for the tested installer: the bundler used the inputs put in place, and fetched or rebuilt none itself.
+            if (-not (Select-String -Path $log -Pattern 'Running makensis' -Quiet)) { throw "the build log of candidate $version shows no makensis run" }
+            $own = @(Select-String -Path $log -Pattern 'Verifying NSIS package', 'Redownloading', 'Recreating it', 'mis-hashed', 'NSIS directory is missing')
+            if ($own.Count -ne 0) { throw "the bundler fetched or rebuilt a packaging input itself for candidate $version" }
+            $file = Join-Path $bundle "Petalock_${version}_x64-setup.exe"
+            if (-not (Test-Path -LiteralPath $file)) { throw "the build of candidate $version made no Petalock_${version}_x64-setup.exe" }
+            Move-Item -LiteralPath $file -Destination $out
+          }
+          "EARLIER=$(Join-Path $out 'Petalock_0.1.1_x64-setup.exe')" >> $env:GITHUB_ENV
+          "LATER=$(Join-Path $out 'Petalock_0.1.2_x64-setup.exe')" >> $env:GITHUB_ENV
+      # The two-version checks: upgrade (state, the one installation, the Run value), the candidates' order on both paths, the
+      # specified downgrade, and the uninstall after an upgrade. Started as the first smoke run is.
+      - name: Smoke-test upgrades between the candidates
+        shell: cmd
+        env:
+          SMOKE_LOG: ${{ runner.temp }}\installer-smoke\upgrade.log
+        run: |
+          "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%GITHUB_WORKSPACE%\scripts\installer-smoke.ps1" -Installer "%EARLIER%" -Upgrade "%LATER%" -Only upgrade_keeps_vaults_list_settings_and_state,candidate_versions_upgrade_in_order,downgrade_behaviour_is_the_specified_one,uninstall_after_upgrade_is_clean -LogPath "%SMOKE_LOG%"
       # A run that did not pass leaves the smoke log (and a picture of the screen where a dialog was driven) to read why:
       # made-up test state only.
       - name: Keep the smoke log

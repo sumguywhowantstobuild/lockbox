@@ -39,6 +39,14 @@ export const NAMED = [
   "installed_copy_has_the_notices_file",
 ];
 
+/** Plan 5, Task 4: the checks that need two versions of the same code (-Installer the earlier, -Upgrade the later). */
+export const UPGRADE_NAMED = [
+  "upgrade_keeps_vaults_list_settings_and_state",
+  "candidate_versions_upgrade_in_order",
+  "downgrade_behaviour_is_the_specified_one",
+  "uninstall_after_upgrade_is_clean",
+];
+
 const read = (path) => readFileSync(join(ROOT, path), "utf8").replace(/\r\n/g, "\n");
 
 /** The text from the first match of `start` to the next `end` after it (both included); fails when either is absent. */
@@ -135,6 +143,15 @@ export function placementProblems(text) {
   if (check < 0 || run < 0 || check > run) problems.push("the old uninstaller is run before the folder is checked");
   return problems;
 }
+
+// Task 4 review: the installed program must carry the installer's own version (a build folder kept from a candidate build
+// could otherwise put another version's program inside the tested installer).
+test("the_installed_program_carries_the_installers_version", () => {
+  const check = checkBody("install_folder_is_programs_petalock_by_default");
+  assert.match(check, /\$want = Get-EmbeddedVersion \$Installer/);
+  assert.match(check, /\$got = Get-EmbeddedVersion \(Join-Path \$DefaultDir 'petalock\.exe'\)/);
+  assert.match(check, /if \(\$got -ne \$want\)/);
+});
 
 test("install_folder_is_programs_petalock_by_default", () => {
   const text = template();
@@ -678,7 +695,8 @@ test("build_installer_pins_the_tool_and_every_packaging_input_and_checks_each_di
 test("build_installer_smoke_tests_the_exact_bytes_it_built_and_keeps_the_log_on_failure", () => {
   const text = read(BUILD);
   const digest = text.indexOf("id: digest");
-  const smoke = text.lastIndexOf("installer-smoke.ps1");
+  // The first smoke run, on the tested installer (Task 4's run on the candidates comes after the installer is kept).
+  const smoke = text.indexOf("installer-smoke.ps1", text.indexOf("name: Smoke-test the installer"));
   const again = text.indexOf("Check the installer did not change");
   const upload = text.indexOf("name: Keep the installer");
   assert.ok(digest > 0 && smoke > digest, "the digest is taken before the smoke run, and the smoke run uses that file");
@@ -822,10 +840,13 @@ test("a_refused_install_is_judged_by_the_program_file_before_and_after_not_by_it
 
 test("the smoke script defines every named test, and the files here name them too", () => {
   const script = read(SMOKE);
-  for (const name of NAMED) assert.ok(script.includes(`"${name}"`), `${name} in the script`);
+  for (const name of [...NAMED, ...UPGRADE_NAMED]) {
+    assert.ok(script.includes(`"${name}"`), `${name} in the script`);
+    assert.ok(script.includes(`$Checks["${name}"] = {`), `${name} has its check`);
+  }
   // The named tests of this file's top.
   const own = readFileSync(join(ROOT, "scripts/installer-smoke.test.mjs"), "utf8");
-  for (const name of NAMED) assert.ok(own.includes(`test("${name}"`), `${name} in the script tests`);
+  for (const name of [...NAMED, ...UPGRADE_NAMED]) assert.ok(own.includes(`test("${name}"`), `${name} in the script tests`);
 });
 
 test("the smoke script refuses what it should", { skip: skipNoPowerShell }, () => {
@@ -864,6 +885,152 @@ test("the smoke script's dry run lists every test and installs nothing", { skip:
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// Plan 5, Task 4: the two-version checks are listed only when -Upgrade is another file, and naming one without it is refused
+// before anything is done (one installer cannot show an upgrade, so such a run could only pass by checking nothing).
+test("the two-version checks need a second installer", { skip: skipNoPowerShell }, () => {
+  const dir = mkdtempSync(join(tmpdir(), "smoke-"));
+  try {
+    const earlier = join(dir, "MU-setup-0.1.1.exe");
+    const later = join(dir, "MU-setup-0.1.2.exe");
+    writeFileSync(earlier, "MU- not an installer");
+    writeFileSync(later, "MU- not an installer either");
+    const both = smoke(["-Installer", earlier, "-Upgrade", later, "-DryRun"]);
+    assert.equal(both.status, 0, both.stdout + both.stderr);
+    const listed = [...both.stdout.matchAll(/^would run: (\S+)$/gm)].map((m) => m[1]);
+    assert.deepEqual(listed, [...NAMED, ...UPGRADE_NAMED]);
+    const only = smoke(["-Installer", earlier, "-Upgrade", later, "-Only", UPGRADE_NAMED.join(","), "-DryRun"]);
+    assert.equal(only.status, 0, only.stdout + only.stderr);
+    assert.deepEqual([...only.stdout.matchAll(/^would run: (\S+)$/gm)].map((m) => m[1]), UPGRADE_NAMED);
+    for (const args of [["-Installer", earlier], ["-Installer", earlier, "-Upgrade", earlier]]) {
+      const refused = smoke([...args, "-Only", UPGRADE_NAMED[0], "-DryRun"]);
+      assert.equal(refused.status, 2, refused.stdout + refused.stderr);
+      assert.match(refused.stdout + refused.stderr, /need -Upgrade, a later version of the same code/);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/** The body of one of the smoke script's checks. */
+const checkBody = (name) => between(read(SMOKE), new RegExp(`^\\$Checks\\["${name}"\\] = \\{$`, "m"), /^\}$/m, name);
+
+test("upgrade_keeps_vaults_list_settings_and_state", () => {
+  const check = checkBody("upgrade_keeps_vaults_list_settings_and_state");
+  // Install N, plant Task 1's made-up state and the Run value the app writes (pointing at the installed program), install N+1.
+  assert.match(check, /Assert-VersionPair/);
+  assert.match(check, /Install-Good \$DefaultDir/);
+  assert.match(check, /\$planted = New-StateFixture/);
+  assert.match(check, /\$run = '"' \+ \(Join-Path \$DefaultDir 'petalock\.exe'\) \+ '" --hidden'/);
+  assert.match(check, /Set-ItemProperty -LiteralPath \$RunKey -Name 'Petalock' -Value \$run/);
+  assert.match(check, /Install-Silent \$Upgrade ''/);
+  // Every planted file byte for byte, open\ included (installing over runs no uninstaller); one install folder; one entry,
+  // with N+1's version; the program is N+1's; the Run value unchanged and still pointing at the installed program.
+  assert.match(check, /Assert-Unchanged \$planted \(Get-Listing \$State -Hash\)/);
+  assert.match(check, /Assert-OneInstallation \$DefaultDir \$ToVersion/);
+  assert.match(check, /\(Get-RegValue \$RunKey 'Petalock'\) -ne \$run/);
+  const one = between(read(SMOKE), /^function Assert-OneInstallation/m, /^\}$/m, "Assert-OneInstallation");
+  assert.match(one, /Get-UninstallValue 'DisplayVersion'/);
+  assert.match(one, /Get-EmbeddedVersion \(Join-Path \$Dir 'petalock\.exe'\)/);
+  assert.match(one, /DisplayName/);
+  assert.match(one, /Programs/);
+});
+
+test("candidate_versions_upgrade_in_order", () => {
+  const check = checkBody("candidate_versions_upgrade_in_order");
+  // The versions the two files carry are read back and are plain x.y.z, the earlier first; then the registered version
+  // before and after, on the silent path and through the window, whose reinstall page must call the installed one older.
+  assert.match(check, /Assert-VersionPair/);
+  assert.match(check, /Install-Silent \$Upgrade ''/);
+  assert.match(check, /Assert-OneInstallation \$DefaultDir \$FromVersion/);
+  assert.match(check, /Assert-OneInstallation \$DefaultDir \$ToVersion/);
+  assert.match(check, /Read-ReinstallPage \$Upgrade/);
+  assert.match(check, /An older version of Petalock is installed/);
+  assert.match(check, /\$page\.Exit -ne 0/);
+  // Runner trial 1 (run 45781912591): the reinstall page comes after the Welcome page, so the page is read while Drive-Wizard
+  // presses through the window (each new page shown to -OnPage once), never by a separate wait that presses nothing.
+  const smokeText = read(SMOKE);
+  const reader = between(smokeText, /^function Read-ReinstallPage/m, /^\}$/m, "Read-ReinstallPage");
+  assert.match(reader, /Drive-Wizard \$p 'install' \$false '' \$null 240 \$false \$reader/);
+  assert.match(reader, /the window went through no reinstall page/);
+  const driver = between(smokeText, /^function Drive-Wizard/m, /^\}$/m, "Drive-Wizard");
+  assert.match(driver, /\[scriptblock\]\$OnPage = \$null\) \{/);
+  assert.match(driver, /if \(\$innerWnd -ne \$pageWnd\) \{\n(?:.*\n){1,3}?\s+if \(\$OnPage\) \{ & \$OnPage \$d \}/);
+  const pair = between(read(SMOKE), /^function Assert-VersionPair/m, /^\}$/m, "Assert-VersionPair");
+  assert.match(pair, /Get-EmbeddedVersion \$Installer/);
+  assert.match(pair, /Get-EmbeddedVersion \$Upgrade/);
+  assert.match(pair, /\[version\]\$script:FromVersion -ge \[version\]\$script:ToVersion/);
+  const embedded = between(read(SMOKE), /^function Get-EmbeddedVersion/m, /^\}$/m, "Get-EmbeddedVersion");
+  assert.match(embedded, /FileVersionInfo\]::GetVersionInfo/);
+  assert.match(embedded, /ProductVersion/);
+});
+
+test("downgrade_behaviour_is_the_specified_one", () => {
+  const check = checkBody("downgrade_behaviour_is_the_specified_one");
+  // Specified (Task 4, from the template and Tauri's default allowDowngrades = true; the page links older versions): a silent
+  // downgrade installs over and keeps the state; through the window the page says a newer version is installed and offers
+  // both choices, and the earlier version ends up installed with the state kept (open\ aside: an uninstall-first run cleans it).
+  assert.match(check, /Install-Silent \$Upgrade ''[\s\S]*Install-Silent \$Installer ''/);
+  assert.match(check, /Assert-OneInstallation \$DefaultDir \$FromVersion/);
+  assert.match(check, /Assert-Unchanged \$planted \(Get-Listing \$State -Hash\)/);
+  assert.match(check, /A newer version of Petalock is already installed/);
+  assert.match(check, /'Do not uninstall'/);
+  assert.match(check, /'Uninstall before installing'/);
+  assert.match(check, /Assert-Unchanged \(Without-Open \$planted\) \(Without-Open \(Get-Listing \$State -Hash\)\)/);
+  // The template still allows it: a change to the setting must change this test too.
+  assert.doesNotMatch(read(CONFIG), /allowDowngrades/);
+});
+
+test("uninstall_after_upgrade_is_clean", () => {
+  const check = checkBody("uninstall_after_upgrade_is_clean");
+  // Task 1's checks after an upgrade, with the registry sentinel also in the former child key (Task 1 re-check new 8).
+  assert.match(check, /Install-Silent \$Upgrade ''[\s\S]*Uninstall-AsWindowsDoes \$DefaultDir/);
+  assert.match(check, /HKCU:\\Software\\Petalock\\Petalock/);
+  for (const sentence of [
+    "the install folder is still there after the upgrade and uninstall",
+    "the uninstall entry is still there after the upgrade and uninstall",
+    "the Run\\\\Petalock value is still there after the upgrade and uninstall",
+    "open\\\\ is still there after the upgrade and uninstall",
+  ]) assert.match(check, new RegExp(sentence));
+  assert.match(check, /Assert-Unchanged \(Without-Open \$planted\) \(Get-Listing \$State -Hash\)/);
+  assert.match(check, /MU-child/);
+});
+
+// Task 1 re-check new 6: the uninstall-first upgrade must show that the old uninstaller really ran: an opened copy planted
+// in open\ is gone afterwards (only the uninstaller cleans it).
+test("the_uninstall_first_upgrade_proves_the_old_uninstaller_ran", () => {
+  const check = checkBody("files_added_after_install_survive_upgrade_and_uninstall");
+  const first = check.slice(check.indexOf("MU-first"));
+  assert.match(first, /Write-Utf8 \(Join-Path \$State 'open\\MU-proof\.txt'\)/);
+  assert.match(first, /the old uninstaller did not run \(the opened copy planted in open\\ is still there\)/);
+});
+
+// Plan 5, Task 4: the installer job also builds the same commit as two candidate versions (never published, after the tested
+// installer is kept) and runs the two-version checks on them.
+test("build_installer_builds_two_candidate_versions_and_runs_the_upgrade_checks", () => {
+  const text = read(BUILD);
+  const upload = text.indexOf("name: Keep the installer");
+  const candidates = text.indexOf("name: Build the same commit as two candidate versions");
+  const upgradeSmoke = text.indexOf("name: Smoke-test upgrades between the candidates");
+  assert.ok(upload > 0 && candidates > upload, "the candidates are built after the tested installer is kept");
+  assert.ok(upgradeSmoke > candidates, "the upgrade checks run on the candidates");
+  const build = text.slice(candidates, upgradeSmoke);
+  for (const version of ["0.1.1", "0.1.2"]) assert.ok(build.includes(version), `candidate ${version}`);
+  assert.match(build, /--config tauri\.notices\.conf\.json --config/);
+  assert.match(build, /"version":/);
+  assert.match(build, /-- --locked/);
+  // Moved out of the bundle folder, so a later run's digest step (exactly one installer) never sees them.
+  assert.match(build, /Move-Item/);
+  const smokeStep = text.slice(upgradeSmoke, upgradeSmoke + 1400);
+  assert.match(smokeStep, /shell: cmd/);
+  assert.match(smokeStep, /-Installer "%EARLIER%" -Upgrade "%LATER%"/);
+  assert.match(smokeStep, new RegExp(`-Only ${UPGRADE_NAMED.join(",")}`));
+  assert.match(smokeStep, /installer-smoke\\upgrade\.log/);
+  // The bundle folder starts empty: a restored one could hold an installer from an earlier run.
+  const clear = text.indexOf("target\\release\\bundle");
+  const mainBuild = text.indexOf("name: Build the installer");
+  assert.ok(clear > 0 && clear < mainBuild, "the bundle folder is cleared before the build");
 });
 
 // Plan 5, Task 3: the open-source licence texts inside the installer. `scripts/licences.test.mjs` tests the file and how it is

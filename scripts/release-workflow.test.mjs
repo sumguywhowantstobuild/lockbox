@@ -566,7 +566,10 @@ test("approval_does_not_outlive_the_artifacts_it_needs", () => {
     assert.notEqual(bad, release, label);
     assert.throws(() => checkRetention(bad, build), undefined, label);
   }
-  assert.throws(() => checkRetention(release, build.replace(/retention-days: 7\n( +if-no-files-found: error\n +overwrite: true\n +# A run that did not pass)/, "retention-days: 3\n$1")), undefined, "the installer's own window changing makes the release's differ");
+  // The installer's upload step, found by its artifact name (Task 4 put steps after it, so not by what follows it).
+  const shorter = build.replace(/(name: petalock-installer\n(?: +.*\n)*? +)retention-days: 7/, "$1retention-days: 3");
+  assert.notEqual(shorter, build, "the mutation found the installer's upload step");
+  assert.throws(() => checkRetention(release, shorter), undefined, "the installer's own window changing makes the release's differ");
 });
 
 // Finding 10: the version inside the installer is read from the installer's own Windows metadata, in `inspect`, and a step

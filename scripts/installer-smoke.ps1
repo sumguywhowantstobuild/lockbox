@@ -11,7 +11,8 @@ nothing was done (the script installs and removes a program and its settings: it
 check logs PASS or FAIL with what differed, to -LogPath and to the console; a failed interactive check also leaves a picture
 of the screen beside the log.
 
--Upgrade is the installer run over the first one (default: the same file; Task 4 gives it an earlier or later build).
+-Upgrade is the installer run over the first one (default: the same file). Given as another file, it must be a later version
+of the same code (Task 4: the job builds the commit as 0.1.1 and 0.1.2), and the two-version checks are added to the run.
 -Notices is the THIRD-PARTY-NOTICES.txt the build made (Task 3): the check installed_copy_has_the_notices_file compares the
 installed copy with it, byte for byte, and fails without it.
 -DryRun lists the checks and stops. -SelfTest runs the script's own comparisons on made-up folders under the temporary folder
@@ -47,6 +48,14 @@ $AllTests = @(
   "running_petalock_is_never_ended_and_silent_refuses_first",
   "uninstall_says_where_vaults_stay",
   "installed_copy_has_the_notices_file"
+)
+
+# Plan 5, Task 4: the checks that need two versions of the same code, -Installer the earlier and -Upgrade the later.
+$UpgradeTests = @(
+  "upgrade_keeps_vaults_list_settings_and_state",
+  "candidate_versions_upgrade_in_order",
+  "downgrade_behaviour_is_the_specified_one",
+  "uninstall_after_upgrade_is_clean"
 )
 
 $Sentence = 'Your vaults stay where they are. Petalock keeps them in the folders you chose, by default Petalock Vaults in your user folder.'
@@ -395,12 +404,20 @@ if (-not [string]::IsNullOrEmpty($Notices)) {
   if (-not [System.IO.File]::Exists($Notices)) { Stop-WithCode 2 'installer-smoke: -Notices is not a file that exists' }
   $Notices = (Resolve-Path -LiteralPath $Notices).Path
 }
-$selected = @($AllTests)
+$TwoVersions = ($Upgrade -ne $Installer)
+$Known = @($AllTests) + @($UpgradeTests)
+$selected = if ($TwoVersions) { @($Known) } else { @($AllTests) }
 if ($Only -and $Only.Count -gt 0) {
+  # A comma-separated list arrives as one string when the script is started by -File from cmd: split it here.
+  $Only = @($Only | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
   foreach ($name in $Only) {
-    if ($AllTests -notcontains $name) { Stop-WithCode 2 "installer-smoke: unknown test: $name" }
+    if ($Known -notcontains $name) { Stop-WithCode 2 "installer-smoke: unknown test: $name" }
   }
-  $selected = @($AllTests | Where-Object { $Only -contains $_ })
+  $selected = @($Known | Where-Object { $Only -contains $_ })
+}
+# One installer cannot show an upgrade: a two-version check run without a second one could only pass by checking nothing.
+if (-not $TwoVersions -and @($selected | Where-Object { $UpgradeTests -contains $_ }).Count -gt 0) {
+  Stop-WithCode 2 'installer-smoke: the two-version checks need -Upgrade, a later version of the same code in another file; nothing was done'
 }
 if ($DryRun) {
   foreach ($name in $selected) { Write-Output "would run: $name" }
@@ -639,7 +656,7 @@ function Wait-Until([scriptblock]$Condition, [int]$Seconds, [string]$Message) {
 # press of its Next (or Finish), as NSIS handles a press ([SmokeDlg]::Press); a press is posted again only when it could not
 # be queued, so a delayed press is never delivered to the following page before its choices are set. A page that does not
 # move is described in the log after 30 s and the run fails at the time limit.
-function Drive-Wizard($Process, [string]$Kind, [bool]$Tick = $false, [string]$OnBox = '', [scriptblock]$BeforeRetry = $null, [int]$Seconds = 240, [bool]$UninstallFirst = $false) {
+function Drive-Wizard($Process, [string]$Kind, [bool]$Tick = $false, [string]$OnBox = '', [scriptblock]$BeforeRetry = $null, [int]$Seconds = 240, [bool]$UninstallFirst = $false, [scriptblock]$OnPage = $null) {
   $texts = New-Object System.Collections.ArrayList
   $answered = $false
   $chosen = $false
@@ -696,7 +713,11 @@ function Drive-Wizard($Process, [string]$Kind, [bool]$Tick = $false, [string]$On
       # Between pages no inner dialog may be visible: then nothing is pressed and the last page's state is kept, so the
       # same page coming back never gets a second press. Only a different page resets it.
       if ($innerWnd -eq [IntPtr]::Zero) { continue }
-      if ($innerWnd -ne $pageWnd) { $pageWnd = $innerWnd; $pageWndSince = Get-Date; $pageQueued = $false; $pagePresses = 0 }
+      if ($innerWnd -ne $pageWnd) {
+        $pageWnd = $innerWnd; $pageWndSince = Get-Date; $pageQueued = $false; $pagePresses = 0
+        # Each new page is shown to -OnPage once, before anything on it is set or pressed (Task 4 reads the reinstall page).
+        if ($OnPage) { & $OnPage $d }
+      }
       # After an Abort the page says so, its Next button stays off, and Cancel is what closes it.
       if ($text -match 'Aborted') {
         $close = [SmokeDlg]::Item($d.Handle, 2)
@@ -850,6 +871,71 @@ function Set-RunValue {
   Set-ItemProperty -LiteralPath $RunKey -Name 'Petalock' -Value '"C:\MU-made-up\petalock.exe" --hidden'
 }
 
+# Plan 5, Task 4: versions. The version a file carries in its Windows version resource (the installer's and the program's
+# ProductVersion), as x.y.z; anything else is an error, never an empty answer that two files could share.
+function Get-EmbeddedVersion([string]$Path) {
+  $text = [string]([System.Diagnostics.FileVersionInfo]::GetVersionInfo($Path).ProductVersion)
+  $m = [regex]::Match($text, '^\s*(\d+)\.(\d+)\.(\d+)')
+  if (-not $m.Success) { throw "the version resource of $([System.IO.Path]::GetFileName($Path)) holds no x.y.z version ('$text')" }
+  return "$($m.Groups[1].Value).$($m.Groups[2].Value).$($m.Groups[3].Value)"
+}
+
+# The two installers' versions, read back: plain x.y.z (decision 4a, no "rc" text), and -Installer's earlier than -Upgrade's.
+# Sets $FromVersion and $ToVersion for the checks.
+function Assert-VersionPair {
+  $script:FromVersion = Get-EmbeddedVersion $Installer
+  $script:ToVersion = Get-EmbeddedVersion $Upgrade
+  foreach ($v in @($script:FromVersion, $script:ToVersion)) {
+    if ($v -notmatch '^\d+\.\d+\.\d+$') { throw "a candidate version is not a plain x.y.z: $v" }
+  }
+  if ([version]$script:FromVersion -ge [version]$script:ToVersion) {
+    throw "-Installer carries $($script:FromVersion) and -Upgrade $($script:ToVersion): the second must be the later version"
+  }
+  Write-Log "  versions: -Installer $($script:FromVersion), -Upgrade $($script:ToVersion)"
+}
+
+# Exactly one installation, in -Dir, at -Version: one program folder under Programs, one uninstall entry for Petalock (and its
+# version), and the installed program's own version resource.
+function Assert-OneInstallation([string]$Dir, [string]$Version) {
+  if (-not (Test-Installed $Dir)) { throw "no program and uninstaller in the install folder (expected version $Version)" }
+  $registered = [string](Get-UninstallValue 'DisplayVersion')
+  if ($registered -ne $Version) { throw "the uninstall entry says version '$registered', not $Version" }
+  $location = ([string](Get-UninstallValue 'InstallLocation')).Trim('"')
+  if ($location -ne $Dir) { throw 'the uninstall entry names another install folder' }
+  $program = Get-EmbeddedVersion (Join-Path $Dir 'petalock.exe')
+  if ($program -ne $Version) { throw "the installed program carries version $program, not $Version" }
+  $entries = @(Get-ChildItem -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue |
+    Where-Object { [string]$_.GetValue('DisplayName') -like 'Petalock*' })
+  if ($entries.Count -ne 1) { throw "there are $($entries.Count) uninstall entries for Petalock, not one" }
+  $programs = Join-Path $LocalApp 'Programs'
+  $folders = @(Get-ChildItem -LiteralPath $programs -Directory -ErrorAction SilentlyContinue | Where-Object { Test-Installed $_.FullName })
+  $elsewhere = @(Get-ChildItem -LiteralPath $Work -Directory -Recurse -Depth 2 -ErrorAction SilentlyContinue | Where-Object { Test-Installed $_.FullName })
+  if (($folders.Count + $elsewhere.Count) -ne 1) { throw "there are $($folders.Count + $elsewhere.Count) folders holding a Petalock program, not one" }
+}
+
+# Runs the installer -Exe through its window to the end (Drive-Wizard, taking each page's default) and reads its reinstall
+# page on the way, the one that offers 'Uninstall before installing' (it comes after the Welcome page): its words and its two
+# choices, each with whether it can be chosen and whether it is ticked, and the installer's exit code.
+function Read-ReinstallPage([string]$Exe) {
+  # Filled by the page reader below, which Drive-Wizard calls from its own scope: found by name through the caller's scope.
+  $ReinstallFound = @{}
+  $reader = {
+    param($d)
+    if ($ReinstallFound.Count -gt 0) { return }
+    if (-not (Find-Button $d 'Uninstall before installing')) { return }
+    $ReinstallFound['Choices'] = @($d.Kids | Where-Object { $_.Class -eq 'Button' -and ($_.Text -eq 'Uninstall before installing' -or $_.Text -like 'Do not uninstall*') } |
+      ForEach-Object { [pscustomobject]@{ Text = $_.Text; Enabled = [bool]$_.Enabled; Checked = ([SmokeDlg]::GetCheck($_.Handle) -eq 1) } })
+    $ReinstallFound['Text'] = (Get-DialogText $d) -replace '\s+', ' '
+  }
+  $p = Start-Tracked $Exe @()
+  [void](Drive-Wizard $p 'install' $false '' $null 240 $false $reader)
+  $exit = Get-ExitCode $p
+  if ($ReinstallFound.Count -eq 0) { Save-Screen 'no-reinstall-page'; throw 'the window went through no reinstall page' }
+  $choices = $ReinstallFound['Choices']
+  Write-Log "  reinstall page: $($ReinstallFound['Text']) | choices: $(($choices | ForEach-Object { "'$($_.Text)' enabled=$($_.Enabled) ticked=$($_.Checked)" }) -join '; ') | exit $exit"
+  return [pscustomobject]@{ Text = $ReinstallFound['Text']; Choices = $choices; Exit = $exit }
+}
+
 function Start-PetalockHidden([string]$Dir) {
   $p = Start-Process -FilePath (Join-Path $Dir 'petalock.exe') -ArgumentList '--hidden' -PassThru
   $name = "Local\$Id.instance"
@@ -932,6 +1018,11 @@ $Checks["install_folder_is_programs_petalock_by_default"] = {
   if ($location.Trim('"') -ne $DefaultDir) { throw "the uninstall entry says the install location is not the default (entry differs from LocalAppData\Programs\Petalock)" }
   if ([System.IO.Directory]::Exists($State)) { throw 'the install made the state folder (LocalAppData\Petalock)' }
   if ([System.IO.Directory]::Exists($IdLocal) -or [System.IO.Directory]::Exists($IdRoam)) { throw 'the install made an identifier folder' }
+  # The program inside carries the installer's own version (Task 4 review: a build folder kept from a candidate build could
+  # otherwise put a program of another version inside this installer, and nothing else would see it).
+  $want = Get-EmbeddedVersion $Installer
+  $got = Get-EmbeddedVersion (Join-Path $DefaultDir 'petalock.exe')
+  if ($got -ne $want) { throw "the installed program carries version $got, but the installer $want" }
 }
 
 $Checks["install_refuses_an_unsafe_folder"] = {
@@ -1096,9 +1187,13 @@ $Checks["files_added_after_install_survive_upgrade_and_uninstall"] = {
   $decoy = Join-Path $Work 'MU-decoy.cmd'
   Write-Utf8 $decoy ("@echo off`r`necho MU > `"$marker`"`r`n")
   Set-ItemProperty -LiteralPath $UninstallKey -Name 'UninstallString' -Value ('"' + $decoy + '"')
+  # Proof the old uninstaller really ran (Task 1 re-check new 6): only it cleans the opened copies in open\.
+  $proof = Join-Path $State 'open\MU-proof.txt'
+  Write-Utf8 (Join-Path $State 'open\MU-proof.txt') 'MU-proof: an opened copy only the uninstaller removes'
   $p = Start-Tracked $Upgrade @()
   [void](Drive-Wizard $p 'install' $false '' $null 240 $true)
   if ([System.IO.File]::Exists($marker)) { throw 'the command planted in UninstallString was run' }
+  if ([System.IO.File]::Exists($proof)) { throw 'the old uninstaller did not run (the opened copy planted in open\ is still there)' }
   if ((Get-ExitCode $p) -ne 0) { throw 'the interactive upgrade that uninstalls first did not end with exit 0' }
   if (-not (Test-Installed $dir)) { throw 'the upgrade that uninstalls first left no program' }
   if ([string](Get-UninstallValue 'UninstallString') -ne ('"' + (Join-Path $dir 'uninstall.exe') + '"')) { throw 'the uninstall command was not written back as the recorded folder''s own uninstaller' }
@@ -1529,6 +1624,125 @@ $Checks["installed_copy_has_the_notices_file"] = {
   Uninstall-AsWindowsDoes $dir
   if ([System.IO.File]::Exists($installed)) { throw 'the uninstall left THIRD-PARTY-NOTICES.txt in the install folder' }
   if ((Get-Sha256 $outside) -ne $outsideHash) { throw 'the uninstall changed the file outside the install folder' }
+}
+
+# --- Plan 5, Task 4: two versions of the same code (-Installer the earlier, -Upgrade the later) ----------------------------
+
+# Installing a later version over an earlier one keeps everything of the person's: the state folder byte for byte (open\
+# included: installing over runs no uninstaller), the one installation in its folder, and the Run value the app wrote.
+$Checks["upgrade_keeps_vaults_list_settings_and_state"] = {
+  Reset-World
+  Assert-VersionPair
+  Install-Good $DefaultDir
+  Assert-OneInstallation $DefaultDir $FromVersion
+  $planted = New-StateFixture
+  $run = '"' + (Join-Path $DefaultDir 'petalock.exe') + '" --hidden'
+  Set-ItemProperty -LiteralPath $RunKey -Name 'Petalock' -Value $run
+  $code = Install-Silent $Upgrade ''
+  if ($code -ne 0) { throw "the silent upgrade to $ToVersion exited $code" }
+  Start-Sleep -Seconds 2
+  Assert-Unchanged $planted (Get-Listing $State -Hash) 'the state folder after the upgrade (open\ included)'
+  Assert-OneInstallation $DefaultDir $ToVersion
+  if ((Get-RegValue $RunKey 'Petalock') -ne $run) { throw 'the upgrade changed or removed the Run\Petalock value' }
+  Write-Log "  $FromVersion to $ToVersion, silent: state, the one installation and the Run value kept"
+}
+
+# Each candidate carries its own version, and the later one is taken as an upgrade on both paths: silent, and through the
+# window, whose reinstall page calls the installed version older.
+$Checks["candidate_versions_upgrade_in_order"] = {
+  Reset-World
+  Assert-VersionPair
+  Install-Good $DefaultDir
+  Assert-OneInstallation $DefaultDir $FromVersion
+  $code = Install-Silent $Upgrade ''
+  if ($code -ne 0) { throw "the silent upgrade from $FromVersion to $ToVersion exited $code" }
+  Start-Sleep -Seconds 2
+  Assert-OneInstallation $DefaultDir $ToVersion
+  Write-Log "  silent: $FromVersion then $ToVersion, registered and embedded versions read back"
+
+  Reset-World
+  Install-Good $DefaultDir
+  # The page's default choice is taken, whichever it is (Task 4b sets it); this check asserts the page's words and the result.
+  $page = Read-ReinstallPage $Upgrade
+  if ($page.Text -notlike '*An older version of Petalock is installed*') { throw "the reinstall page does not call the installed version older: $($page.Text)" }
+  if ($page.Exit -ne 0) { throw "the upgrade through the window ended with exit $($page.Exit)" }
+  Start-Sleep -Seconds 2
+  Assert-OneInstallation $DefaultDir $ToVersion
+  Write-Log "  through the window: the page called $FromVersion older, and $ToVersion is installed"
+}
+
+# Specified here (Task 4): downgrades are allowed (Tauri's allowDowngrades, left at its default true; the page links older
+# versions for anyone who needs to go back). Silent: the earlier version installs over the later one and the state is kept
+# byte for byte. Through the window: the page says a newer version is installed and offers both choices, and the earlier
+# version ends up installed with the state kept (open\ aside: an uninstall-first run cleans the opened copies).
+$Checks["downgrade_behaviour_is_the_specified_one"] = {
+  Reset-World
+  Assert-VersionPair
+  $code = Install-Silent $Upgrade ''
+  if ($code -ne 0) { throw "the silent install of $ToVersion exited $code" }
+  Start-Sleep -Seconds 2
+  $planted = New-StateFixture
+  $code = Install-Silent $Installer ''
+  if ($code -ne 0) { throw "the silent downgrade to $FromVersion exited $code (specified: it installs over)" }
+  Start-Sleep -Seconds 2
+  Assert-OneInstallation $DefaultDir $FromVersion
+  Assert-Unchanged $planted (Get-Listing $State -Hash) 'the state folder after the silent downgrade (open\ included)'
+  Write-Log "  silent: $ToVersion then $FromVersion installs over, state kept"
+
+  Reset-World
+  $code = Install-Silent $Upgrade ''
+  if ($code -ne 0) { throw "the silent install of $ToVersion exited $code" }
+  Start-Sleep -Seconds 2
+  $planted = New-StateFixture
+  # The page's default choice is taken, whichever it is (Task 4b sets it); both choices must be offered and enabled.
+  $page = Read-ReinstallPage $Installer
+  if ($page.Text -notlike '*A newer version of Petalock is already installed*') { throw "the reinstall page does not say a newer version is installed: $($page.Text)" }
+  foreach ($name in @('Uninstall before installing', 'Do not uninstall')) {
+    $choice = @($page.Choices | Where-Object { $_.Text -eq $name })[0]
+    if (-not $choice) { throw "the reinstall page on a downgrade does not offer '$name'" }
+    if (-not $choice.Enabled) { throw "the reinstall page on a downgrade shows '$name' but it cannot be chosen" }
+  }
+  if ($page.Exit -ne 0) { throw "the downgrade through the window ended with exit $($page.Exit)" }
+  Start-Sleep -Seconds 2
+  Assert-OneInstallation $DefaultDir $FromVersion
+  Assert-Unchanged (Without-Open $planted) (Without-Open (Get-Listing $State -Hash)) 'the state folder after the downgrade through the window (open\ aside)'
+  Write-Log "  through the window: the page said a newer version is installed, both choices offered, $FromVersion installed, state kept"
+}
+
+# Task 1's uninstall checks after an upgrade: the program, its entry, the Run value and open\ go; every other planted file,
+# the vault, the identifier folders and values Petalock did not make (under HKCU\Software\Petalock and its former child key
+# HKCU\Software\Petalock\Petalock, Task 1 re-check new 8) stay.
+$Checks["uninstall_after_upgrade_is_clean"] = {
+  Reset-World
+  Assert-VersionPair
+  Install-Good $DefaultDir
+  $planted = New-StateFixture
+  $vault = Join-Path $Work 'MU-vault'
+  Write-Utf8 (Join-Path $vault 'vault.json') '{"MU":"header"}'
+  Write-Utf8 (Join-Path $IdRoam 'MU-roaming.txt') 'MU-roaming'
+  Write-Utf8 (Join-Path $IdLocal 'MU-local.txt') 'MU-local'
+  Set-ItemProperty -LiteralPath $RunKey -Name 'Petalock' -Value ('"' + (Join-Path $DefaultDir 'petalock.exe') + '" --hidden')
+  New-Item -Path $OldKey -Force | Out-Null
+  Set-ItemProperty -LiteralPath $OldKey -Name 'MU-unrelated' -Value 'MU-keep'
+  $child = 'HKCU:\Software\Petalock\Petalock'
+  New-Item -Path $child -Force | Out-Null
+  Set-ItemProperty -LiteralPath $child -Name 'MU-child' -Value 'MU-keep'
+  $others = @{}
+  foreach ($path in @($vault, $IdRoam, $IdLocal)) { $others[$path] = Get-Listing $path -Hash; Assert-Listing $others[$path] $path "the folder $([System.IO.Path]::GetFileName($path))" }
+  $code = Install-Silent $Upgrade ''
+  if ($code -ne 0) { throw "the silent upgrade to $ToVersion exited $code" }
+  Start-Sleep -Seconds 2
+  Assert-OneInstallation $DefaultDir $ToVersion
+  Uninstall-AsWindowsDoes $DefaultDir
+  if ([System.IO.Directory]::Exists($DefaultDir)) { throw 'the install folder is still there after the upgrade and uninstall' }
+  if (Get-UninstallValue 'DisplayName') { throw 'the uninstall entry is still there after the upgrade and uninstall' }
+  if ($null -ne (Get-RegValue $RunKey 'Petalock')) { throw 'the Run\Petalock value is still there after the upgrade and uninstall' }
+  if ((Get-RegValue $OldKey 'MU-unrelated') -ne 'MU-keep') { throw 'the uninstall removed a value under HKCU\Software\Petalock that it did not make' }
+  if ((Get-RegValue $child 'MU-child') -ne 'MU-keep') { throw 'the uninstall removed a value under HKCU\Software\Petalock\Petalock that it did not make' }
+  if ([System.IO.Directory]::Exists((Join-Path $State 'open'))) { throw 'open\ is still there after the upgrade and uninstall' }
+  Assert-Unchanged (Without-Open $planted) (Get-Listing $State -Hash) 'the state folder (everything but open\) after the upgrade and uninstall'
+  foreach ($path in $others.Keys) { Assert-Unchanged $others[$path] (Get-Listing $path -Hash) "the folder $([System.IO.Path]::GetFileName($path))" }
+  Write-Log "  $FromVersion to $ToVersion, then uninstall: only the program, its entry, the Run value and open\ went"
 }
 
 # ---------------------------------------------------------------------------------------------------------------------
