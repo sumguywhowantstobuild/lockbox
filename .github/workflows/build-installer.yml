@@ -20,6 +20,11 @@ on:
         description: The commit to build, as a full commit hash
         required: true
         type: string
+      fresh-tools:
+        description: Restore no cache, so the Tauri CLI and the build's dependencies are built from source; a release sets it
+        required: false
+        type: boolean
+        default: false
     outputs:
       sha256:
         description: SHA-256 of the installer that was smoke-tested
@@ -78,10 +83,14 @@ jobs:
         run: npm ci --ignore-scripts
       - name: Install pinned Rust toolchain
         run: rustup toolchain install
+      # A cache entry's bytes are pinned by nothing, so a release (`fresh-tools`) restores none: it builds the dependencies and
+      # the Tauri CLI from source. With the cache step skipped, `cache-hit` is empty and the CLI is installed below.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: ${{ !inputs.fresh-tools }}
       # The CLI is built once and kept: the key names its version, so a new version is a new cache.
       - name: Cache the Tauri CLI
         id: tauri-cli
+        if: ${{ !inputs.fresh-tools }}
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cargo/bin/cargo-tauri.exe

@@ -68,6 +68,13 @@ because one of them reads the built style sheet (it fails, saying to build first
 `node scripts/scan.mjs` runs the security scanners (secrets, risky code, vulnerable dependencies); see
 [docs/SETUP.md](docs/SETUP.md#security-scan) for what it reports and how to handle a finding.
 
+## Releasing
+A release is made from a tag on `main` by the release workflow (`.github/workflows/release.yml`), started by hand on
+`main` with the tag as its input. It checks the tag and every CI job, builds and smoke-tests the installer, signs two
+statements about it and makes a draft release; making the draft public is the repository owner's click, after the draft
+has been verified. Each step, its pass mark and the way back are in [RELEASING.md](RELEASING.md). The guard the workflow
+runs is `scripts/release-guard.mjs`; its tests are `scripts/release-guard.test.mjs` and `scripts/release-workflow.test.mjs`.
+
 ## Running the app against a test state
 A local end-to-end or hands-on run must never touch your own Petalock data. `e2e/lib/state.mjs` renames the app's
 state folders, its web-view folders and the default vault folder aside (each gets a sentinel file naming the run), puts a
