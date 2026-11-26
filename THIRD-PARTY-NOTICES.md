@@ -44,7 +44,9 @@ used as published; Petalock does not modify it.
 ## Libraries the desktop app uses directly
 
 Exact versions are pinned in `Cargo.lock` and `ui/package-lock.json`. The full licence texts of these libraries and of
-what they depend on ship with the installer (Plan 5); nothing is distributed before then.
+what they depend on ship with the installer, as `THIRD-PARTY-NOTICES.txt` in the install folder: the installer's build
+makes it from the two lock files (`scripts/licences.mjs`, with `about.toml`) and it is never committed. It also carries the
+two word lists' notices above.
 
 | Library | Version | Licence | Used for |
 |---|---|---|---|

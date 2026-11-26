@@ -3,7 +3,7 @@
 Plan 5, Task 1: the installer's smoke checks. Installs, upgrades and uninstalls the real installer, for the current user, on
 a clean GitHub-hosted Windows runner, and checks what it did and did not touch.
 
-  installer-smoke.ps1 -Installer <path> [-Upgrade <path>] [-LogPath <file>] [-Only <name>,...] [-DryRun]
+  installer-smoke.ps1 -Installer <path> [-Upgrade <path>] [-Notices <path>] [-LogPath <file>] [-Only <name>,...] [-DryRun]
   installer-smoke.ps1 -SelfTest
 
 Exit 0 only when every check selected passed. 2: the arguments were refused. 3: this is not a GitHub-hosted runner, so
@@ -12,6 +12,8 @@ check logs PASS or FAIL with what differed, to -LogPath and to the console; a fa
 of the screen beside the log.
 
 -Upgrade is the installer run over the first one (default: the same file; Task 4 gives it an earlier or later build).
+-Notices is the THIRD-PARTY-NOTICES.txt the build made (Task 3): the check installed_copy_has_the_notices_file compares the
+installed copy with it, byte for byte, and fails without it.
 -DryRun lists the checks and stops. -SelfTest runs the script's own comparisons on made-up folders under the temporary folder
 and stops: it installs nothing and touches no registry; it proves each comparison fails on a wrong result and on no change.
 
@@ -22,6 +24,7 @@ the state folder and the two identifier folders (all planted with made-up files)
 param(
   [string]$Installer,
   [string]$Upgrade,
+  [string]$Notices,
   [string]$LogPath,
   [string[]]$Only,
   [switch]$DryRun,
@@ -42,7 +45,8 @@ $AllTests = @(
   "uninstall_never_follows_a_junction",
   "a_held_or_read_only_copy_is_reported_not_left_silently",
   "running_petalock_is_never_ended_and_silent_refuses_first",
-  "uninstall_says_where_vaults_stay"
+  "uninstall_says_where_vaults_stay",
+  "installed_copy_has_the_notices_file"
 )
 
 $Sentence = 'Your vaults stay where they are. Petalock keeps them in the folders you chose, by default Petalock Vaults in your user folder.'
@@ -192,6 +196,21 @@ function Write-Utf8([string]$Path, [string]$Text) {
   [System.IO.File]::WriteAllText($Path, $Text, (New-Object System.Text.UTF8Encoding($false)))
 }
 
+# The licence notices as installed against the file the build made (scripts/licences.mjs): the same bytes. The build's own file
+# must be a whole one first (a long text with its heading and its footer), so two empty or cut files that happen to be equal
+# can never pass.
+function Assert-NoticesInstalled([string]$Installed, [string]$Expected) {
+  if ([string]::IsNullOrEmpty($Expected) -or -not [System.IO.File]::Exists($Expected)) { throw 'the notices file the build made is not there, so the installed copy has nothing to be compared with' }
+  $want = [System.IO.File]::ReadAllText($Expected, [System.Text.Encoding]::UTF8)
+  if ($want.Length -lt 20000 -or $want -notmatch '(?m)^Petalock: third-party notices\r?$' -or $want -notmatch '(?m)^End of third-party notices: \d+ Rust libraries, \d+ page packages\.\r?$') {
+    throw 'the notices file the build made is not a whole one (too short, or without its heading or its footer)'
+  }
+  if (-not [System.IO.File]::Exists($Installed)) { throw "the installer did not put THIRD-PARTY-NOTICES.txt in the install folder ($Installed)" }
+  if ((Get-Sha256 $Installed) -ne (Get-Sha256 $Expected)) {
+    throw "the installed THIRD-PARTY-NOTICES.txt is not the file the build made ($((Get-Item -LiteralPath $Installed).Length) bytes, the build's has $((Get-Item -LiteralPath $Expected).Length))"
+  }
+}
+
 # ---------------------------------------------------------------------------------------------------------------------
 # -SelfTest: each comparison above on made-up folders in the temporary folder, wrong result and no change both.
 # ---------------------------------------------------------------------------------------------------------------------
@@ -314,6 +333,38 @@ function Invoke-SelfTest {
     if (-not $denied) { throw 'selftest: the access-denied fixture did not deny listing' }
     if (@([System.IO.Directory]::EnumerateFileSystemEntries($denyDir)).Count -ne 1) { throw 'selftest: clearing the deny did not give the access back' }
     & $ok 'the access-denied fixture denies listing, and clearing it gives the access back'
+
+    # The installed notices against the build's: the same file passes; a changed, a cut, an absent and an empty copy fail, and a
+    # build file that is itself empty or cut fails even when the installed copy is just the same (two equal empty files must
+    # not pass).
+    $notices = Join-Path $root 'notices'
+    $whole = "Petalock: third-party notices`n`n" + ('MU-line of made-up licence text' * 1000) + "`nEnd of third-party notices: 3 Rust libraries, 2 page packages.`n"
+    $built = Join-Path $notices 'built.txt'
+    Write-Utf8 $built $whole
+    Write-Utf8 (Join-Path $notices 'same.txt') $whole
+    Assert-NoticesInstalled (Join-Path $notices 'same.txt') $built
+    & $ok 'an installed notices file that is the build''s passes'
+    $mustFail = {
+      param($installedText, $builtText, $what)
+      $i = Join-Path $notices 'case-installed.txt'
+      $b = Join-Path $notices 'case-built.txt'
+      if ($null -ne $installedText) { Write-Utf8 $i $installedText } elseif ([System.IO.File]::Exists($i)) { [System.IO.File]::Delete($i) }
+      Write-Utf8 $b $builtText
+      $refused = $false
+      try { Assert-NoticesInstalled $i $b } catch { $refused = $true }
+      if (-not $refused) { throw "selftest: $what was accepted" }
+    }
+    & $mustFail ($whole.Replace('MU-line', 'MU-LINE')) $whole 'a changed copy'
+    & $mustFail $whole.Substring(0, 25000) $whole 'a cut copy'
+    & $mustFail $null $whole 'an absent copy'
+    & $mustFail '' $whole 'an empty copy'
+    & $mustFail '' '' 'two empty files'
+    $cut = $whole.Substring(0, 25000)
+    & $mustFail $cut $cut 'two equal files that are cut'
+    $refused = $false
+    try { Assert-NoticesInstalled (Join-Path $notices 'same.txt') '' } catch { $refused = $true }
+    if (-not $refused) { throw 'selftest: a missing build file was accepted' }
+    & $ok 'a changed, cut, absent or empty installed copy fails, and so does a build file that is empty, cut or missing'
   } finally {
     Remove-Safely $root
   }
@@ -340,6 +391,10 @@ $Installer = (Resolve-Path -LiteralPath $Installer).Path
 if ([string]::IsNullOrEmpty($Upgrade)) { $Upgrade = $Installer }
 elseif (-not [System.IO.File]::Exists($Upgrade)) { Stop-WithCode 2 'installer-smoke: -Upgrade is not a file that exists' }
 else { $Upgrade = (Resolve-Path -LiteralPath $Upgrade).Path }
+if (-not [string]::IsNullOrEmpty($Notices)) {
+  if (-not [System.IO.File]::Exists($Notices)) { Stop-WithCode 2 'installer-smoke: -Notices is not a file that exists' }
+  $Notices = (Resolve-Path -LiteralPath $Notices).Path
+}
 $selected = @($AllTests)
 if ($Only -and $Only.Count -gt 0) {
   foreach ($name in $Only) {
@@ -353,6 +408,11 @@ if ($DryRun) {
 }
 if (-not ($env:GITHUB_ACTIONS -eq 'true' -and $env:RUNNER_ENVIRONMENT -eq 'github-hosted' -and $env:RUNNER_TEMP)) {
   Stop-WithCode 3 'installer-smoke: this runs only on a GitHub-hosted runner (it installs and removes Petalock and its settings for the current user); nothing was done'
+}
+# The notices check can't pass without the file to compare with: say so before the first real step, not after the other
+# checks have reset the state and installed again (-DryRun, which only lists, left above).
+if ($selected -contains 'installed_copy_has_the_notices_file' -and [string]::IsNullOrEmpty($Notices)) {
+  Stop-WithCode 2 'installer-smoke: -Notices is required when installed_copy_has_the_notices_file is selected; nothing was done'
 }
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -1427,6 +1487,48 @@ $Checks["uninstall_says_where_vaults_stay"] = {
   $normal = $all -replace '\s+', ' '
   if ($normal -notlike "*$Sentence*") { throw "the finish page does not say where vaults stay; the pages said: $normal" }
   Write-Log '  the finish page says where vaults stay'
+}
+
+# Plan 5, Task 3: the open-source licence texts ship in the installer. The installed file is read and compared with the one the
+# build made (and checked as a whole file first), and the uninstall takes it away with the program, by its own list.
+$Checks["installed_copy_has_the_notices_file"] = {
+  Reset-World
+  Install-Good $DefaultDir
+  $installed = Join-Path $DefaultDir 'THIRD-PARTY-NOTICES.txt'
+  Assert-NoticesInstalled $installed $Notices
+  Write-Log "  the installed notices file is the build's own ($((Get-Item -LiteralPath $installed).Length) bytes)"
+  Uninstall-AsWindowsDoes $DefaultDir
+  if ([System.IO.File]::Exists($installed)) { throw 'the uninstall left THIRD-PARTY-NOTICES.txt in the install folder' }
+
+  # An upgrade writes the notices file again. With a hard link or a symbolic link in its place, to a file outside the install
+  # folder, the write would go through to that file: the installer refuses before writing, and the file outside is as it was.
+  # (Under the work folder, so the file outside is on the same volume as the install folder: a hard link needs that.)
+  Reset-World
+  $dir = Join-Path $Work 'MU-notices\Petalock'
+  Install-Good $dir
+  $installed = Join-Path $dir 'THIRD-PARTY-NOTICES.txt'
+  Assert-NoticesInstalled $installed $Notices
+  $outside = Join-Path $Work 'MU-outside-notices.txt'
+  Write-Utf8 $outside 'MU-outside: a file of the person that is not Petalock''s'
+  $outsideHash = Get-Sha256 $outside
+  foreach ($case in @(@{ Name = 'hard link'; Kind = 'HardLink' }, @{ Name = 'symbolic link'; Kind = 'SymbolicLink' })) {
+    [System.IO.File]::Delete($installed)
+    if ($case.Kind -eq 'HardLink') { New-Item -ItemType HardLink -Path $installed -Target $outside | Out-Null }
+    else { New-Item -ItemType SymbolicLink -Path $installed -Target $outside | Out-Null }
+    if (-not [System.IO.File]::Exists($installed)) { throw "the fixture did not make the $($case.Name)" }
+    $code = Install-Silent $Upgrade ''
+    if ($code -eq 0) { throw "an upgrade over a notices file that was a $($case.Name) exited 0" }
+    if ((Get-Sha256 $outside) -ne $outsideHash) { throw "the upgrade wrote through the $($case.Name) to the file outside the install folder" }
+    Write-Log "  the upgrade over a notices file that is a $($case.Name) was refused, and the file outside is as it was"
+  }
+  # With the link gone the same upgrade works, and the file is the build's again.
+  [System.IO.File]::Delete($installed)
+  $code = Install-Silent $Upgrade ''
+  if ($code -ne 0) { throw "the upgrade after the link was removed exited $code" }
+  Assert-NoticesInstalled $installed $Notices
+  Uninstall-AsWindowsDoes $dir
+  if ([System.IO.File]::Exists($installed)) { throw 'the uninstall left THIRD-PARTY-NOTICES.txt in the install folder' }
+  if ((Get-Sha256 $outside) -ne $outsideHash) { throw 'the uninstall changed the file outside the install folder' }
 }
 
 # ---------------------------------------------------------------------------------------------------------------------

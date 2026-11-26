@@ -36,6 +36,7 @@ export const NAMED = [
   "a_held_or_read_only_copy_is_reported_not_left_silently",
   "running_petalock_is_never_ended_and_silent_refuses_first",
   "uninstall_says_where_vaults_stay",
+  "installed_copy_has_the_notices_file",
 ];
 
 const read = (path) => readFileSync(join(ROOT, path), "utf8").replace(/\r\n/g, "\n");
@@ -367,7 +368,7 @@ export function guardProblems(text) {
   if (!/Call \$\{UN\}PetalockSetMode/.test(pre)) problems.push("the mode is not set from the recorded installation");
   if (!/\$\{If\} \$5 <> 3/.test(guard) || !/StrCpy \$PetalockWhy "others"/.test(guard)) problems.push("a fresh folder is not proved empty");
   if (!/FindFirst \$3 \$4 "\$1\\\*\.\*"\n\s*StrCpy \$5 0\n\s*\$\{If\} \$4 == ""/.test(guard)) problems.push("a listing that gives nothing is not an error");
-  for (const name of ["${MAINBINARYNAME}.exe", "uninstall.exe"]) {
+  for (const name of ["${MAINBINARYNAME}.exe", "uninstall.exe", "THIRD-PARTY-NOTICES.txt"]) {
     if (!guard.includes(`PETALOCK_PLAIN_FILE "\${UN}" "${name}"`)) problems.push(`${name} is not checked for links before it is overwritten`);
   }
   if (!/\$\{If\} \$7 == "\."\n\s*\$\{OrIf\} \$7 == " "/.test(guard)) problems.push("a name ending in a period or a space is accepted");
@@ -390,6 +391,8 @@ test("the guard as built holds every rule, and refuses the mutants that drop one
     ["Local\\${BUNDLEID}.instance", "Local\\${BUNDLEID}.other"],
     ["${If} $1 <> 2\n    StrCpy $PetalockR 1", "${If} $1 <> 2\n    StrCpy $PetalockR 0"],
     ['!insertmacro PETALOCK_PLAIN_FILE "${UN}" "uninstall.exe"', ""],
+    // Fix round, finding 1: the notices file setup now writes is guarded like the two files before it.
+    ['!insertmacro PETALOCK_PLAIN_FILE "${UN}" "THIRD-PARTY-NOTICES.txt"', ""],
   ];
   for (const [from, to] of mutants) {
     assert.ok(text.includes(from), `the mutant's anchor is in the file: ${from}`);
@@ -612,6 +615,38 @@ test("build_installer_is_one_read_only_reusable_workflow_with_pinned_inputs", ()
   for (const block of runBlocks) assert.ok(!block.includes("${{"), "no expression inside a script");
 });
 
+/**
+ * Session finding S1: what is wrong with how the provisioning step treats a restored `target\.tauri`. A build-cache hit brings
+ * the folder back, and the unpacked NSIS folder is then renamed onto it and fails; worse, the bundler would find inputs nobody
+ * checked this run. The step must remove the folder before it downloads anything. Problems found, as sentences.
+ */
+export function provisionClearProblems(workflow) {
+  const problems = [];
+  const start = workflow.indexOf("Provision the bundler's packaging inputs");
+  const end = workflow.indexOf("Provision cargo-about");
+  if (start < 0 || end < start) return ["the provisioning step was not found"];
+  const step = workflow.slice(start, end);
+  const clear = step.search(/if \(Test-Path \$tools\) \{ Remove-Item -LiteralPath \$tools -Recurse -Force \}/);
+  const first = step.indexOf("Get-Verified $env:NSIS_URL");
+  const make = step.indexOf("New-Item -ItemType Directory -Force $tools");
+  if (clear < 0) problems.push("the step does not remove a restored target\\.tauri");
+  else if (!(clear < make && clear < first)) problems.push("the step removes target\\.tauri after it has begun to provision it");
+  if (!/\$tools = Join-Path \$env:GITHUB_WORKSPACE 'target\\\.tauri'/.test(step)) problems.push("the folder removed is not target\\.tauri");
+  return problems;
+}
+
+test("build_installer_clears_a_restored_bundler_folder_before_it_provisions_the_inputs", () => {
+  const text = read(BUILD);
+  assert.deepEqual(provisionClearProblems(text), []);
+  // The check fires on the file as it was (no clear), and when the clear comes too late.
+  const clear = "          if (Test-Path $tools) { Remove-Item -LiteralPath $tools -Recurse -Force }\n";
+  assert.ok(text.includes(clear), "the clear line is where the test expects");
+  assert.match(provisionClearProblems(text.replace(clear, "")).join("\n"), /does not remove a restored/);
+  const late = text.replace(clear, "").replace("          $zip = Join-Path $inputs 'nsis-3.13.zip'\n", `${clear}          $zip = Join-Path $inputs 'nsis-3.13.zip'\n`);
+  assert.match(provisionClearProblems(late).join("\n"), /after it has begun/);
+  assert.match(provisionClearProblems("nothing").join("\n"), /not found/);
+});
+
 test("build_installer_pins_the_tool_and_every_packaging_input_and_checks_each_digest_before_use", () => {
   const text = read(BUILD);
   // The CLI: one exact version, installed locked, cached by that version.
@@ -831,6 +866,82 @@ test("the smoke script's dry run lists every test and installs nothing", { skip:
   }
 });
 
+// Plan 5, Task 3: the open-source licence texts inside the installer. `scripts/licences.test.mjs` tests the file and how it is
+// made; this is the check on the runner that the installed copy is that file.
+test("installed_copy_has_the_notices_file", () => {
+  const script = read(SMOKE);
+  const check = between(script, /^\$Checks\["installed_copy_has_the_notices_file"\] = \{$/m, /^\}$/m, "the check");
+  // It installs, reads the installed file, and compares it with the one the build made.
+  assert.match(check, /Install-Good \$DefaultDir/);
+  assert.match(check, /Join-Path \$DefaultDir 'THIRD-PARTY-NOTICES\.txt'/);
+  assert.match(check, /Assert-NoticesInstalled \$installed \$Notices/);
+  // The comparison is of the contents (SHA-256 of the bytes), after the build's own file is shown to be a whole one: a long
+  // text with its heading and its footer. Two empty files that are equal must not pass.
+  const compare = between(script, /^function Assert-NoticesInstalled/m, /^\}$/m, "Assert-NoticesInstalled");
+  assert.match(compare, /\(Get-Sha256 \$Installed\) -ne \(Get-Sha256 \$Expected\)/);
+  assert.match(compare, /\$want\.Length -lt 20000/);
+  assert.match(compare, /Petalock: third-party notices/);
+  assert.match(compare, /End of third-party notices: /);
+  assert.match(compare, /is not there, so the installed copy has nothing to be compared with/);
+  // Fix round, finding 1: an upgrade over a notices file that has become a hard link or a symbolic link to a file outside the
+  // install folder is refused, and that file is left as it was (its SHA-256 before and after).
+  for (const kind of ["HardLink", "SymbolicLink"]) {
+    assert.match(check, new RegExp(`New-Item -ItemType ${kind} -Path \\$installed -Target \\$outside`), `${kind} case`);
+  }
+  assert.match(check, /\$outsideHash = Get-Sha256 \$outside/);
+  assert.match(check, /Install-Silent \$Upgrade ''/);
+  assert.match(check, /an upgrade over a notices file that was a \$\(\$case\.Name\) exited 0/);
+  assert.match(check, /\(Get-Sha256 \$outside\) -ne \$outsideHash/);
+  assert.match(check, /the upgrade wrote through the \$\(\$case\.Name\) to the file outside/);
+  // The uninstall takes it away with the program.
+  assert.match(check, /Uninstall-AsWindowsDoes \$DefaultDir/);
+  assert.match(check, /the uninstall left THIRD-PARTY-NOTICES\.txt/);
+  // The file's own first line and footer are the ones the generator writes.
+  const generator = readFileSync(join(ROOT, "scripts", "licences.mjs"), "utf8");
+  assert.ok(generator.includes('"Petalock: third-party notices"'));
+  assert.ok(generator.includes("End of third-party notices: ${distinct(crates)} Rust libraries, ${distinct(packages)} page packages."));
+  // The workflow hands the script the file it generated, and the bundle takes the same file.
+  const workflow = read(BUILD);
+  assert.match(workflow, /-Installer "%INSTALLER%" -Notices "%GITHUB_WORKSPACE%\\target\\notices\\THIRD-PARTY-NOTICES\.txt" -LogPath/);
+  const resources = JSON.parse(read("crates/petalock-desktop/tauri.notices.conf.json")).bundle.resources;
+  assert.deepEqual(Object.values(resources), ["THIRD-PARTY-NOTICES.txt"]);
+});
+
+// Fix round, finding 14: the notices file is required before the first real operation, whenever its check is selected. A
+// dynamic test would have to start the real checks (which reset the person's own Petalock folders on a PC), so this reads the
+// order in the script; the -DryRun test above still proves a dry run needs no -Notices.
+test("a_run_that_selects_the_notices_check_without_a_notices_file_is_refused_before_it_changes_anything", () => {
+  const script = read(SMOKE);
+  const dry = script.indexOf("if ($DryRun) {");
+  const runner = script.indexOf("this runs only on a GitHub-hosted runner");
+  const required = script.indexOf("-Notices is required");
+  const firstOperation = script.indexOf("$Id = 'io.github.sumguywhowantstobuild.petalock'");
+  assert.ok(dry > 0 && runner > dry && required > runner && firstOperation > required, "dry run, runner gate, then the requirement, then the first real step");
+  const around = script.slice(script.lastIndexOf("if (", required), required + 200);
+  assert.match(around, /\$selected -contains 'installed_copy_has_the_notices_file'/);
+  assert.match(around, /\[string\]::IsNullOrEmpty\(\$Notices\)/);
+  assert.match(around, /Stop-WithCode 2/);
+});
+
+test("the smoke script refuses a -Notices file that is not there", { skip: skipNoPowerShell }, () => {
+  const dir = mkdtempSync(join(tmpdir(), "smoke-"));
+  try {
+    const fake = join(dir, "MU-setup.exe");
+    writeFileSync(fake, "MU- not an installer");
+    const run = smoke(["-Installer", fake, "-Notices", join(dir, "MU-missing-notices.txt"), "-DryRun"]);
+    assert.equal(run.status, 2, run.stdout + run.stderr);
+    assert.match(run.stdout + run.stderr, /-Notices is not a file that exists/);
+    // One that is there is taken, and the dry run still lists the check by name.
+    const here = join(dir, "MU-notices.txt");
+    writeFileSync(here, "MU- notices");
+    const ok = smoke(["-Installer", fake, "-Notices", here, "-DryRun", "-Only", "installed_copy_has_the_notices_file"]);
+    assert.equal(ok.status, 0, ok.stdout + ok.stderr);
+    assert.match(ok.stdout, /^would run: installed_copy_has_the_notices_file$/m);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("the smoke script's comparisons fire on a wrong result and on no change at all", { skip: skipNoPowerShell }, () => {
   const run = smoke(["-SelfTest"]);
   assert.equal(run.status, 0, run.stdout + run.stderr);
@@ -844,4 +955,7 @@ test("the smoke script's comparisons fire on a wrong result and on no change at 
   assert.match(out, /selftest: ok: a removed file is found/);
   assert.match(out, /selftest: ok: no change is no change/);
   assert.match(out, /selftest: ok: an empty listing of a folder that holds files is refused/);
+  // The installed notices against the build's: the same file passes, and every wrong copy and every unusable build file fails.
+  assert.match(out, /selftest: ok: an installed notices file that is the build's passes/);
+  assert.match(out, /selftest: ok: a changed, cut, absent or empty installed copy fails, and so does a build file that is empty, cut or missing/);
 });

@@ -1,0 +1,7 @@
+{
+  "bundle": {
+    "resources": {
+      "../../target/notices/THIRD-PARTY-NOTICES.txt": "THIRD-PARTY-NOTICES.txt"
+    }
+  }
+}

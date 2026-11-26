@@ -12,7 +12,8 @@
 ;   - A FRESH install (any folder that is not the one the uninstall key's InstallLocation records) needs a folder that is
 ;     provably empty, or none. MAINTENANCE (an upgrade, or an uninstall) is bound to the recorded installation: it works
 ;     on that folder only, and still works when the program in it is missing (a quarantined file), so the opened copies
-;     can always be cleaned. The two files setup overwrites there must be plain files with one link.
+;     can always be cleaned. The three files setup overwrites there (the program, the uninstaller and the licence notices)
+;     must be plain files with one link.
 ;   - A failed read is not an absence: only "not found" counts as nothing there. Anything else (access denied, an I/O
 ;     error) refuses an install and stops an uninstall before it removes anything (Retry or Cancel).
 ;   - A running Petalock is never ended: it is found by the app's own instance lock, whatever folder is chosen, and an
@@ -489,14 +490,17 @@ Function ${UN}PetalockGuardFolder
       Goto guard_vault
     ${EndIf}
 
-  ; A folder that exists. MAINTENANCE: it is the recorded installation (the caller chose the mode by that), and the two files
-  ; setup overwrites in it must be plain files with one link; the program being absent is fine. FRESH: it must be provably
+  ; A folder that exists. MAINTENANCE: it is the recorded installation (the caller chose the mode by that), and the files
+  ; setup overwrites in it (program, uninstaller, licence notices) must be plain files with one link; the program being absent is fine. FRESH: it must be provably
   ; empty: both "." and ".." listed, then nothing else, and nothing listed at all is a folder that could not be read.
   ${If} $7 != "absent"
     StrCpy $6 "scan"
     ${If} $PetalockMode == "maint"
       !insertmacro PETALOCK_PLAIN_FILE "${UN}" "${MAINBINARYNAME}.exe"
       !insertmacro PETALOCK_PLAIN_FILE "${UN}" "uninstall.exe"
+      ; The licence notices (Plan 5, Task 3) are written and removed by the installer too: a link in their place would send the
+      ; write to another file.
+      !insertmacro PETALOCK_PLAIN_FILE "${UN}" "THIRD-PARTY-NOTICES.txt"
       ; An installation has its uninstaller. A recorded folder that holds neither it nor nothing at all is someone else's
       ; folder (the record was changed): it is read like a fresh one, and refused unless it is provably empty.
       StrCpy $PetalockA "$0\uninstall.exe"

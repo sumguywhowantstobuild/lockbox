@@ -1,0 +1,75 @@
+# cargo-about's rules for the Rust libraries inside the installer (Plan 5, Task 3). scripts/licences.mjs runs
+#
+#   cargo-about generate -c about.toml --manifest-path crates/petalock-desktop/Cargo.toml --features custom-protocol --locked --fail --format json
+#
+# and builds THIRD-PARTY-NOTICES.txt from the answer. Nothing here is a template: the file is generated in the build and
+# never committed. A library whose licence is not on this list stops the build; so does one whose text can't be found.
+
+# The licences a shipped Rust library may be under, in the order cargo-about prefers them when a library offers a choice
+# ("MIT OR Apache-2.0" is satisfied by MIT). The plan's list; OFL-1.1 is the fonts' licence and covers page packages only
+# (scripts/licences.mjs), so no Rust library may use it.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "MPL-2.0",
+]
+
+# The program is built for one target, with the release's feature (`custom-protocol`, the one `cargo tauri build` adds).
+targets = ["x86_64-pc-windows-msvc"]
+
+# What is compiled only to build the program, or only to test it, is not in the installer.
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+
+# Petalock's own crates are private (`publish = false`); their licence is the repository's LICENSE.
+private = { ignore = true }
+
+# Crate rules come last in this file.
+
+# Two exceptions to the list above, each for the one library named and for BSL-1.0 alone (the Boost licence: permissive, no
+# notice required in a binary; the text ships anyway). Approved by Ariel on 2026-11-26 (a plan amendment under Task 3). A
+# library of any other name under BSL-1.0 still stops the build. scripts/licences.test.mjs pins these two names and runs the
+# real cargo-about on a made-up third crate under BSL-1.0 with this very file.
+[clipboard-win]
+accepted = ["BSL-1.0"]
+
+[error-code]
+accepted = ["BSL-1.0"]
+
+# Libraries that ship no licence file in their package. Their text is read from the upstream repository at the commit each
+# crate's own `.cargo_vcs_info.json` names, and used only when the file's SHA-256 is the one below; when a new version
+# changes the file or moves it, the clarification is dropped and the build stops (no copyright line), to be redone here.
+[webview2-com.clarify]
+license = "MIT"
+[[webview2-com.clarify.git]]
+path = "LICENSE"
+license = "MIT"
+checksum = "0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73"
+
+[webview2-com-sys.clarify]
+license = "MIT"
+[[webview2-com-sys.clarify.git]]
+path = "LICENSE"
+license = "MIT"
+checksum = "0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73"
+
+# Offers "BSD-3-Clause/MIT" but ships only the BSD-3-Clause file; both licences are accepted, and the text that ships is the BSD one.
+# The file is the package's own, read from the crate's folder, and used only while its SHA-256 is the one below.
+[brotli-decompressor.clarify]
+license = "BSD-3-Clause"
+[[brotli-decompressor.clarify.files]]
+path = "LICENSE"
+license = "BSD-3-Clause"
+checksum = "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae"
+
+[alloc-stdlib.clarify]
+license = "BSD-3-Clause"
+[[alloc-stdlib.clarify.git]]
+path = "LICENSE"
+license = "BSD-3-Clause"
+checksum = "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae"

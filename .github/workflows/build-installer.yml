@@ -11,7 +11,9 @@ name: Build installer
 # is used, so the bundler finds each one in place and fetches nothing: NSIS 3.13, its nsis_tauri_utils plugin 0.5.3 and
 # Microsoft's WebView2 bootstrapper (tauri-bundler 2.10.5 pins the first two by SHA-1 only and the third by nothing;
 # windows/nsis/mod.rs:38-44, windows/util.rs:19). The build's log is searched for any download or rebuild of its own, and the
-# inputs are checked again after the build.
+# inputs are checked again after the build. The installer also carries the open-source licence texts (THIRD-PARTY-NOTICES.txt,
+# Plan 5 Task 3): made here by scripts/licences.mjs with the pinned cargo-about, bundled from tauri.notices.conf.json, and read
+# back from the installed copy by the smoke checks.
 
 on:
   workflow_call:
@@ -54,6 +56,11 @@ jobs:
       UTILS_SHA256: 5ba143b5db4a87d32d6e7802e033330aae56cbceabe0d1e3ba41948385ad4709
       WEBVIEW2_URL: https://go.microsoft.com/fwlink/p/?LinkId=2124703
       WEBVIEW2_SHA256: fc2972da71d43e0c57b8d85a5cb9b200ed221f723cf43052d08ca722eb0bb22e
+      # The tool that writes the licence notices the installer ships (scripts/licences.mjs): cargo-about 0.9.3 (EmbarkStudios,
+      # published 2026-10-26), the release's own binary. The digest is that of the archive, as GitHub records it for the asset and
+      # as the .sha256 file beside it says. Never cargo install from a moving index, and never a cache.
+      ABOUT_URL: https://github.com/EmbarkStudios/cargo-about/releases/download/0.9.3/cargo-about-0.9.3-x86_64-pc-windows-msvc.tar.gz
+      ABOUT_SHA256: 9e2942533ef1c592c4a70bdb384cae1550a3f5fc9ae40379b6662e3d2f16fe02
     steps:
       # A branch or a tag moves: the same input could build different code on two runs. Only a full commit hash is built, and
       # the checkout is checked to be that commit.
@@ -106,6 +113,9 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $tools = Join-Path $env:GITHUB_WORKSPACE 'target\.tauri'
           $inputs = Join-Path $env:RUNNER_TEMP 'bundler-inputs'
+          # A build-cache hit restores target\ with the folder of an earlier run in it. Nothing restored is trusted or reused: the
+          # folder goes first, so the bundler finds only what this step downloads and checks.
+          if (Test-Path $tools) { Remove-Item -LiteralPath $tools -Recurse -Force }
           New-Item -ItemType Directory -Force $tools, $inputs | Out-Null
           function Get-Verified($url, $sha256, $path) {
             Invoke-WebRequest $url -OutFile $path
@@ -120,12 +130,47 @@ jobs:
           Get-Verified $env:UTILS_URL $env:UTILS_SHA256 (Join-Path $plugins 'nsis_tauri_utils.dll')
           Get-Verified $env:WEBVIEW2_URL $env:WEBVIEW2_SHA256 (Join-Path $tools 'MicrosoftEdgeWebview2Setup.exe')
           Get-ChildItem $tools | Select-Object Name | Format-Table -HideTableHeaders
+      # The open-source licence texts the installer ships. The tool is the pinned release binary, its archive checked against
+      # the SHA-256 above before it is opened.
+      - name: Provision cargo-about (pinned, SHA-256 checked before use)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:RUNNER_TEMP 'cargo-about'
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          function Get-Verified($url, $sha256, $path) {
+            Invoke-WebRequest $url -OutFile $path
+            if ((Get-FileHash $path -Algorithm SHA256).Hash -ne $sha256) { throw "SHA-256 mismatch for $url" }
+          }
+          $archive = Join-Path $dir 'cargo-about.tar.gz'
+          Get-Verified $env:ABOUT_URL $env:ABOUT_SHA256 $archive
+          & "$env:SystemRoot\System32\tar.exe" -xzf $archive -C $dir
+          if ($LASTEXITCODE -ne 0) { throw "tar failed with exit code $LASTEXITCODE" }
+          $exe = Join-Path $dir 'cargo-about-0.9.3-x86_64-pc-windows-msvc\cargo-about.exe'
+          $version = (& $exe --version)
+          if ($version -ne 'cargo-about 0.9.3') { throw "the tool says it is '$version', not cargo-about 0.9.3" }
+          "CARGO_ABOUT=$exe" >> $env:GITHUB_ENV
+      # THIRD-PARTY-NOTICES.txt is made here, in the build, from Cargo.lock and ui/package-lock.json, and is never committed.
+      # It is made before the bundle step so every push proves it, and the smoke check reads the installed copy. The script
+      # stops (and writes nothing) on a library whose licence is not accepted or whose text is missing; the file's own tests then
+      # read what was written a second time, against cargo's list of what ships and the page's packages.
+      - name: Generate the third-party notices
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          node scripts/licences.mjs --cargo-about $env:CARGO_ABOUT --out target/notices/THIRD-PARTY-NOTICES.txt
+          if ($LASTEXITCODE -ne 0) { throw "the notices could not be made (exit code $LASTEXITCODE)" }
+          $env:NOTICES_FILE = Join-Path $env:GITHUB_WORKSPACE 'target\notices\THIRD-PARTY-NOTICES.txt'
+          node --test scripts/licences.test.mjs
+          if ($LASTEXITCODE -ne 0) { throw "the notices' tests failed (exit code $LASTEXITCODE)" }
+      # The notices are bundled from tauri.notices.conf.json, merged in here only: tauri.conf.json names no generated file, so
+      # a plain `cargo build` or test (CI's Rust jobs) needs none.
       - name: Build the installer
         shell: pwsh
         working-directory: crates/petalock-desktop
         run: |
           $log = Join-Path $env:RUNNER_TEMP 'tauri-build.log'
-          cargo tauri build --ci --bundles nsis -- --locked *> $log
+          cargo tauri build --config tauri.notices.conf.json --ci --bundles nsis -- --locked *> $log
           $code = $LASTEXITCODE
           Get-Content $log
           if ($code -ne 0) { throw "cargo tauri build failed with exit code $code" }
@@ -167,7 +212,7 @@ jobs:
           INSTALLER: ${{ steps.digest.outputs.path }}
           SMOKE_LOG: ${{ runner.temp }}\installer-smoke\smoke.log
         run: |
-          "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%GITHUB_WORKSPACE%\scripts\installer-smoke.ps1" -Installer "%INSTALLER%" -LogPath "%SMOKE_LOG%"
+          "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%GITHUB_WORKSPACE%\scripts\installer-smoke.ps1" -Installer "%INSTALLER%" -Notices "%GITHUB_WORKSPACE%\target\notices\THIRD-PARTY-NOTICES.txt" -LogPath "%SMOKE_LOG%"
       # What was tested is what is offered: the file is hashed again, and must still be the one that was smoke-tested.
       - name: Check the installer did not change
         shell: pwsh
