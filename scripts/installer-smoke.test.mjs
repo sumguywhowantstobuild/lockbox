@@ -1,0 +1,847 @@
+// Plan 5, Task 1: the installer and its uninstall clean-up. These are the script tests: they read the installer's
+// template, its hooks, the bundle configuration and the two workflow files, and they run `installer-smoke.ps1` in the
+// ways that touch nothing (arguments refused, `-DryRun`, `-SelfTest`). The smoke script's own checks, which install and
+// uninstall the real installer, run only on the GitHub runner inside `build-installer.yml`, never on a person's PC (the
+// script refuses to start anywhere else); every test of the plan's list has its name in both places.
+//
+// The installer is built from `crates/petalock-desktop/windows/installer.nsi`, a copy of Tauri's NSIS template with the
+// changes listed at its top. Hooks alone could not enforce the folder rule before each operation (the report of Task 1
+// gives the lines); `hooks.nsh` holds the logic, the template only calls it.
+
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const TEMPLATE = "crates/petalock-desktop/windows/installer.nsi";
+const HOOKS = "crates/petalock-desktop/windows/hooks.nsh";
+const CONFIG = "crates/petalock-desktop/tauri.conf.json";
+const BUILD = ".github/workflows/build-installer.yml";
+const CI = ".github/workflows/ci.yml";
+const SMOKE = "scripts/installer-smoke.ps1";
+
+/** The plan's named tests: each is a check of the smoke script on the runner and a check of the files here. */
+export const NAMED = [
+  "install_folder_is_programs_petalock_by_default",
+  "install_refuses_an_unsafe_folder",
+  "files_added_after_install_survive_upgrade_and_uninstall",
+  "install_writes_only_its_own_places",
+  "uninstall_removes_open_copies_and_nothing_else",
+  "the_app_data_box_removes_exactly_the_identifier_folders",
+  "uninstall_never_follows_a_junction",
+  "a_held_or_read_only_copy_is_reported_not_left_silently",
+  "running_petalock_is_never_ended_and_silent_refuses_first",
+  "uninstall_says_where_vaults_stay",
+];
+
+const read = (path) => readFileSync(join(ROOT, path), "utf8").replace(/\r\n/g, "\n");
+
+/** The text from the first match of `start` to the next `end` after it (both included); fails when either is absent. */
+function between(text, start, end, what) {
+  const from = text.search(start);
+  assert.ok(from >= 0, `${what}: no start found`);
+  const rest = text.slice(from);
+  const stop = rest.slice(1).search(end);
+  assert.ok(stop >= 0, `${what}: no end found`);
+  return rest.slice(0, stop + 1 + rest.slice(stop + 1).match(end)[0].length);
+}
+
+/** A script's code lines without comments (`;` and `#` start a comment in NSIS). */
+const code = (text) => text.split("\n").map((line) => line.replace(/^\s*[;#].*$/, "").trimEnd()).filter((line) => line.trim() !== "");
+
+const template = () => read(TEMPLATE);
+const hooks = () => read(HOOKS);
+
+/**
+ * The lines of the template that are built when the install mode is `currentUser`: the branches of `!if "${INSTALLMODE}"
+ * == "x"`, `!else if` and `!else` for the other modes are left out. Any other `!if` is taken as built (the safe side).
+ */
+export function builtLines(text, mode = "currentUser") {
+  const out = [];
+  const stack = []; // each: { modal: whether this `!if` tests the install mode, taken: some branch already built, on: this branch is built }
+  const on = () => stack.every((frame) => frame.on);
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    const test = trimmed.match(/^!(?:else )?if "\$\{INSTALLMODE\}" == "(\w+)"$/);
+    if (/^!if\b/.test(trimmed)) {
+      const modal = Boolean(test);
+      const taken = modal && test[1] === mode;
+      stack.push({ modal, taken, on: modal ? taken : true });
+      continue;
+    }
+    if (/^!else if\b/.test(trimmed)) {
+      const frame = stack.at(-1);
+      if (frame.modal && test) {
+        frame.on = !frame.taken && test[1] === mode;
+        frame.taken ||= frame.on;
+      } else if (frame.modal) {
+        frame.on = !frame.taken;
+      }
+      continue;
+    }
+    if (/^!else\b/.test(trimmed)) {
+      const frame = stack.at(-1);
+      if (frame.modal) frame.on = !frame.taken;
+      continue;
+    }
+    if (/^!endif\b/.test(trimmed)) {
+      stack.pop();
+      continue;
+    }
+    if (on()) out.push(line);
+  }
+  assert.equal(stack.length, 0, "every !if is closed");
+  return out;
+}
+
+/** Where the installer must check the folder and for a running copy: each problem found, as a sentence. */
+export function placementProblems(text) {
+  const problems = [];
+  const onInit = between(text, /^Function \.onInit$/m, /^FunctionEnd$/m, ".onInit");
+  const lastFolder = Math.max(onInit.lastIndexOf("Call RestorePreviousInstallLocation"), onInit.lastIndexOf("StrCpy $INSTDIR"));
+  const preflight = onInit.indexOf("Call PetalockPreflight");
+  if (lastFolder < 0) problems.push(".onInit sets no folder");
+  if (preflight < 0 || preflight < lastFolder) problems.push(".onInit does not check the folder after the last place it is set");
+
+  const unInit = between(text, /^Function un\.onInit$/m, /^FunctionEnd$/m, "un.onInit");
+  if (!unInit.includes("Call un.PetalockPreflight")) problems.push("un.onInit does not check the folder and the running program");
+
+  const webview = between(text, /^Section WebView2$/m, /^SectionEnd$/m, "Section WebView2");
+  if (code(webview)[1]?.trim() !== "Call PetalockPreflight") problems.push("the WebView2 section does not start with the check");
+
+  const install = code(between(text, /^Section Install$/m, /^SectionEnd$/m, "Section Install"));
+  const setOut = install.findIndex((line) => line.trim().startsWith("SetOutPath"));
+  const installCheck = install.findIndex((line) => line.trim() === "Call PetalockPreflight");
+  if (installCheck < 0 || setOut < 0 || installCheck > setOut) problems.push("Section Install checks after SetOutPath made the folder");
+
+  const uninstall = between(text, /^Section Uninstall$/m, /^SectionEnd$/m, "Section Uninstall");
+  const firstDelete = uninstall.search(/^\s*(Delete|DeleteReg|RMDir)/m);
+  const unCheck = uninstall.indexOf("Call un.PetalockPreflight");
+  const clean = uninstall.indexOf("Call un.PetalockCleanOpen");
+  if (unCheck < 0 || unCheck > firstDelete) problems.push("Section Uninstall checks after it began to delete");
+  if (clean < 0 || clean < unCheck || clean > firstDelete) problems.push("open\\ is not cleaned first, right after the check");
+
+  if (!/!define MUI_PAGE_CUSTOMFUNCTION_LEAVE PetalockLeaveDirectory\n!insertmacro MUI_PAGE_DIRECTORY/.test(text)) {
+    problems.push("the folder page does not check the folder when it is left");
+  }
+  const leave = between(text, /^Function PageLeaveReinstall$/m, /^FunctionEnd$/m, "PageLeaveReinstall");
+  const check = leave.indexOf("Call PetalockBeforeOldUninstaller");
+  const run = leave.indexOf("ExecWait '$R1' $0");
+  if (check < 0 || run < 0 || check > run) problems.push("the old uninstaller is run before the folder is checked");
+  return problems;
+}
+
+test("install_folder_is_programs_petalock_by_default", () => {
+  const text = template();
+  const config = JSON.parse(read(CONFIG));
+  assert.equal(config.productName, "Petalock");
+  // The default is assigned once, in the per-user branch, and it is never the state folder (`%LOCALAPPDATA%\Petalock`).
+  const defaults = code(text).filter((line) => /StrCpy \$INSTDIR "\$LOCALAPPDATA\\/.test(line));
+  assert.deepEqual(defaults.map((line) => line.trim()), ['StrCpy $INSTDIR "$LOCALAPPDATA\\Programs\\${PRODUCTNAME}"']);
+  assert.ok(!code(text).some((line) => line.includes('"$LOCALAPPDATA\\${PRODUCTNAME}"')), "Tauri's own default must be gone");
+  const paths = read("crates/petalock-desktop/src/paths.rs");
+  assert.match(paths, /\.join\("Petalock"\)/, "the state folder this test compares with");
+  assert.equal(config.bundle.windows.nsis.installMode, "currentUser");
+});
+
+test("install_refuses_an_unsafe_folder", () => {
+  const text = template();
+  assert.deepEqual(placementProblems(text), []);
+  const guard = hooks();
+  const lines = code(guard).join("\n");
+  // Each refusal the plan lists, as the code that makes it.
+  assert.match(lines, /\$LOCALAPPDATA\\Petalock/, "the state folder");
+  assert.match(lines, /\$APPDATA\\\$\{BUNDLEID\}/, "the Roaming identifier folder");
+  assert.match(lines, /\$LOCALAPPDATA\\\$\{BUNDLEID\}/, "the Local identifier folder");
+  assert.match(lines, /vault\.json/, "a vault folder, by its header file");
+  assert.match(lines, /GetFinalPathNameByHandleW/, "the folder as it really is, through any redirected parent");
+  assert.match(lines, /0x400/, "a link at the folder itself");
+  assert.match(lines, /uninstall\.exe/, "a folder with other people's files is refused unless the installer's own files are there");
+  // The same refusal is made by the installer and by the uninstaller, and by the old uninstaller's launcher.
+  assert.match(lines, /Function PetalockGuardFolder|Function \$\{UN\}PetalockGuardFolder/);
+  assert.match(lines, /Function \$\{UN\}PetalockPreflight|Function PetalockPreflight/);
+});
+
+test("placement of the checks fails when one is missing, and finds none missing as built", () => {
+  const text = template();
+  assert.deepEqual(placementProblems(text), []);
+  // The check counts what it looks for: calls to find, and a wrong template that must be refused.
+  const calls = text.match(/Call (un\.)?Petalock(Preflight|CleanOpen|BeforeOldUninstaller)/g) ?? [];
+  assert.ok(calls.length >= 7, `found ${calls.length} calls`);
+  const without = text.replaceAll("Call PetalockPreflight", "; removed");
+  assert.ok(placementProblems(without).length >= 3, "a template with no check must be refused");
+  const late = text.replace("Call un.PetalockCleanOpen", "Delete \"$INSTDIR\\x\"\n  Call un.PetalockCleanOpen");
+  assert.ok(placementProblems(late).length >= 1, "a delete before the clean-up must be refused");
+  const noLeave = text.replace("!define MUI_PAGE_CUSTOMFUNCTION_LEAVE PetalockLeaveDirectory\n", "");
+  assert.ok(placementProblems(noLeave).length >= 1, "a folder page without its check must be refused");
+});
+
+test("files_added_after_install_survive_upgrade_and_uninstall", () => {
+  const both = code(template()).concat(code(hooks()));
+  // NSIS's own `RMDir /r` follows junctions (NSIS 3.13 Source/exehead/util.c:229-234), and it empties whole folders:
+  // neither is allowed. The installer's files go by name, the folder only when empty.
+  assert.deepEqual(both.filter((line) => /RMDir\s+\/r\b/i.test(line)), []);
+  const uninstall = between(template(), /^Section Uninstall$/m, /^SectionEnd$/m, "Section Uninstall");
+  const deletes = code(uninstall).filter((line) => /^\s*Delete\s/.test(line)).map((line) => line.trim());
+  assert.ok(deletes.includes('Delete "$INSTDIR\\${MAINBINARYNAME}.exe"'));
+  assert.ok(deletes.includes('Delete "$INSTDIR\\uninstall.exe"'));
+  assert.ok(code(uninstall).some((line) => line.trim() === 'RMDir "$INSTDIR"'), "the folder is removed only when empty");
+  assert.ok(!deletes.some((line) => /\*/.test(line)), "no wildcard deletes in the install folder");
+});
+
+test("install_writes_only_its_own_places", () => {
+  const config = JSON.parse(read(CONFIG));
+  assert.equal(config.bundle.windows.nsis.installMode, "currentUser", "SHCTX is HKCU only in this mode");
+  const all = template().split("\n");
+  const built = code(builtLines(template()).join("\n"));
+  // The evaluator drops the other install modes' lines (it must find some), and keeps the current user's.
+  assert.ok(built.length < code(template()).length, "the per-machine branches are left out");
+  assert.ok(code(template()).some((line) => /RequestExecutionLevel\s+admin/.test(line)), "the per-machine line is in the file");
+  assert.ok(!built.some((line) => /RequestExecutionLevel\s+admin/.test(line)), "and not in what is built");
+  assert.ok(built.some((line) => /RequestExecutionLevel\s+user/.test(line)));
+  const writes = [...built, ...code(hooks())].filter((line) => /^\s*(WriteReg\w*|DeleteReg\w*|WriteUninstaller|CreateShortcut|CreateDirectory|File|SetOutPath)\b/.test(line));
+  assert.ok(writes.length >= 15, `found ${writes.length} writing lines`);
+  // No write names the machine's registry; the current user's, `SHCTX` or `HKCU`, only.
+  const toMachine = writes.filter((line) => /\bHKLM\b|\bHKCR\b|\bHKU\b|\bHKCC\b|\bHKEY_LOCAL_MACHINE\b/.test(line));
+  assert.deepEqual(toMachine, []);
+  assert.ok(all.length > 0);
+  // The check finds a machine-wide write where one is put.
+  const wrong = builtLines(template().replace("Section Install\n", 'Section Install\n  WriteRegStr HKLM "Software\\x" "" "x"\n')).join("\n");
+  assert.equal(code(wrong).filter((line) => /WriteRegStr HKLM/.test(line)).length, 1);
+});
+
+test("uninstall_removes_open_copies_and_nothing_else", () => {
+  const text = hooks();
+  const clean = between(text, /^Function un\.PetalockCleanOpen$/m, /^FunctionEnd$/m, "un.PetalockCleanOpen");
+  const lines = code(clean).join("\n");
+  assert.match(lines, /\$LOCALAPPDATA\\Petalock\\open/, "it cleans open\\ in the state folder");
+  assert.match(lines, /un\.PetalockRemoveTree/);
+  // Only `open\`: no other name of the state folder is ever a delete target.
+  for (const other of ["vaults.json", "settings.json", "restore-journal.json", "pending-outputs.json", "vault-state.json"]) {
+    assert.ok(!code(text).join("\n").includes(other), `${other} is never named by the clean-up`);
+  }
+  assert.ok(!/UpdateMode/.test(lines), "open\\ is cleaned on every uninstall, /UPDATE included");
+  // The Run value and the program come out in the template's own section, by exact name.
+  const section = between(template(), /^Section Uninstall$/m, /^SectionEnd$/m, "Section Uninstall");
+  assert.match(section, /DeleteRegValue HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Run" "\$\{PRODUCTNAME\}"/);
+  assert.match(section, /DeleteRegKey HKCU "\$\{UNINSTKEY\}"/);
+  const startup = read("crates/petalock-desktop/src/startup.rs");
+  assert.match(startup, /pub const RUN_VALUE: &str = "Petalock";/);
+});
+
+test("the_app_data_box_removes_exactly_the_identifier_folders", () => {
+  const section = between(template(), /^Section Uninstall$/m, /^SectionEnd$/m, "Section Uninstall");
+  const config = JSON.parse(read(CONFIG));
+  assert.equal(config.identifier, "io.github.sumguywhowantstobuild.petalock");
+  const block = between(section, /\$\{If\} \$DeleteAppDataCheckboxState = 1/, /\$\{EndIf\}/, "the app data block");
+  assert.match(block, /\$\{AndIf\} \$UpdateMode <> 1/);
+  const removals = code(block).filter((line) => line.includes("PetalockRemoveTree") || /RMDir/i.test(line) || /^\s*Push "/.test(line));
+  assert.deepEqual(
+    removals.map((line) => line.trim()),
+    ['Push "$APPDATA\\${BUNDLEID}"', "Call un.PetalockRemoveTree", 'Push "$LOCALAPPDATA\\${BUNDLEID}"', "Call un.PetalockRemoveTree"],
+  );
+  assert.ok(!/RMDir\s+\/r/i.test(block));
+  // The box's text and state come from the template, as the plan says.
+  assert.match(template(), /DeleteAppDataCheckboxState/);
+});
+
+test("uninstall_never_follows_a_junction", () => {
+  const text = hooks();
+  const remove = between(text, /^Function un\.PetalockRemoveTree$/m, /^FunctionEnd$/m, "un.PetalockRemoveTree");
+  const lines = code(remove).join("\n");
+  assert.match(lines, /un\.PetalockAttr/);
+  // A link is tested before it is listed; a link is removed itself (never listed); only a plain folder is listed.
+  const test400 = lines.indexOf("0x400");
+  const findFirst = lines.indexOf("FindFirst");
+  assert.ok(test400 >= 0 && findFirst >= 0 && test400 < findFirst, "the link test comes before the listing");
+  assert.match(lines, /RemoveDirectoryW/);
+  assert.match(lines, /DeleteFileW/);
+  assert.match(lines, /Call un\.PetalockRemoveTree/, "it descends by calling itself on each child, where each child is tested again");
+  // The state folder itself is tested before `open\` is touched through it.
+  const clean = between(text, /^Function un\.PetalockCleanOpen$/m, /^FunctionEnd$/m, "un.PetalockCleanOpen");
+  const cleanLines = code(clean).join("\n");
+  assert.ok(cleanLines.indexOf("0x400") >= 0 && cleanLines.indexOf("0x400") < cleanLines.indexOf("Call un.PetalockRemoveTree"));
+});
+
+test("a_held_or_read_only_copy_is_reported_not_left_silently", () => {
+  const text = hooks();
+  const remove = between(text, /^Function un\.PetalockRemoveTree$/m, /^FunctionEnd$/m, "un.PetalockRemoveTree");
+  assert.match(code(remove).join("\n"), /SetFileAttributesW[^\n]*0x80|SetFileAttributes[^\n]*NORMAL/, "a read-only copy is made removable");
+  const clean = between(text, /^Function un\.PetalockCleanOpen$/m, /^FunctionEnd$/m, "un.PetalockCleanOpen");
+  const lines = code(clean).join("\n");
+  assert.match(lines, /MB_RETRYCANCEL/);
+  assert.match(lines, /\$\{If\} \$\{Silent\}|IfSilent/);
+  assert.match(lines, /Abort/);
+  assert.match(lines, /still in use/);
+  // Nothing in the message or the log names a file or a folder.
+  const shown = code(clean).filter((line) => /MessageBox|DetailPrint|FileWrite|PETALOCK_CONSOLE/.test(line));
+  assert.ok(shown.length >= 2, `found ${shown.length} lines that show something`);
+  // Every line of the files that shows something: no variable that holds a path or a name in it.
+  const every = code(read(HOOKS)).concat(code(template())).filter((line) => /MessageBox|DetailPrint|FileWrite|PETALOCK_CONSOLE/.test(line));
+  assert.ok(every.length >= 8, `found ${every.length} lines that show something`);
+  for (const line of every) {
+    // Only the quoted text is shown; a handle or a label outside the quotes is not.
+    for (const [, quoted] of line.replace(/\$\\"/g, "").matchAll(/"([^"]*)"/g)) {
+      const text = quoted.replace(/\$\\[rn]/g, "").replace(/\$\(\w+\)/g, "").replace(/\$\{\w+\}/g, "");
+      assert.ok(!/\$\w/.test(text), `shows a variable: ${line.trim()}`);
+    }
+  }
+});
+
+test("running_petalock_is_never_ended_and_silent_refuses_first", () => {
+  const both = code(template()).concat(code(hooks())).join("\n");
+  // Tauri's own check offers to kill the program, and kills it in silent and passive mode: it is not used.
+  for (const word of ["CheckIfAppIsRunning", "RmShutdown", "RmForceShutdown", "RmForceShutdown", "taskkill", "KillProcess", "TerminateProcess"]) {
+    assert.ok(!both.includes(word), `${word} must not appear`);
+  }
+  const text = hooks();
+  const running = between(text, /^Function \$\{UN\}PetalockEnsureNotRunning$|^Function PetalockEnsureNotRunning$/m, /^FunctionEnd$/m, "the running check");
+  const lines = code(running).join("\n");
+  assert.match(lines, /MB_RETRYCANCEL/);
+  assert.match(lines, /Quit/);
+  assert.match(lines, /IfSilent|\$\{Silent\}/);
+  assert.match(lines, /PassiveMode/, "a passive run asks nothing either");
+  assert.match(lines, /Abort/);
+  assert.deepEqual(placementProblems(template()), []);
+});
+
+test("uninstall_says_where_vaults_stay", () => {
+  const text = template() + "\n" + hooks();
+  const sentence = "Your vaults stay where they are. Petalock keeps them in the folders you chose, by default Petalock Vaults in your user folder.";
+  assert.ok(text.includes(sentence), "the finish page's words");
+  const idx = text.indexOf("MUI_UNPAGE_FINISH");
+  assert.ok(idx > 0, "an uninstaller finish page exists");
+  assert.ok(text.lastIndexOf("MUI_FINISHPAGE_TEXT", idx) > text.lastIndexOf("MUI_UNPAGE_INSTFILES", idx), "the words are set for the uninstaller's finish page");
+  assert.ok(text.indexOf(sentence) < idx);
+  assert.match(text, /un\.SkipIfPassive/);
+});
+
+test("the bundle is the NSIS installer for the current user, built from this folder's template and hooks", () => {
+  const config = JSON.parse(read(CONFIG));
+  assert.equal(config.bundle.active, true);
+  assert.deepEqual(config.bundle.targets, ["nsis"]);
+  assert.equal(config.bundle.useLocalToolsDir, true);
+  const windows = config.bundle.windows;
+  assert.deepEqual(windows.webviewInstallMode, { type: "embedBootstrapper", silent: true });
+  assert.equal(windows.nsis.installMode, "currentUser");
+  assert.equal(windows.nsis.template, "windows/installer.nsi");
+  assert.equal(windows.nsis.installerHooks, "windows/hooks.nsh");
+  for (const key of ["template", "installerHooks"]) {
+    assert.ok(existsSync(join(ROOT, "crates/petalock-desktop", windows.nsis[key])), `${key} exists`);
+  }
+  assert.equal(config.mainBinaryName, "petalock");
+  assert.equal(config.bundle.publisher, "Petalock");
+  assert.deepEqual(windows.nsis.languages, ["English"]);
+});
+
+test("the template says what it changed, and keeps the rest of Tauri's", () => {
+  const text = template();
+  assert.match(text, /Tauri's NSIS template/);
+  assert.match(text, /tauri-bundler 2\.10\.5/);
+  // Anchors of the upstream file that the changes sit between: if the pinned tool changes, a person compares again.
+  for (const anchor of ["{{compression}}", "{{installer_hooks}}", "{{#each resources}}", "nsis_tauri_utils::SemverCompare", "!insertmacro MUI_PAGE_DIRECTORY", "Section Uninstall"]) {
+    assert.ok(text.includes(anchor), `${anchor} is kept`);
+  }
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The review fix round (Codex, 2026-11-25): one test or more for each finding fixed, each failing on the files before it.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** What the guard in hooks.nsh must do, as problems found in `text` (empty when all hold). Mutants of it must be refused. */
+export function guardProblems(text) {
+  const problems = [];
+  const lines = code(text).join("\n");
+  const fn = (name) => {
+    const m = lines.match(new RegExp(`Function \\$\\{UN\\}${name}\\n([\\s\\S]*?)\\nFunctionEnd`));
+    return m ? m[1] : "";
+  };
+  const guard = fn("PetalockGuardFolder");
+  const pre = fn("PetalockPreflight");
+  const running = fn("PetalockIsRunning");
+  if (!/!if "\$\{UN\}" == "un\."\n\s*\$\{If\} \$PetalockMode != "maint"\n\s*StrCpy \$PetalockWhy "unregistered"/.test(pre)) problems.push("an uninstaller outside the recorded installation is not refused");
+  if (!/Call \$\{UN\}PetalockSetMode/.test(pre)) problems.push("the mode is not set from the recorded installation");
+  if (!/\$\{If\} \$5 <> 3/.test(guard) || !/StrCpy \$PetalockWhy "others"/.test(guard)) problems.push("a fresh folder is not proved empty");
+  if (!/FindFirst \$3 \$4 "\$1\\\*\.\*"\n\s*StrCpy \$5 0\n\s*\$\{If\} \$4 == ""/.test(guard)) problems.push("a listing that gives nothing is not an error");
+  for (const name of ["${MAINBINARYNAME}.exe", "uninstall.exe"]) {
+    if (!guard.includes(`PETALOCK_PLAIN_FILE "\${UN}" "${name}"`)) problems.push(`${name} is not checked for links before it is overwritten`);
+  }
+  if (!/\$\{If\} \$7 == "\."\n\s*\$\{OrIf\} \$7 == " "/.test(guard)) problems.push("a name ending in a period or a space is accepted");
+  if (!/\$6 == "\\\.\\"/.test(guard)) problems.push("a . segment is accepted");
+  if (!/OpenMutexW\(i 0x00100000, i 0, w "Local\\\$\{BUNDLEID\}\.instance"\)/.test(running)) problems.push("a running copy is not found by the instance lock");
+  if (!/\$\{If\} \$1 <> 2\n\s*StrCpy \$PetalockR 1/.test(running)) problems.push("an indeterminate lock answer is not a refusal");
+  if (/IfFileExists/.test(lines)) problems.push("IfFileExists reads a failure as an absence");
+  const attrOutside = lines.replace(/Function \$\{UN\}PetalockAttr\n[\s\S]*?\nFunctionEnd/, "");
+  if (/GetFileAttributesW/.test(attrOutside)) problems.push("GetFileAttributesW is used outside PetalockAttr");
+  return problems;
+}
+
+test("the guard as built holds every rule, and refuses the mutants that drop one", () => {
+  const text = hooks();
+  assert.deepEqual(guardProblems(text), []);
+  const mutants = [
+    ['StrCpy $PetalockWhy "unregistered"', 'StrCpy $PetalockWhy ""'],
+    ["${If} $5 <> 3", "${If} $5 <> 99"],
+    ['${If} $7 == "."\n      ${OrIf} $7 == " "', '${If} $7 == "~"\n      ${OrIf} $7 == "~"'],
+    ["Local\\${BUNDLEID}.instance", "Local\\${BUNDLEID}.other"],
+    ["${If} $1 <> 2\n    StrCpy $PetalockR 1", "${If} $1 <> 2\n    StrCpy $PetalockR 0"],
+    ['!insertmacro PETALOCK_PLAIN_FILE "${UN}" "uninstall.exe"', ""],
+  ];
+  for (const [from, to] of mutants) {
+    assert.ok(text.includes(from), `the mutant's anchor is in the file: ${from}`);
+    assert.ok(guardProblems(text.replace(from, to)).length >= 1, `dropping this must be refused: ${from}`);
+  }
+  assert.ok(guardProblems(text + "\nIfFileExists \"x\" 0 0").length >= 1);
+  assert.ok(guardProblems(text.replace("Function ${UN}PetalockAttr", "Function ${UN}PetalockAttrX") + '\nSystem::Call "kernel32::GetFileAttributesW(w r0)"').length >= 1);
+});
+
+// Finding 1: no registry value controls which file setup deletes.
+test("a_registry_value_never_names_a_file_setup_deletes", () => {
+  const both = code(template()).concat(code(hooks()));
+  assert.ok(!both.some((line) => /OldMainBinaryName|"MainBinaryName"/.test(line)), "the old-binary migration and its value are gone");
+  // Every Delete names a fixed file: the program, the uninstaller, the shortcuts' fixed names, the WebView2 bootstrapper.
+  const deletes = both.filter((line) => /^\s*Delete\s/.test(line)).map((line) => line.trim());
+  assert.ok(deletes.length >= 8, `found ${deletes.length} deletes`);
+  const allowed = [
+    /^Delete "\$INSTDIR\\\$\{MAINBINARYNAME\}\.exe"$/,
+    /^Delete "\$INSTDIR\\uninstall\.exe"$/,
+    /^Delete "\$4\\uninstall\.exe"$/,
+    /^Delete "\$SMPROGRAMS\\(\$AppStartMenuFolder\\)?\$\{PRODUCTNAME\}\.lnk"$/,
+    /^Delete "\$DESKTOP\\\$\{PRODUCTNAME\}\.lnk"$/,
+    /^Delete "\$TEMP\\MicrosoftEdgeWebview2Setup\.exe"$/,
+    /^Delete "\$TEMP\\MicrosoftEdgeWebView2RuntimeInstaller\.exe"$/,
+    /^Delete "\$INSTDIR\\\\\{\{this(\.\[1\])?\}\}"$/, // the bundler's resource lists (empty for Petalock)
+  ];
+  const unknown = deletes.filter((line) => !allowed.some((re) => re.test(line)));
+  assert.deepEqual(unknown, []);
+  // The check finds a delete that names a registry value.
+  const bad = ['Delete "$INSTDIR\\$OldMainBinaryName"', 'Delete "$INSTDIR\\$R0"'];
+  for (const line of bad) assert.ok(!allowed.some((re) => re.test(line)), `${line} must not be allowed`);
+});
+
+// Finding 2: a fresh install needs an empty folder; maintenance is bound to the recorded installation.
+test("fresh_install_needs_an_empty_folder_and_maintenance_binds_to_the_recorded_install", () => {
+  const text = hooks();
+  assert.deepEqual(guardProblems(text), []);
+  // Two file names are not proof of an installation: no branch accepts a folder for holding both.
+  assert.ok(!/MAINBINARYNAME\}\.exe" guard_/.test(code(text).join("\n")));
+  const guard = code(text).join("\n");
+  assert.match(guard, /PETALOCK_PLAIN_FILE "\$\{UN\}" "uninstall\.exe"/);
+  // Maintenance works with the program missing: its absence is not a refusal (the plain-file check passes on absent).
+  const macro = guard.match(/!macro PETALOCK_PLAIN_FILE UN NAME\n([\s\S]*?)\n!macroend/)[1];
+  assert.match(macro, /\$\{If\} \$PetalockR != "absent"/);
+  // The mode comes from the uninstall key's InstallLocation, and the old uninstaller is the recorded one.
+  assert.match(guard, /ReadRegStr \$0 SHCTX "\$\{UNINSTKEY\}" "InstallLocation"/);
+  assert.match(guard, /GetFileInformationByHandle/);
+  assert.match(guard, /nNumberOfLinks|byte 40|\$1 \+ 40/);
+});
+
+// Finding 4: a failed read is not an absence.
+test("a_failed_read_is_not_an_absence", () => {
+  const text = hooks();
+  const attr = between(text, /^Function \$\{UN\}PetalockAttr$/m, /^FunctionEnd$/m, "PetalockAttr");
+  assert.match(code(attr).join("\n"), /\$\{If\} \$1 = 2\n\s*\$\{OrIf\} \$1 = 3\n\s*StrCpy \$PetalockR "absent"/);
+  assert.match(code(attr).join("\n"), /StrCpy \$PetalockR "error"/);
+  const remove = code(between(text, /^Function un\.PetalockRemoveTree$/m, /^FunctionEnd$/m, "RemoveTree")).join("\n");
+  assert.match(remove, /\$\{If\} \$1 == "error"\n\s*IntOp \$PetalockStuck \$PetalockStuck \+ 1/);
+  assert.match(remove, /FindFirst \$2 \$3 "\$0\\\*\.\*"\n\s*\$\{If\} \$3 == ""\n\s*FindClose \$2\n\s*IntOp \$PetalockStuck/);
+  const clean = code(between(text, /^Function un\.PetalockCleanOpen$/m, /^FunctionEnd$/m, "CleanOpen")).join("\n");
+  assert.match(clean, /\$\{If\} \$PetalockR == "error"\n\s*StrCpy \$PetalockStuck 1/);
+  // open\ must be confirmed gone afterwards, whatever the removal said.
+  assert.match(clean, /Call un\.PetalockRemoveTree\n\s*StrCpy \$PetalockA "\$LOCALAPPDATA\\Petalock\\open"\n\s*Call un\.PetalockAttr\n\s*\$\{If\} \$PetalockR != "absent"/);
+  assert.ok(!/GetFileAttributesW/.test(clean) && !/IfFileExists/.test(code(text).join("\n")));
+  // The script has the fixtures that make a read fail with "access denied".
+  const script = read(SMOKE);
+  assert.match(script, /Set-Deny \$denied 'RD'/);
+  assert.match(script, /Set-Deny \$nolist 'RD'/);
+});
+
+// Finding 5: names Windows would normalise are refused before anything is compared.
+test("noncanonical_names_are_refused_before_they_are_compared", () => {
+  const guard = code(between(hooks(), /^Function \$\{UN\}PetalockGuardFolder$/m, /^FunctionEnd$/m, "Guard")).join("\n");
+  const shape = guard.slice(0, guard.indexOf("PetalockResolve"));
+  assert.match(shape, /\$\{If\} \$7 == "\."\n\s*\$\{OrIf\} \$7 == " "\n\s*\$\{OrIf\} \$7 == "\\"/);
+  assert.match(shape, /StrCpy \$6 \$0 1 -1\n\s*\$\{If\} \$6 == "\."\n\s*\$\{OrIf\} \$6 == " "/);
+  assert.match(shape, /\$6 == "\\\.\."\n\s*\$\{OrIf\} \$6 == "\\\.\\"/);
+  // The script tries those spellings while the protected folders are absent, and checks that refusing made nothing.
+  const script = read(SMOKE);
+  for (const spelling of ['"$State."', '"$State "', '"$IdLocal."', '"$IdRoam."']) assert.ok(script.includes(spelling), spelling);
+  assert.match(script, /the install into \$label made a folder/);
+});
+
+// Finding 6: a running copy is found by the app's instance lock, whatever folder is chosen.
+test("a_running_copy_is_found_by_the_instance_lock_whatever_the_folder", () => {
+  const running = code(between(hooks(), /^Function \$\{UN\}PetalockIsRunning$/m, /^FunctionEnd$/m, "IsRunning")).join("\n");
+  const rust = read("crates/petalock-desktop/src/os/win.rs");
+  const rustName = rust.match(/const INSTANCE_NAME: &str = "([^"]+)";/)[1].replaceAll("\\\\", "\\");
+  const identifier = JSON.parse(read(CONFIG)).identifier;
+  assert.equal(rustName, `Local\\${identifier}.instance`);
+  assert.ok(running.includes('w "Local\\${BUNDLEID}.instance"'), "the lock's name is the app's, built from the identifier");
+  // Order: the lock first (it does not depend on the folder), the file probe after.
+  assert.ok(running.indexOf("OpenMutexW") < running.indexOf("CreateFileW"));
+  // Anything but "not found" is running: the answer 2 is the only way on.
+  assert.match(running, /\$\{If\} \$1 <> 2\n\s*StrCpy \$PetalockR 1\n\s*Goto running_done/);
+  // The script runs a copy at one folder and installs to another.
+  assert.match(read(SMOKE), /into another, empty folder with Petalock running/);
+});
+
+// Finding 7: open\ is cleaned on every uninstall.
+test("uninstall_cleans_open_copies_with_update_too", () => {
+  const clean = code(between(hooks(), /^Function un\.PetalockCleanOpen$/m, /^FunctionEnd$/m, "CleanOpen")).join("\n");
+  assert.ok(!/UpdateMode/.test(clean));
+  assert.ok(!/Return/.test(clean.split("clean_again:")[0]), "no early return before the clean-up");
+  assert.match(read(SMOKE), /'\/S', '\/UPDATE', "_\?=\$DefaultDir"/);
+});
+
+// Finding 9: nothing read from the registry is executed.
+test("the_old_uninstaller_command_is_built_from_the_verified_folder", () => {
+  const leave = code(between(template(), /^Function PageLeaveReinstall$/m, /^FunctionEnd$/m, "PageLeaveReinstall")).join("\n");
+  assert.ok(!/ReadRegStr \$R1/.test(leave), "the command is not read from the registry");
+  assert.ok(!/ReadRegStr \$4/.test(leave), "the folder is not read here either");
+  assert.ok(leave.indexOf("Call PetalockBeforeOldUninstaller") < leave.indexOf("ExecWait '$R1' $0"));
+  const before = code(between(hooks(), /^Function PetalockBeforeOldUninstaller$/m, /^FunctionEnd$/m, "BeforeOld")).join("\n");
+  assert.match(before, /StrCpy \$R1 '"\$4\\uninstall\.exe"'/);
+  assert.match(before, /PetalockRecordedLocation/);
+  // The only read of UninstallString is the page's "is there an installation" test.
+  const reads = code(template()).concat(code(hooks())).filter((line) => /ReadRegStr[^\n]*"UninstallString"/.test(line));
+  assert.equal(reads.length, 1, reads.join("; "));
+  assert.match(read(SMOKE), /A command planted in UninstallString|the command planted in UninstallString was run/);
+});
+
+// Finding 10: no machine-wide uninstall is started.
+test("no_machine_wide_uninstall_is_run", () => {
+  const all = code(template()).concat(code(hooks())).join("\n");
+  for (const word of ["FindWixInstall", "WixMode", "msiexec", "StrLoc"]) assert.ok(!all.includes(word), `${word} is gone`);
+  assert.ok(!/HKLM\s+"[^"]*Uninstall/.test(all), "no HKLM Uninstall key is read");
+  // Every program the template runs: the old uninstaller (built from the recorded folder), WebView2's installer (quoted).
+  const exec = all.split("\n").filter((line) => /^\s*ExecWait\b/.test(line)).map((line) => line.trim());
+  assert.ok(exec.length >= 3, `found ${exec.length} ExecWait lines`);
+  for (const line of exec) assert.ok(/^ExecWait '\$R1' \$0$|^ExecWait '"\$6" \$\{WEBVIEW2INSTALLERARGS\} \/install' \$1$|^ExecWait `"\$R1" \/install appguid=/.test(line), `an unexpected ExecWait: ${line}`);
+});
+
+// Finding 11: no second registry key.
+test("setup_writes_reads_and_deletes_no_second_registry_key", () => {
+  const all = code(template()).concat(code(hooks())).join("\n");
+  for (const word of ["MANUPRODUCTKEY", "MANUKEY", "MUI_LANGDLL_REGISTRY", "MUI_UNGETLANGUAGE", "Installer Language"]) assert.ok(!all.includes(word), `${word} is gone`);
+  const regs = all.split("\n").filter((line) => /^\s*(WriteReg\w*|DeleteReg\w*)\b/.test(line));
+  assert.ok(regs.length >= 10, `found ${regs.length}`);
+  for (const line of regs) assert.ok(/UNINSTKEY|Software\\Microsoft\\Windows\\CurrentVersion\\Run|Software\\Classes/.test(line), `writes or deletes another key: ${line.trim()}`);
+  const restore = code(between(template(), /^Function RestorePreviousInstallLocation$/m, /^FunctionEnd$/m, "Restore")).join("\n");
+  assert.match(restore, /Call PetalockRecordedLocation/);
+  assert.match(code(hooks()).join("\n"), /ReadRegStr \$0 SHCTX "\$\{UNINSTKEY\}" "InstallLocation"/);
+  // The smoke script's allow-list no longer lets HKCU\Software\Petalock through, and plants an unrelated value to survive.
+  const script = read(SMOKE);
+  const allowed = script.match(/\$allowed = @\(([\s\S]*?)\)\n/)[1];
+  assert.ok(!/Software\\Petalock/.test(allowed), "HKCU\\Software\\Petalock is not allowed");
+  assert.ok(/Uninstall\\Petalock\|\*/.test(allowed), "the uninstall key still is");
+  assert.match(script, /MU-unrelated/);
+});
+
+// Finding 12: the WebView2 installer's path is quoted.
+test("the_webview2_installer_path_is_quoted", () => {
+  const lines = code(template());
+  const runs = lines.filter((line) => /ExecWait[^\n]*\$6/.test(line));
+  assert.ok(runs.length >= 1, "the line that runs the bootstrapper");
+  for (const line of runs) assert.match(line.trim(), /^ExecWait '"\$6" /);
+});
+
+// Finding 17: the running-app test cannot pass an aborted Retry or a state change after Cancel.
+test("the_running_check_tests_prove_retry_does_the_work_and_cancel_changes_nothing", () => {
+  const script = read(SMOKE);
+  const body = script.slice(script.indexOf('$Checks["running_petalock_is_never_ended_and_silent_refuses_first"]'), script.indexOf('$Checks["uninstall_says_where_vaults_stay"]'));
+  // Both installer inputs go through Retry, with the installer's exit read and a value it writes seen again.
+  assert.match(body, /foreach \(\$kind in @\('install', 'upgrade'\)\) \{\n\s*\$exe = if \(\$kind -eq 'install'\) \{ \$Installer \} else \{ \$Upgrade \}\n\s*Start-Sleep/);
+  assert.match(body, /Set-ItemProperty -LiteralPath \$UninstallKey -Name 'NoModify' -Value 0/);
+  assert.match(body, /\$exit = Get-ExitCode \$p\n\s*if \(\$exit -ne 0\)/);
+  assert.match(body, /\[int\]\(Get-UninstallValue 'NoModify'\) -ne 1/);
+  // The state is compared after every Cancel (install, upgrade, uninstall).
+  const cancels = body.match(/Assert-Unchanged \$stateBefore \(Get-Listing \$State -Hash\) ["']the state after Cancel/g) ?? [];
+  assert.equal(cancels.length, 2, "once in the install/upgrade loop and once for the uninstall");
+  assert.match(body, /the state after Cancel in the uninstall/);
+  assert.match(body, /the state after Cancel in the \$kind/);
+});
+
+// Finding 19: the artifact is the file that was hashed and smoke-tested.
+test("the_artifact_is_the_exact_file_that_was_tested", () => {
+  const text = read(BUILD);
+  const step = text.slice(text.indexOf("name: Keep the installer"), text.indexOf("name: Keep the smoke log"));
+  assert.match(step, /path: \$\{\{ steps\.digest\.outputs\.path \}\}/);
+  assert.ok(!/\*-setup\.exe|\*\.exe/.test(step), "no pattern selects the artifact again");
+});
+
+// Finding 20: only a full commit hash is built, and the checkout is checked.
+test("only_a_full_commit_hash_is_built_and_the_checkout_is_checked", () => {
+  const text = read(BUILD);
+  const check = text.indexOf("name: Check the source is a full commit hash");
+  const checkout = text.indexOf("uses: actions/checkout@");
+  const head = text.indexOf("name: Check the checkout is the source commit");
+  assert.ok(check > 0 && check < checkout && checkout < head, "the hash is checked before the checkout, the checkout after it");
+  assert.match(text.slice(check, checkout), /-cnotmatch '\^\[0-9a-f\]\{40\}\$'/);
+  assert.match(text.slice(head, head + 400), /git rev-parse HEAD/);
+  assert.match(text.slice(head, head + 500), /-ne \$env:SOURCE/);
+  // The input reaches the shell by an environment variable, never as script text: three uses, two `env:` and the `ref:`.
+  const used = text.slice(check, head + 400).match(/^.*\$\{\{ inputs\.source \}\}.*$/gm) ?? [];
+  assert.equal(used.length, 3);
+  for (const line of used) assert.ok(/^\s+(SOURCE|ref): \$\{\{ inputs\.source \}\}$/.test(line), `unexpected use: ${line}`);
+});
+
+/** The workflow's `uses:` lines. */
+const uses = (text) => [...text.matchAll(/^\s*(?:-\s+)?uses:\s*(\S+)(?:\s*#.*)?$/gm)].map((m) => m[1]);
+
+test("build_installer_is_one_read_only_reusable_workflow_with_pinned_inputs", () => {
+  const text = read(BUILD);
+  assert.match(text, /^on:\n {2}workflow_call:/m);
+  assert.match(text, /inputs:\n {6}source:\n {8}description:[^\n]*\n {8}required: true\n {8}type: string/);
+  assert.match(text, /^permissions:\n {2}contents: read\n/m);
+  assert.ok(!/(contents|id-token|attestations|packages|actions): write/.test(text), "read-only");
+  assert.ok(!/secrets\./.test(text), "no secret");
+  assert.match(text, /runs-on: windows-2025-vs2026/);
+  const actions = uses(text);
+  assert.ok(actions.length >= 5, `found ${actions.length} actions`);
+  for (const action of actions) assert.match(action, /@[0-9a-f]{40}$/, `${action} is pinned by full commit`);
+  assert.match(text, /persist-credentials: false/);
+  assert.match(text, /ref: \$\{\{ inputs\.source \}\}/);
+  // An input never reaches a shell as text: it goes by an environment variable.
+  for (const run of text.split(/^\s*run: /m).slice(1)) assert.ok(!run.split("\n")[0].includes("inputs."), "an input inside a run line");
+  const runBlocks = [...text.matchAll(/run: \|\n((?: {10,}.*\n|\n)+)/g)].map((m) => m[1]);
+  assert.ok(runBlocks.length >= 3);
+  for (const block of runBlocks) assert.ok(!block.includes("${{"), "no expression inside a script");
+});
+
+test("build_installer_pins_the_tool_and_every_packaging_input_and_checks_each_digest_before_use", () => {
+  const text = read(BUILD);
+  // The CLI: one exact version, installed locked, cached by that version.
+  assert.match(text, /cargo install tauri-cli --locked --version 2\.12\.5\b/);
+  assert.match(text, /key: tauri-cli-2\.12\.5-/);
+  assert.ok(!/tauri-cli[^\n]*[\^~]/.test(text), "no range");
+  // The three inputs the bundler downloads (tauri-bundler 2.10.5, windows/nsis/mod.rs:38-44 and windows/util.rs:19).
+  const inputs = [
+    { name: "NSIS 3.13", url: "https://github.com/tauri-apps/binary-releases/releases/download/nsis-3.13/nsis-3.13.zip" },
+    { name: "nsis_tauri_utils 0.5.3", url: "https://github.com/tauri-apps/nsis-tauri-utils/releases/download/nsis_tauri_utils-v0.5.3/nsis_tauri_utils.dll" },
+    { name: "WebView2 bootstrapper", url: "https://go.microsoft.com/fwlink/p/?LinkId=2124703" },
+  ];
+  const lines = text.split("\n");
+  for (const input of inputs) {
+    const at = lines.findIndex((line) => line.includes(input.url));
+    assert.ok(at >= 0, `${input.name}: the URL`);
+    const digest = lines.slice(at, at + 3).join(" ").match(/\b[0-9a-f]{64}\b/);
+    assert.ok(digest, `${input.name}: a SHA-256 beside the URL`);
+  }
+  const provision = text.indexOf("Get-Verified");
+  const build = text.indexOf("cargo tauri build");
+  assert.ok(provision > 0 && build > provision, "the inputs are in place and checked before the build");
+  assert.match(text, /throw "SHA-256 mismatch/);
+  assert.match(text, /Verifying NSIS package|Redownloading|Recreating/, "the build log is searched for any download of its own");
+  assert.match(text, /--bundles nsis/);
+  assert.match(text, /--locked/);
+});
+
+test("build_installer_smoke_tests_the_exact_bytes_it_built_and_keeps_the_log_on_failure", () => {
+  const text = read(BUILD);
+  const digest = text.indexOf("id: digest");
+  const smoke = text.lastIndexOf("installer-smoke.ps1");
+  const again = text.indexOf("Check the installer did not change");
+  const upload = text.indexOf("name: Keep the installer");
+  assert.ok(digest > 0 && smoke > digest, "the digest is taken before the smoke run, and the smoke run uses that file");
+  // Started from cmd by the full path of Windows PowerShell 5.1, so it never inherits a pwsh module path.
+  const step = text.slice(smoke - 700, smoke + 300);
+  assert.match(step, /shell: cmd/);
+  assert.match(step, /%SystemRoot%\\System32\\WindowsPowerShell\\v1\.0\\powershell\.exe/);
+  assert.match(step, /-Installer "%INSTALLER%"/);
+  assert.ok(again > smoke && upload > again, "the file is hashed again after the smoke run, and offered after that");
+  assert.match(text, /outputs:\n(?: {4,}.*\n)*? {6}sha256:/);
+  assert.match(text, /if: failure\(\)\n\s+uses: actions\/upload-artifact@[0-9a-f]{40}/);
+  assert.match(text, /installer-smoke-log/);
+  // After the smoke run, the file is hashed again: what was tested is what is offered.
+  assert.ok(text.lastIndexOf("Get-FileHash") > smoke, "the installer is hashed again after the smoke run");
+});
+
+test("ci_calls_build_installer_on_every_push_alongside_rust", () => {
+  const text = read(CI);
+  const job = between(text, /^ {2}installer:$/m, /^ {2}[a-z0-9-]+:\n|\s*$/, "the installer job");
+  // Side by side with the Rust job: the installer's result comes in about 25 minutes, not after the 47-minute Rust job.
+  assert.doesNotMatch(job, /needs:/);
+  assert.match(job, /uses: \.\/\.github\/workflows\/build-installer\.yml/);
+  assert.match(job, /source: \$\{\{ github\.sha \}\}/);
+  for (const key of ["rust:", "ui:", "scan:", "e2e:"]) assert.ok(text.includes(`\n  ${key}\n`), `${key} still there`);
+});
+
+// Runner trial 3: a posted BM_CLICK on Finish was dropped. The finished install page's Next press (a BM_CLICK) opens the
+// Finish page inside its own handling, Finish is the same button, and a button ignores a BM_CLICK while it is still inside
+// one. The wizard's buttons are pressed as NSIS handles them (WM_COMMAND posted to the outer dialog, what Enter sends).
+test("wizard_buttons_are_pressed_as_a_posted_wm_command_to_the_outer_dialog", () => {
+  const text = read(SMOKE);
+  const press = between(text, /public static int Press\(/, /\n  \}/, "SmokeDlg.Press");
+  assert.match(press, /PostMessage\(dlg, 0x0111, \(IntPtr\)id, button\)/);
+  assert.doesNotMatch(press, /SendMessage/);
+  assert.match(text, /\[DllImport\("user32\.dll", SetLastError = true\)\] static extern bool PostMessage/);
+  const wizard = between(text, /^function Drive-Wizard/m, /^\}/m, "Drive-Wizard");
+  assert.match(wizard, /\[SmokeDlg\]::Press\(\$d\.Handle, \$next\)/);
+  assert.match(wizard, /\[SmokeDlg\]::Press\(\$d\.Handle, \$close\)/);
+  assert.doesNotMatch(wizard, /\[SmokeDlg\]::Click\(\$(next|close)/);
+  // The outer dialog's own buttons, found by id on the outer dialog, in the program this run started.
+  assert.match(wizard, /\[SmokeDlg\]::Item\(\$d\.Handle, 1\)/);
+  assert.match(wizard, /Get-Dialogs \$pids -Owned/);
+  assert.match(text, /if \(\$Owned -and \(\$null -eq \$Pids -or/);
+  // One press per page (the inner dialog NSIS makes for it); posted again only when it could not be queued.
+  assert.match(wizard, /if \(\$lastPressError -eq 0\) \{ \$pageQueued = \$true \}/);
+  // The press itself is guarded by $pageQueued, and a moment with no page visible neither presses nor resets the page.
+  const pressAt = wizard.indexOf("[SmokeDlg]::Press($d.Handle, $next)");
+  const guard = wizard.lastIndexOf("if (-not $pageQueued -and", pressAt);
+  assert.ok(guard > 0 && pressAt - guard < 300, "the Next press sits inside the one-press-per-page guard");
+  const skip = wizard.indexOf("if ($innerWnd -eq [IntPtr]::Zero) { continue }");
+  assert.ok(skip > 0 && skip < wizard.indexOf("if ($innerWnd -ne $pageWnd)"), "no visible page: skipped before the page state is reset");
+  assert.doesNotMatch(wizard, /TotalSeconds -gt 5/);
+  // The reinstall page's choice is a real click, must read as ticked before Next, and must have been made at all.
+  assert.match(wizard, /\[SmokeDlg\]::GetCheck\(\$radio\.Handle\) -eq 1/);
+  assert.match(wizard, /did not take/);
+  assert.match(wizard, /if \(\$UninstallFirst -and -not \$chosen\) \{ throw/);
+  // Runner trial 4: "uninstall first" shows the old uninstaller's own window from a child process: driven too.
+  assert.match(wizard, /@\(\[int\]\$Process\.Id\) \+ @\(Get-ChildIds \(\[int\]\$Process\.Id\)\)/);
+  assert.match(text, /\[wmisearcher\]"SELECT ProcessId FROM Win32_Process WHERE ParentProcessId = \$ParentId"/);
+  // ...and a clean-up after a failed check ends anything running from a folder under test.
+  const reset = between(text, /^function Reset-World/m, /^\}/m, "Reset-World");
+  assert.match(reset, /\$path\.StartsWith\(\$Work \+ '\\'/);
+  // Runner trial 5: only the Start menu's own Config value is let through, only as a change; the key is not skipped.
+  const places = between(text, /^function Get-PlacesSnapshot/m, /^\}/m, "Get-PlacesSnapshot");
+  assert.doesNotMatch(places, /CurrentVersion\\Start'/);
+  assert.match(text, /\$startConfig = 'changed: HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Start\|Config'/);
+  assert.match(text, /Compare-Listing \$before \$after \$allowed \| Where-Object \{ \$_ -ne \$startConfig \}/);
+  // ...and the planted-write proof goes through the same filter and names the planted write.
+  assert.match(text, /Compare-Listing \$before \$planted \$allowed \| Where-Object \{ \$_ -ne \$startConfig \}/);
+  assert.match(text, /\$plantedDiff\[0\] -ne 'added: HKCU\\Software\\Petalock\|MU-planted'/);
+  // Another program's window title is never written to the log.
+  assert.doesNotMatch(wizard, /Caption\(\$front\)/);
+});
+
+// The smoke script, run in the ways that touch nothing.
+// Windows PowerShell 5.1 by its full path, as the workflow starts it: never whatever `powershell` the parent's PATH finds.
+const POWERSHELL = (() => {
+  const exe = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  if (!existsSync(exe)) return null;
+  const probe = spawnSync(exe, ["-NoProfile", "-Command", "$PSVersionTable.PSVersion.Major"], { encoding: "utf8" });
+  return probe.status === 0 ? exe : null;
+})();
+
+/**
+ * Runs the smoke script with no runner marks in the environment, so it can never reach the installing part, and without
+ * the module path of the PowerShell 7 that may have started node (the scan job's shell): 5.1 works its own out.
+ */
+function smoke(args) {
+  const env = { ...process.env };
+  for (const name of ["GITHUB_ACTIONS", "RUNNER_ENVIRONMENT", "RUNNER_TEMP", "PETALOCK_INSTALLER_SMOKE", "PSModulePath"]) delete env[name];
+  return spawnSync(POWERSHELL, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", join(ROOT, SMOKE), ...args], {
+    encoding: "utf8",
+    env,
+    timeout: 120_000,
+  });
+}
+
+const skipNoPowerShell = POWERSHELL ? false : "Windows PowerShell is not here";
+
+test("the smoke script needs no module cmdlet that a PowerShell 7 parent's module path can hide", () => {
+  const script = code(read(SMOKE).replace(/^\s*#.*$/gm, "")).join("\n");
+  // Get-FileHash was not found when node ran under pwsh (scan job, 2026-11-25): hashing is .NET now.
+  assert.ok(!/\bGet-FileHash\b/.test(script), "Get-FileHash");
+  assert.match(script, /System\.Security\.Cryptography\.SHA256/);
+});
+
+test("the smoke script never judges an exit code it could not read, and closes an aborted page", () => {
+  const script = code(read(SMOKE).replace(/^\s*#.*$/gm, "")).join("\n");
+  // An empty ExitCode (Windows PowerShell with -PassThru and no kept handle) must not pass as "not zero": every read goes
+  // through Get-ExitCode, which refuses an empty one, and every process is started where its handle is kept.
+  const direct = script.split("\n").filter((line) => /\.ExitCode\b/.test(line) && !/\$code = \$Process\.ExitCode/.test(line));
+  assert.deepEqual(direct, []);
+  assert.match(script, /function Get-ExitCode/);
+  assert.match(script, /\$null -eq \$code/);
+  assert.match(script, /\$null = \$p\.Handle/);
+  assert.ok((script.match(/Get-ExitCode/g) ?? []).length >= 3, "Get-ExitCode is used");
+  // The page after an Abort: Next stays off and Cancel closes it.
+  assert.match(script, /\$text -match 'Aborted'/);
+  assert.match(script, /\[SmokeDlg\]::Item\(\$d\.Handle, 2\)/);
+  // A window a failed check left open is closed before the install folder is removed.
+  const reset = script.slice(script.indexOf("function Reset-World"), script.indexOf("function Get-RegValue"));
+  assert.ok(reset.indexOf("Get-UninstallerCopies") > 0 && reset.indexOf("$Installer") > 0 && reset.indexOf("Get-UninstallerCopies") < reset.indexOf("Remove-Safely"));
+});
+
+test("a_refused_install_is_judged_by_the_program_file_before_and_after_not_by_its_presence", () => {
+  const script = read(SMOKE);
+  const check = script.slice(script.indexOf('$Checks["install_refuses_an_unsafe_folder"]'), script.indexOf('$Checks["files_added_after_install_survive_upgrade_and_uninstall"]'));
+  // The fixture that starts with a petalock.exe (the foreign folder with both names) is in the list of cases...
+  assert.match(check, /Write-Utf8 \(Join-Path \$both 'petalock\.exe'\)/);
+  // ...so "a petalock.exe exists after the refusal" is a false failure on correct behaviour. The state before is kept and
+  // compared, and the bare existence test is gone from the refusal loop.
+  assert.ok(!/\[System\.IO\.File\]::Exists\(\(Join-Path \$dir 'petalock\.exe'\)\)/.test(check), "a bare existence test of petalock.exe in the refusal loop");
+  assert.match(check, /\$programBefore = Get-ProgramState \(Join-Path \$dir 'petalock\.exe'\)/);
+  assert.match(check, /Assert-ProgramUnchanged \$programBefore \(Get-ProgramState \(Join-Path \$dir 'petalock\.exe'\)\)/);
+  // Its self-test: untouched passes, changed and appeared fail.
+  const selfTest = script.slice(script.indexOf("function Invoke-SelfTest"), script.indexOf("function Stop-WithCode"));
+  for (const what of ["a foreign petalock.exe left untouched is not a failure", "a foreign petalock.exe that changed is a failure", "a program file that appeared where none was is a failure"]) {
+    assert.ok(selfTest.includes(what), what);
+  }
+});
+
+test("the smoke script defines every named test, and the files here name them too", () => {
+  const script = read(SMOKE);
+  for (const name of NAMED) assert.ok(script.includes(`"${name}"`), `${name} in the script`);
+  // The named tests of this file's top.
+  const own = readFileSync(join(ROOT, "scripts/installer-smoke.test.mjs"), "utf8");
+  for (const name of NAMED) assert.ok(own.includes(`test("${name}"`), `${name} in the script tests`);
+});
+
+test("the smoke script refuses what it should", { skip: skipNoPowerShell }, () => {
+  const dir = mkdtempSync(join(tmpdir(), "smoke-"));
+  try {
+    const fake = join(dir, "MU-setup.exe");
+    writeFileSync(fake, "MU- not an installer");
+    const none = smoke([]);
+    assert.equal(none.status, 2, none.stdout + none.stderr);
+    assert.match(none.stdout + none.stderr, /-Installer is required/);
+    const missing = smoke(["-Installer", join(dir, "MU-missing.exe")]);
+    assert.equal(missing.status, 2, missing.stdout + missing.stderr);
+    const badUpgrade = smoke(["-Installer", fake, "-Upgrade", join(dir, "MU-missing-upgrade.exe")]);
+    assert.equal(badUpgrade.status, 2, badUpgrade.stdout + badUpgrade.stderr);
+    const unknown = smoke(["-Installer", fake, "-Only", "not_a_test"]);
+    assert.equal(unknown.status, 2, unknown.stdout + unknown.stderr);
+    assert.match(unknown.stdout + unknown.stderr, /unknown test/);
+    // Off the runner it will not install anything: it stops before the first step and says why.
+    const off = smoke(["-Installer", fake]);
+    assert.equal(off.status, 3, off.stdout + off.stderr);
+    assert.match(off.stdout + off.stderr, /only on a GitHub-hosted runner/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the smoke script's dry run lists every test and installs nothing", { skip: skipNoPowerShell }, () => {
+  const dir = mkdtempSync(join(tmpdir(), "smoke-"));
+  try {
+    const fake = join(dir, "MU-setup.exe");
+    writeFileSync(fake, "MU- not an installer");
+    const run = smoke(["-Installer", fake, "-DryRun"]);
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    const listed = [...run.stdout.matchAll(/^would run: (\S+)$/gm)].map((m) => m[1]);
+    assert.deepEqual(listed, NAMED);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the smoke script's comparisons fire on a wrong result and on no change at all", { skip: skipNoPowerShell }, () => {
+  const run = smoke(["-SelfTest"]);
+  assert.equal(run.status, 0, run.stdout + run.stderr);
+  const out = run.stdout;
+  assert.match(out, /selftest: (\d+) checks passed/);
+  const count = Number(out.match(/selftest: (\d+) checks passed/)[1]);
+  assert.ok(count >= 8, `only ${count} self-checks ran`);
+  // A diff that found nothing where something changed, and one that found a change where nothing did, both fail.
+  assert.match(out, /selftest: ok: a changed file is found/);
+  assert.match(out, /selftest: ok: an added file is found/);
+  assert.match(out, /selftest: ok: a removed file is found/);
+  assert.match(out, /selftest: ok: no change is no change/);
+  assert.match(out, /selftest: ok: an empty listing of a folder that holds files is refused/);
+});

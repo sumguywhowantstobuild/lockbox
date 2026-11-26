@@ -1157,7 +1157,29 @@ fn security_config_is_pinned() {
         json!({ "csp": CSP, "freezePrototype": true }),
         "only the CSP and the frozen prototype: no devCsp, no inline capabilities, no asset protocol"
     );
-    assert_eq!(config["bundle"]["active"], false);
+    // Plan 5, Task 1: the bundle is on for the NSIS installer only, for the current user (`scripts/installer-smoke.test.mjs`
+    // reads the rest of it).
+    assert_eq!(
+        config["bundle"],
+        json!({
+            "active": true,
+            "targets": ["nsis"],
+            "publisher": "Petalock",
+            "icon": ["icons/icon.ico", "icons/icon.png"],
+            "useLocalToolsDir": true,
+            "windows": {
+                "webviewInstallMode": { "type": "embedBootstrapper", "silent": true },
+                "nsis": {
+                    "installMode": "currentUser",
+                    "languages": ["English"],
+                    "installerIcon": "icons/icon.ico",
+                    "uninstallerIcon": "icons/icon.ico",
+                    "template": "windows/installer.nsi",
+                    "installerHooks": "windows/hooks.nsh"
+                }
+            }
+        })
+    );
     assert_eq!(config["build"]["devUrl"], "http://localhost:5173");
     assert!(config.get("plugins").is_none(), "no plugin configuration");
     assert!(!config.to_string().contains("remote"), "no remote access");

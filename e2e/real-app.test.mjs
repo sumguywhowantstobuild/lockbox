@@ -102,7 +102,27 @@ test("shipped_grants_and_config_allow_only_the_listed_commands", { skip: SKIP, t
 
   // the configuration and the features it is built with
   const conf = readJson(DESKTOP, "tauri.conf.json");
-  assert.deepEqual(Object.keys(conf).sort(), ["app", "build", "bundle", "identifier", "productName"]);
+  assert.deepEqual(Object.keys(conf).sort(), ["app", "build", "bundle", "identifier", "mainBinaryName", "productName"]);
+  assert.equal(conf.mainBinaryName, "petalock", "the program name the scripts' PROGRAM expects");
+  // The installer's bundle (Plan 5, Task 1): the NSIS installer for the current user, from this folder's template and hooks.
+  assert.deepEqual(conf.bundle, {
+    active: true,
+    targets: ["nsis"],
+    publisher: "Petalock",
+    icon: ["icons/icon.ico", "icons/icon.png"],
+    useLocalToolsDir: true,
+    windows: {
+      webviewInstallMode: { type: "embedBootstrapper", silent: true },
+      nsis: {
+        installMode: "currentUser",
+        languages: ["English"],
+        installerIcon: "icons/icon.ico",
+        uninstallerIcon: "icons/icon.ico",
+        template: "windows/installer.nsi",
+        installerHooks: "windows/hooks.nsh",
+      },
+    },
+  });
   assert.deepEqual(Object.keys(conf.app).sort(), ["security", "windows", "withGlobalTauri"], "app has only its listed keys");
   assert.deepEqual(Object.keys(conf.app.security).sort(), ["csp", "freezePrototype"]);
   assert.equal(conf.app.withGlobalTauri, false);

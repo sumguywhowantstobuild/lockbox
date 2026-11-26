@@ -1,0 +1,190 @@
+name: Build installer
+
+# Builds the Windows installer from one source commit, runs the installer's smoke checks (scripts/installer-smoke.ps1)
+# against those exact bytes on the same runner, and hands back the installer (an artifact) with its SHA-256. Nothing here
+# publishes anything: the workflow is read-only and holds no secret. CI's `installer` job calls it on every push; the
+# release workflow calls it after its own checks (Plan 5, Task 2), so the installer that ships is the one that was
+# smoke-tested.
+#
+# The Tauri CLI is pinned to an exact version (2.12.5, published 2026-11-16) and installed with its own lock file. Every
+# packaging input the CLI's bundler would download is provisioned here first, pinned and checked against a SHA-256 before it
+# is used, so the bundler finds each one in place and fetches nothing: NSIS 3.13, its nsis_tauri_utils plugin 0.5.3 and
+# Microsoft's WebView2 bootstrapper (tauri-bundler 2.10.5 pins the first two by SHA-1 only and the third by nothing;
+# windows/nsis/mod.rs:38-44, windows/util.rs:19). The build's log is searched for any download or rebuild of its own, and the
+# inputs are checked again after the build.
+
+on:
+  workflow_call:
+    inputs:
+      source:
+        description: The commit to build, as a full commit hash
+        required: true
+        type: string
+    outputs:
+      sha256:
+        description: SHA-256 of the installer that was smoke-tested
+        value: ${{ jobs.build.outputs.sha256 }}
+      artifact:
+        description: Name of the artifact holding that installer
+        value: ${{ jobs.build.outputs.artifact }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: "Installer: build and smoke test (windows)"
+    runs-on: windows-2025-vs2026
+    # A first run has no cache: it builds the Tauri CLI, then the app, then runs the smoke checks.
+    timeout-minutes: 90
+    outputs:
+      sha256: ${{ steps.digest.outputs.sha256 }}
+      artifact: petalock-installer
+    env:
+      # The packaging inputs, each with the SHA-256 it must have. The three values are the ones the bundler would
+      # download itself; a new bundler version is a reviewed change to this list.
+      NSIS_URL: https://github.com/tauri-apps/binary-releases/releases/download/nsis-3.13/nsis-3.13.zip
+      NSIS_SHA256: ba63dffc4410ee89193e1cb5a41989991bd77c61068da17e3156d136b7b0b3d8
+      UTILS_URL: https://github.com/tauri-apps/nsis-tauri-utils/releases/download/nsis_tauri_utils-v0.5.3/nsis_tauri_utils.dll
+      UTILS_SHA256: 5ba143b5db4a87d32d6e7802e033330aae56cbceabe0d1e3ba41948385ad4709
+      WEBVIEW2_URL: https://go.microsoft.com/fwlink/p/?LinkId=2124703
+      WEBVIEW2_SHA256: fc2972da71d43e0c57b8d85a5cb9b200ed221f723cf43052d08ca722eb0bb22e
+    steps:
+      # A branch or a tag moves: the same input could build different code on two runs. Only a full commit hash is built, and
+      # the checkout is checked to be that commit.
+      - name: Check the source is a full commit hash
+        shell: pwsh
+        env:
+          SOURCE: ${{ inputs.source }}
+        run: |
+          if ($env:SOURCE -cnotmatch '^[0-9a-f]{40}$') { throw 'the source must be a full 40-character lowercase commit hash, not a branch or a tag' }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.source }}
+          persist-credentials: false
+      - name: Check the checkout is the source commit
+        shell: pwsh
+        env:
+          SOURCE: ${{ inputs.source }}
+        run: |
+          $head = (git rev-parse HEAD).Trim()
+          if ($head -ne $env:SOURCE) { throw "the checked-out commit $head is not the source $env:SOURCE" }
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: ui/.node-version
+      # The app embeds the built page (the build's own beforeBuildCommand builds it), so its dependencies come first.
+      - name: Install UI dependencies
+        working-directory: ui
+        run: npm ci --ignore-scripts
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # The CLI is built once and kept: the key names its version, so a new version is a new cache.
+      - name: Cache the Tauri CLI
+        id: tauri-cli
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-tauri.exe
+          key: tauri-cli-2.12.5-${{ runner.os }}
+      - name: Install the Tauri CLI
+        if: steps.tauri-cli.outputs.cache-hit != 'true'
+        run: cargo install tauri-cli --locked --version 2.12.5
+      - name: Show the Tauri CLI's version
+        run: cargo tauri --version
+      - name: Provision the bundler's packaging inputs (pinned, SHA-256 checked before use)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tools = Join-Path $env:GITHUB_WORKSPACE 'target\.tauri'
+          $inputs = Join-Path $env:RUNNER_TEMP 'bundler-inputs'
+          New-Item -ItemType Directory -Force $tools, $inputs | Out-Null
+          function Get-Verified($url, $sha256, $path) {
+            Invoke-WebRequest $url -OutFile $path
+            if ((Get-FileHash $path -Algorithm SHA256).Hash -ne $sha256) { throw "SHA-256 mismatch for $url" }
+          }
+          $zip = Join-Path $inputs 'nsis-3.13.zip'
+          Get-Verified $env:NSIS_URL $env:NSIS_SHA256 $zip
+          Expand-Archive $zip -DestinationPath $tools
+          Rename-Item (Join-Path $tools 'nsis-3.13') 'NSIS'
+          $plugins = Join-Path $tools 'NSIS\Plugins\x86-unicode\additional'
+          New-Item -ItemType Directory -Force $plugins | Out-Null
+          Get-Verified $env:UTILS_URL $env:UTILS_SHA256 (Join-Path $plugins 'nsis_tauri_utils.dll')
+          Get-Verified $env:WEBVIEW2_URL $env:WEBVIEW2_SHA256 (Join-Path $tools 'MicrosoftEdgeWebview2Setup.exe')
+          Get-ChildItem $tools | Select-Object Name | Format-Table -HideTableHeaders
+      - name: Build the installer
+        shell: pwsh
+        working-directory: crates/petalock-desktop
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP 'tauri-build.log'
+          cargo tauri build --ci --bundles nsis -- --locked *> $log
+          $code = $LASTEXITCODE
+          Get-Content $log
+          if ($code -ne 0) { throw "cargo tauri build failed with exit code $code" }
+      # The bundler must have used what was put in place: a line that says it downloaded or rebuilt a packaging input fails
+      # the run, and so does a log that holds no sign of the build (an empty log would pass the first check by itself).
+      - name: Check the bundler fetched nothing of its own
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $log = Join-Path $env:RUNNER_TEMP 'tauri-build.log'
+          if (-not (Select-String -Path $log -Pattern 'Running makensis' -Quiet)) { throw 'the build log shows no makensis run' }
+          $own = @(Select-String -Path $log -Pattern 'Verifying NSIS package', 'Redownloading', 'Recreating it', 'mis-hashed', 'NSIS directory is missing')
+          if ($own.Count -ne 0) { throw "the bundler fetched or rebuilt a packaging input itself ($($own.Count) lines)" }
+          $tools = Join-Path $env:GITHUB_WORKSPACE 'target\.tauri'
+          $again = @{
+            (Join-Path $tools 'MicrosoftEdgeWebview2Setup.exe') = $env:WEBVIEW2_SHA256
+            (Join-Path $tools 'NSIS\Plugins\x86-unicode\additional\nsis_tauri_utils.dll') = $env:UTILS_SHA256
+          }
+          foreach ($path in $again.Keys) {
+            if ((Get-FileHash $path -Algorithm SHA256).Hash -ne $again[$path]) { throw "a packaging input changed during the build: $path" }
+          }
+      - name: Take the installer's SHA-256
+        id: digest
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = @(Get-ChildItem (Join-Path $env:GITHUB_WORKSPACE 'target\release\bundle\nsis') -Filter '*-setup.exe')
+          if ($files.Count -ne 1) { throw "expected one installer, found $($files.Count)" }
+          $hash = (Get-FileHash $files[0].FullName -Algorithm SHA256).Hash.ToLower()
+          "path=$($files[0].FullName)" >> $env:GITHUB_OUTPUT
+          "sha256=$hash" >> $env:GITHUB_OUTPUT
+          "$hash  $($files[0].Name)"
+      # The smoke checks install and uninstall this very file, for the current user, on this runner. They refuse to start
+      # anywhere that is not a GitHub-hosted runner. Windows PowerShell 5.1, started by its full path from cmd (not from
+      # pwsh, whose module path it would inherit): the dialogs are driven through it. The script's tests start it the same way.
+      - name: Smoke-test the installer
+        shell: cmd
+        env:
+          INSTALLER: ${{ steps.digest.outputs.path }}
+          SMOKE_LOG: ${{ runner.temp }}\installer-smoke\smoke.log
+        run: |
+          "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%GITHUB_WORKSPACE%\scripts\installer-smoke.ps1" -Installer "%INSTALLER%" -LogPath "%SMOKE_LOG%"
+      # What was tested is what is offered: the file is hashed again, and must still be the one that was smoke-tested.
+      - name: Check the installer did not change
+        shell: pwsh
+        env:
+          INSTALLER: ${{ steps.digest.outputs.path }}
+          EXPECTED: ${{ steps.digest.outputs.sha256 }}
+        run: |
+          $hash = (Get-FileHash $env:INSTALLER -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne $env:EXPECTED) { throw "the installer changed after its smoke test: $hash, expected $env:EXPECTED" }
+      # Exactly the file that was hashed and smoke-tested, by its path, not a pattern that could match another.
+      - name: Keep the installer
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: petalock-installer
+          path: ${{ steps.digest.outputs.path }}
+          retention-days: 7
+          if-no-files-found: error
+          overwrite: true
+      # A run that did not pass leaves the smoke log (and a picture of the screen where a dialog was driven) to read why:
+      # made-up test state only.
+      - name: Keep the smoke log
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: installer-smoke-log
+          path: ${{ runner.temp }}\installer-smoke
+          retention-days: 7
+          if-no-files-found: ignore
+          overwrite: true

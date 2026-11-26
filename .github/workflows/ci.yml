@@ -206,3 +206,14 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
           overwrite: true
+
+  # The installer, built from this commit and smoke-tested on the bytes that were built (install, upgrade, uninstall, in
+  # a clean per-user setup). Not a required check yet (branch protection is not changed): a failure shows on the run and is
+  # fixed first. Side by side with the Rust job, not after it: the installer's result comes in about 25 minutes instead of
+  # after the 47-minute Rust job, and a commit that fails the Rust job is still red, so it is not released. The workflow it
+  # calls is read-only and is the one the release uses too, so the installer that ships is the one that was tested.
+  installer:
+    name: Installer
+    uses: ./.github/workflows/build-installer.yml
+    with:
+      source: ${{ github.sha }}
