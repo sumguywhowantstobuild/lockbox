@@ -55,7 +55,9 @@ $UpgradeTests = @(
   "upgrade_keeps_vaults_list_settings_and_state",
   "candidate_versions_upgrade_in_order",
   "downgrade_behaviour_is_the_specified_one",
-  "uninstall_after_upgrade_is_clean"
+  "uninstall_after_upgrade_is_clean",
+  "interactive_upgrade_keeps_start_with_windows",
+  "upgrade_page_defaults_to_install_over"
 )
 
 $Sentence = 'Your vaults stay where they are. Petalock keeps them in the folders you chose, by default Petalock Vaults in your user folder.'
@@ -485,6 +487,20 @@ public static class SmokeDlg {
   [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
   [DllImport("user32.dll")] static extern bool IsWindowEnabled(IntPtr h);
+  [StructLayout(LayoutKind.Sequential)] public struct GuiThreadInfo {
+    public int cbSize; public int flags; public IntPtr hwndActive; public IntPtr hwndFocus; public IntPtr hwndCapture;
+    public IntPtr hwndMenuOwner; public IntPtr hwndMoveSize; public IntPtr hwndCaret; public int left; public int top; public int right; public int bottom;
+  }
+  [DllImport("user32.dll")] static extern bool GetGUIThreadInfo(uint thread, ref GuiThreadInfo info);
+  // The window that has the keyboard focus in the thread that owns window h (0 when it cannot be read).
+  public static IntPtr FocusOf(IntPtr h) {
+    uint pid;
+    uint thread = GetWindowThreadProcessId(h, out pid);
+    var info = new GuiThreadInfo();
+    info.cbSize = Marshal.SizeOf(typeof(GuiThreadInfo));
+    if (!GetGUIThreadInfo(thread, ref info)) return IntPtr.Zero;
+    return info.hwndFocus;
+  }
   public static List<IntPtr> Tops() { var r = new List<IntPtr>(); EnumWindows((h, l) => { r.Add(h); return true; }, IntPtr.Zero); return r; }
   public static List<IntPtr> Kids(IntPtr p) { var r = new List<IntPtr>(); EnumChildWindows(p, (h, l) => { r.Add(h); return true; }, IntPtr.Zero); return r; }
   public static string Cls(IntPtr h) { var s = new StringBuilder(256); GetClassName(h, s, 256); return s.ToString(); }
@@ -914,17 +930,18 @@ function Assert-OneInstallation([string]$Dir, [string]$Version) {
 }
 
 # Runs the installer -Exe through its window to the end (Drive-Wizard, taking each page's default) and reads its reinstall
-# page on the way, the one that offers 'Uninstall before installing' (it comes after the Welcome page): its words and its two
-# choices, each with whether it can be chosen and whether it is ticked, and the installer's exit code.
+# page on the way, the one that offers 'Uninstall before installing' (an upgrade or a downgrade) or 'Uninstall Petalock' (the
+# same version); it comes after the Welcome page: its words and its two choices, each with whether it can be chosen and
+# whether it is ticked, and the installer's exit code.
 function Read-ReinstallPage([string]$Exe) {
   # Filled by the page reader below, which Drive-Wizard calls from its own scope: found by name through the caller's scope.
   $ReinstallFound = @{}
   $reader = {
     param($d)
     if ($ReinstallFound.Count -gt 0) { return }
-    if (-not (Find-Button $d 'Uninstall before installing')) { return }
-    $ReinstallFound['Choices'] = @($d.Kids | Where-Object { $_.Class -eq 'Button' -and ($_.Text -eq 'Uninstall before installing' -or $_.Text -like 'Do not uninstall*') } |
-      ForEach-Object { [pscustomobject]@{ Text = $_.Text; Enabled = [bool]$_.Enabled; Checked = ([SmokeDlg]::GetCheck($_.Handle) -eq 1) } })
+    if (-not (Find-Button $d 'Uninstall before installing') -and -not (Find-Button $d 'Uninstall Petalock')) { return }
+    $ReinstallFound['Choices'] = @($d.Kids | Where-Object { $_.Class -eq 'Button' -and ($_.Text -eq 'Uninstall before installing' -or $_.Text -like 'Do not uninstall*' -or $_.Text -eq 'Uninstall Petalock' -or $_.Text -eq 'Add/Reinstall components') } |
+      ForEach-Object { [pscustomobject]@{ Text = $_.Text; Enabled = [bool]$_.Enabled; Checked = ([SmokeDlg]::GetCheck($_.Handle) -eq 1); Focused = ([SmokeDlg]::FocusOf($d.Handle) -eq $_.Handle) } })
     $ReinstallFound['Text'] = (Get-DialogText $d) -replace '\s+', ' '
   }
   $p = Start-Tracked $Exe @()
@@ -932,8 +949,98 @@ function Read-ReinstallPage([string]$Exe) {
   $exit = Get-ExitCode $p
   if ($ReinstallFound.Count -eq 0) { Save-Screen 'no-reinstall-page'; throw 'the window went through no reinstall page' }
   $choices = $ReinstallFound['Choices']
-  Write-Log "  reinstall page: $($ReinstallFound['Text']) | choices: $(($choices | ForEach-Object { "'$($_.Text)' enabled=$($_.Enabled) ticked=$($_.Checked)" }) -join '; ') | exit $exit"
+  Write-Log "  reinstall page: $($ReinstallFound['Text']) | choices: $(($choices | ForEach-Object { "'$($_.Text)' enabled=$($_.Enabled) ticked=$($_.Checked) focused=$($_.Focused)" }) -join '; ') | exit $exit"
   return [pscustomobject]@{ Text = $ReinstallFound['Text']; Choices = $choices; Exit = $exit }
+}
+
+# Plan 5, Task 4b. A page read by Read-ReinstallPage, on an upgrade or a downgrade: opens with 'Do not uninstall' ticked, and still
+# offers 'Uninstall before installing' (enabled, not ticked). Each choice must be found: a reader that found none must fail.
+function Assert-InstallOverDefault($Page, [string]$What) {
+  $stay = @($Page.Choices | Where-Object { $_.Text -eq 'Do not uninstall' })[0]
+  $first = @($Page.Choices | Where-Object { $_.Text -eq 'Uninstall before installing' })[0]
+  if (-not $stay) { throw "the reinstall page on $What does not offer 'Do not uninstall'" }
+  if (-not $first) { throw "the reinstall page on $What does not offer 'Uninstall before installing'" }
+  if (-not $stay.Enabled -or -not $first.Enabled) { throw "the reinstall page on $What shows a choice that cannot be chosen" }
+  if (-not $stay.Checked) { throw "the reinstall page on $What does not open with 'Do not uninstall' ticked" }
+  if ($first.Checked) { throw "the reinstall page on $What opens with 'Uninstall before installing' ticked as well" }
+  # The keyboard focus is on the ticked button: a keyboard user's Space must not pick the other choice.
+  if (-not $stay.Focused) { throw "the reinstall page on $What does not put the keyboard focus on 'Do not uninstall'" }
+  if ($first.Focused) { throw "the reinstall page on $What puts the keyboard focus on 'Uninstall before installing', which is not ticked" }
+}
+
+# The same-version page is Tauri's, unchanged: 'Add/Reinstall components' ticked, 'Uninstall Petalock' offered, not ticked.
+function Assert-ReinstallDefaultIsFirst($Page) {
+  $add = @($Page.Choices | Where-Object { $_.Text -eq 'Add/Reinstall components' })[0]
+  $gone = @($Page.Choices | Where-Object { $_.Text -eq 'Uninstall Petalock' })[0]
+  if (-not $add) { throw "the same-version reinstall page does not offer 'Add/Reinstall components'" }
+  if (-not $gone) { throw "the same-version reinstall page does not offer 'Uninstall Petalock'" }
+  if (-not $add.Checked) { throw "the same-version reinstall page does not open with 'Add/Reinstall components' ticked" }
+  if ($gone.Checked) { throw "the same-version reinstall page opens with 'Uninstall Petalock' ticked as well" }
+  if (-not $add.Focused) { throw "the same-version reinstall page does not put the keyboard focus on 'Add/Reinstall components'" }
+  if ($gone.Focused) { throw "the same-version reinstall page puts the keyboard focus on 'Uninstall Petalock', which is not ticked" }
+}
+
+# Plan 5, Task 4b fix round (review finding 3). A page reader for Drive-Wizard's -OnPage that notes the uninstaller's confirm page
+# (the page whose own Next button reads 'Uninstall') and whether it offers the "Delete the application data" box. It fills the
+# hashtable $ConfirmPage the caller made (found by name through the caller's scope, as Read-ReinstallPage's reader does).
+function New-ConfirmPageReader {
+  return {
+    param($d)
+    $next = [SmokeDlg]::Item($d.Handle, 1)
+    if ($next -eq [IntPtr]::Zero) { return }
+    if (([SmokeDlg]::Text($next) -replace '&', '') -ne 'Uninstall') { return }
+    $ConfirmPage.Seen++
+    if (@($d.Kids | Where-Object { $_.Class -eq 'Button' -and $_.Text -like 'Delete the application data*' }).Count -gt 0) { $ConfirmPage.Box++ }
+  }
+}
+
+# The confirm page was seen exactly once (a reader that saw none must fail, not pass), with the app-data box (-WithBox, a full
+# uninstall) or without it (the old uninstaller an upgrade runs with /UPDATE, where the box would do nothing).
+function Assert-ConfirmPageBox($Seen, [bool]$WithBox, [string]$What) {
+  if ($Seen.Seen -ne 1) { throw "$What : the uninstaller's confirm page was seen $($Seen.Seen) times, not once" }
+  if ($WithBox -and $Seen.Box -ne 1) { throw "$What : the full uninstall's confirm page does not offer 'Delete the application data'" }
+  if (-not $WithBox -and $Seen.Box -ne 0) { throw "$What : the uninstaller run with /UPDATE offers 'Delete the application data', which it would ignore" }
+}
+
+# Plan 5, Task 4b. -First installed silently (the caller has reset the world), with the made-up state, made-up files in the
+# two identifier folders, and the Run value the app writes (pointing at the installed program); then -Exe run through its own
+# window, with the reinstall page's default choice or, with -UninstallFirst, its uninstall choice ('Uninstall before
+# installing', or 'Uninstall Petalock' for the same version). Its exit code must be 0. Returns what was planted.
+function Invoke-WindowOver([string]$First, [string]$Exe, [bool]$UninstallFirst, [scriptblock]$OnPage = $null) {
+  $code = Install-Silent $First ''
+  if ($code -ne 0) { throw "the silent install of the first version exited $code" }
+  Start-Sleep -Seconds 2
+  $planted = New-StateFixture
+  Write-Utf8 (Join-Path $IdRoam 'MU-roaming.txt') 'MU-roaming'
+  Write-Utf8 (Join-Path $IdLocal 'MU-local.txt') 'MU-local'
+  $others = @{}
+  foreach ($path in @($IdRoam, $IdLocal)) {
+    $others[$path] = Get-Listing $path -Hash
+    Assert-Listing $others[$path] $path "the folder $([System.IO.Path]::GetFileName($path))"
+  }
+  $run = '"' + (Join-Path $DefaultDir 'petalock.exe') + '" --hidden'
+  Set-ItemProperty -LiteralPath $RunKey -Name 'Petalock' -Value $run
+  $p = Start-Tracked $Exe @()
+  [void](Drive-Wizard $p 'install' $false '' $null 240 $UninstallFirst $OnPage)
+  $exit = Get-ExitCode $p
+  if ($exit -ne 0) { throw "the window ended with exit $exit" }
+  Start-Sleep -Seconds 2
+  return [pscustomobject]@{ Planted = $planted; Run = $run; Others = $others }
+}
+
+# What a run of Invoke-WindowOver must leave: the state folder byte for byte, the identifier folders too, and open\ either
+# untouched (the default installs over: no uninstaller runs) or gone (the old uninstaller ran, with /UPDATE, and cleans it).
+function Assert-WindowKept($r, [bool]$UninstallFirst, [string]$What) {
+  $now = Get-Listing $State -Hash
+  if ($UninstallFirst) {
+    if ([System.IO.Directory]::Exists((Join-Path $State 'open'))) { throw "$What : the old uninstaller did not run (open\ is still there)" }
+    Assert-Unchanged (Without-Open $r.Planted) (Without-Open $now) "the state folder after $What (open\ aside)"
+  } else {
+    Assert-Unchanged $r.Planted $now "the state folder after $What (open\ included: no uninstaller runs)"
+  }
+  foreach ($path in $r.Others.Keys) {
+    Assert-Unchanged $r.Others[$path] (Get-Listing $path -Hash) "the folder $([System.IO.Path]::GetFileName($path)) after $What"
+  }
 }
 
 function Start-PetalockHidden([string]$Dir) {
@@ -1743,6 +1850,78 @@ $Checks["uninstall_after_upgrade_is_clean"] = {
   Assert-Unchanged (Without-Open $planted) (Get-Listing $State -Hash) 'the state folder (everything but open\) after the upgrade and uninstall'
   foreach ($path in $others.Keys) { Assert-Unchanged $others[$path] (Get-Listing $path -Hash) "the folder $([System.IO.Path]::GetFileName($path))" }
   Write-Log "  $FromVersion to $ToVersion, then uninstall: only the program, its entry, the Run value and open\ went"
+}
+
+# --- Plan 5, Task 4b: an upgrade keeps "start with Windows" ----------------------------------------------------------------
+
+# An upgrade through the window keeps the Run value the app wrote, whichever choice the reinstall page is left on: its default
+# (install over: no uninstaller runs) and 'Uninstall before installing' (the old uninstaller runs with /UPDATE: it still cleans
+# open\, which is the proof it ran, and keeps the Run value and everything else). The same holds for a downgrade. The control is
+# the same version, whose 'Uninstall Petalock' is the person asking for a full uninstall: the Run value goes.
+$Checks["interactive_upgrade_keeps_start_with_windows"] = {
+  Assert-VersionPair
+  # The confirm page of the old uninstaller is read on each uninstall-first run (review finding 3): under /UPDATE it must not offer
+  # 'Delete the application data' (it would ignore the box), and the planted app-data folders survive; the same-version full
+  # uninstall is the control that does offer it (a reader that finds no box where one is must fail).
+  $confirmReader = New-ConfirmPageReader
+  foreach ($uninstallFirst in @($false, $true)) {
+    $what = if ($uninstallFirst) { "the upgrade from $FromVersion to $ToVersion that uninstalls first" } else { "the upgrade from $FromVersion to $ToVersion with the page's default choice" }
+    Reset-World
+    $ConfirmPage = @{ Seen = 0; Box = 0 }
+    $r = Invoke-WindowOver $Installer $Upgrade $uninstallFirst $confirmReader
+    Assert-OneInstallation $DefaultDir $ToVersion
+    if ((Get-RegValue $RunKey 'Petalock') -ne $r.Run) { throw "$what changed or removed the Run\Petalock value" }
+    Assert-WindowKept $r $uninstallFirst $what
+    if ($uninstallFirst) { Assert-ConfirmPageBox $ConfirmPage $false $what }
+    elseif ($ConfirmPage.Seen -ne 0) { throw "$what : an uninstaller's confirm page was shown, so something uninstalled" }
+    Write-Log "  ${what}: the Run value, state and app data kept"
+  }
+  Reset-World
+  $ConfirmPage = @{ Seen = 0; Box = 0 }
+  $r = Invoke-WindowOver $Upgrade $Installer $true $confirmReader
+  Assert-OneInstallation $DefaultDir $FromVersion
+  $what = "the downgrade from $ToVersion to $FromVersion that uninstalls first"
+  if ((Get-RegValue $RunKey 'Petalock') -ne $r.Run) { throw "$what changed or removed the Run\Petalock value" }
+  Assert-WindowKept $r $true $what
+  Assert-ConfirmPageBox $ConfirmPage $false $what
+  Write-Log "  ${what}: the Run value, state and app data kept, no app-data box offered"
+  Reset-World
+  $ConfirmPage = @{ Seen = 0; Box = 0 }
+  $r = Invoke-WindowOver $Installer $Installer $true $confirmReader
+  Assert-OneInstallation $DefaultDir $FromVersion
+  if ($null -ne (Get-RegValue $RunKey 'Petalock')) { throw "the same-version 'Uninstall Petalock' left the Run\Petalock value: a full uninstall removes it" }
+  Assert-ConfirmPageBox $ConfirmPage $true "the same-version 'Uninstall Petalock'"
+  Write-Log "  the same version's 'Uninstall Petalock' stays a full uninstall (the Run value went, the app-data box was offered)"
+}
+
+# The reinstall page opens on 'Do not uninstall' when the installed version is older or newer, and 'Uninstall before installing'
+# stays offered; the same version's page is Tauri's (reinstall first). Each is read through the window, which then installs.
+$Checks["upgrade_page_defaults_to_install_over"] = {
+  Assert-VersionPair
+  Reset-World
+  Install-Good $DefaultDir
+  $page = Read-ReinstallPage $Upgrade
+  Assert-InstallOverDefault $page "an upgrade from $FromVersion to $ToVersion"
+  if ($page.Exit -ne 0) { throw "the upgrade through the window ended with exit $($page.Exit)" }
+  Start-Sleep -Seconds 2
+  Assert-OneInstallation $DefaultDir $ToVersion
+
+  Reset-World
+  $code = Install-Silent $Upgrade ''
+  if ($code -ne 0) { throw "the silent install of $ToVersion exited $code" }
+  Start-Sleep -Seconds 2
+  $page = Read-ReinstallPage $Installer
+  Assert-InstallOverDefault $page "a downgrade from $ToVersion to $FromVersion"
+  if ($page.Exit -ne 0) { throw "the downgrade through the window ended with exit $($page.Exit)" }
+  Start-Sleep -Seconds 2
+  Assert-OneInstallation $DefaultDir $FromVersion
+
+  Reset-World
+  Install-Good $DefaultDir
+  $page = Read-ReinstallPage $Installer
+  Assert-ReinstallDefaultIsFirst $page
+  if ($page.Exit -ne 0) { throw "the reinstall of the same version through the window ended with exit $($page.Exit)" }
+  Write-Log "  upgrade and downgrade open on 'Do not uninstall' with 'Uninstall before installing' offered; the same version opens on 'Add/Reinstall components'"
 }
 
 # ---------------------------------------------------------------------------------------------------------------------

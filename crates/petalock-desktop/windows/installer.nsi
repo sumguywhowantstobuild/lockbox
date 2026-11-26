@@ -22,6 +22,14 @@
 ;      in the recorded install folder, run by a command built from that folder (not read from the registry).
 ;   9. Tauri's "remove the old main binary named by a registry value" and its shortcut migration are removed.
 ;  10. The WebView2 bootstrapper's path is quoted when it is run.
+;  11. On an upgrade or a downgrade the reinstall page opens with "Do not uninstall" ticked (Tauri's opens on "Uninstall before
+;      installing"); "Uninstall before installing" is still offered, the person's last choice is kept on Back and Next, and the
+;      same-version page is Tauri's. The keyboard focus goes to the button that is ticked, on every page kind (Tauri focuses the
+;      first button whichever is ticked).
+;  12. "Uninstall before installing" on an upgrade or a downgrade runs the old uninstaller with /UPDATE, so it keeps the
+;      Run\Petalock value (the app keeps no other copy of "start with Windows"), the shortcuts and the app data; it still
+;      cleans open\ first. The same version's "Uninstall Petalock" stays a full uninstall. Under /UPDATE the uninstaller's
+;      "Delete the application data" box is not offered (the uninstall ignores it there); a full uninstall keeps it.
 Unicode true
 ManifestDPIAware true
 ; Add in `dpiAwareness` `PerMonitorV2` to manifest for Windows 10 1607+ (note this should not affect lower versions since they should be able to ignore this and pick up `dpiAware` `true` set by `ManifestDPIAware true`)
@@ -282,16 +290,31 @@ Function PageReinstall
     !endif
     ${NSD_OnClick} $R3 PageReinstallUpdateSelection
 
+    ; Petalock: on an upgrade or a downgrade the first time this page is shown, the second button ("Do not uninstall") is the
+    ; one ticked: Tauri's default ("Uninstall before installing") deleted the Run\Petalock value. $ReinstallPageCheck is the
+    ; person's last choice (1 first button, 2 second), so once they have chosen, Back and Next keep it. A downgrade the build
+    ; forbids has that button disabled, so it keeps the first. The same-version page is untouched ($R0 = 0).
+    ${If} $ReinstallPageCheck = 0
+    ${AndIf} $R0 <> 0
+      StrCpy $ReinstallPageCheck 2
+      !if "${ALLOWDOWNGRADES}" == "false"
+        ${IfThen} $R0 = -1 ${|} StrCpy $ReinstallPageCheck 1 ${|}
+      !endif
+    ${EndIf}
+
     ; Check the first radio button if this the first time
     ; we enter this page or if the second button wasn't
     ; selected the last time we were on this page
+    ; Petalock: the keyboard focus goes to the button that is ticked (Tauri focuses the first button whichever is ticked, so on
+    ; an upgrade a keyboard user's Space would have picked "Uninstall before installing").
     ${If} $ReinstallPageCheck <> 2
       SendMessage $R2 ${BM_SETCHECK} ${BST_CHECKED} 0
+      ${NSD_SetFocus} $R2
     ${Else}
       SendMessage $R3 ${BM_SETCHECK} ${BST_CHECKED} 0
+      ${NSD_SetFocus} $R3
     ${EndIf}
 
-    ${NSD_SetFocus} $R2
     nsDialogs::Show
   ${EndIf}
 FunctionEnd
@@ -344,6 +367,11 @@ Function PageLeaveReinstall
     ; that folder and the fixed file name uninstall.exe: nothing read from the registry is executed).
     Call PetalockBeforeOldUninstaller
     ${IfThen} $UpdateMode = 1 ${|} StrCpy $R1 "$R1 /UPDATE" ${|} ; append /UPDATE
+    ; Petalock: /UPDATE for an uninstall first from an upgrade or a downgrade ($R0 = 1 or -1, still the version comparison's
+    ; answer: nothing above writes it), so the old uninstaller keeps the Run\Petalock value, the shortcuts and the app data
+    ; (it still cleans open\ first). It goes before `_?=`, which must stay last. The same version ($R0 = 0) is the person
+    ; asking to uninstall: a full one.
+    ${IfThen} $R0 <> 0 ${|} StrCpy $R1 "$R1 /UPDATE" ${|}
     ${IfThen} $PassiveMode = 1 ${|} StrCpy $R1 "$R1 /P" ${|} ; append /P
     StrCpy $R1 "$R1 _?=$4" ; append uninstall directory
     ExecWait '$R1' $0
@@ -419,6 +447,11 @@ Var DeleteAppDataCheckboxState
 !define /ifndef WS_EX_LAYOUTRTL         0x00400000
 !define MUI_PAGE_CUSTOMFUNCTION_SHOW un.ConfirmShow
 Function un.ConfirmShow ; Add add a `Delete app data` check box
+  ; Petalock: under /UPDATE (the old uninstaller an upgrade or a downgrade runs) the "Delete the application data" box is not
+  ; offered: the uninstall section ignores it in update mode, so a ticked box would say something that does not happen.
+  ${If} $UpdateMode = 1
+    Return
+  ${EndIf}
   ; $1 inner dialog HWND
   ; $2 window DPI
   ; $3 style
@@ -449,6 +482,10 @@ Function un.ConfirmShow ; Add add a `Delete app data` check box
 FunctionEnd
 !define MUI_PAGE_CUSTOMFUNCTION_LEAVE un.ConfirmLeave
 Function un.ConfirmLeave
+  ; Petalock: no box was made under /UPDATE, so there is nothing to read.
+  ${If} $UpdateMode = 1
+    Return
+  ${EndIf}
   SendMessage $DeleteAppDataCheckbox ${BM_GETCHECK} 0 0 $DeleteAppDataCheckboxState
 FunctionEnd
 !define MUI_PAGE_CUSTOMFUNCTION_PRE un.SkipIfPassive
