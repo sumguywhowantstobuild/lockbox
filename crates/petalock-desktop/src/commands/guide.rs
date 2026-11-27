@@ -12,9 +12,8 @@ use crate::error::{GUIDE_NOT_OPENED, ShellResult};
 use crate::os::Launcher;
 use crate::shell::Shell;
 
-/// The address of the guide: its text, checked by the tests to be this one `https` address.
-const GUIDE_ADDRESS: &str =
-    "https://github.com/sumguywhowantstobuild/petalock/blob/main/docs/GUIDE.md";
+/// The address of the guide, on Petalock's own page: its text, checked by the tests to be this one `https` address.
+const GUIDE_ADDRESS: &str = "https://petalock.arielmaningas.com/guide/";
 
 /// The guide's address, parsed once. The launcher is handed this parsed form, as it is for a website of a login.
 pub static GUIDE_URL: LazyLock<tauri::Url> = LazyLock::new(|| {
@@ -82,15 +81,18 @@ mod tests {
         get_ipc_response(window, request).map(|body| body.deserialize().expect("a JSON answer"))
     }
 
-    /// The guide's address is one fixed `https` address on GitHub's own host, and the constant parses to exactly it.
+    /// The guide's address is one fixed `https` address on Petalock's own page, and the constant parses to exactly it.
     #[test]
     fn the_guide_address_is_one_fixed_https_address() {
         assert_eq!(
             GUIDE_URL.as_str(),
-            "https://github.com/sumguywhowantstobuild/petalock/blob/main/docs/GUIDE.md"
+            "https://petalock.arielmaningas.com/guide/"
         );
         assert_eq!(GUIDE_URL.scheme(), "https");
-        assert_eq!(GUIDE_URL.host_str(), Some("github.com"));
+        assert_eq!(GUIDE_URL.host_str(), Some("petalock.arielmaningas.com"));
+        assert_eq!(GUIDE_URL.port(), None);
+        assert_eq!(GUIDE_URL.username(), "");
+        assert_eq!(GUIDE_URL.password(), None);
         assert_eq!(GUIDE_URL.query(), None);
         assert_eq!(GUIDE_URL.fragment(), None);
     }
@@ -113,7 +115,7 @@ mod tests {
         let ts = TestShell::new();
         let app = app_with(&ts);
         let main = main_window(app.handle()).expect("the main window builds");
-        let fixed = "https://github.com/sumguywhowantstobuild/petalock/blob/main/docs/GUIDE.md";
+        let fixed = "https://petalock.arielmaningas.com/guide/";
 
         for entry in ["21g's Help link", "31a's Help row"] {
             let before = ts.launcher.opened().len();
@@ -188,6 +190,7 @@ mod tests {
         );
         let said = refused.unwrap_err().to_string();
         assert!(!said.contains("github"), "{said}");
+        assert!(!said.contains("arielmaningas"), "{said}");
         // Try again, and it opens.
         assert_eq!(invoke(&main, "open_help", json!({})), Ok(Value::Null));
     }

@@ -628,7 +628,7 @@ since, stays; a lock or a new generation stops the rest; a real error comes back
 attaches is kept (the engine's rule). Petalock never empties the trash by itself: `old_trash` only lists.
 
 **Help** (`open_help`; design task 36). The command takes no fields at all. It opens the one fixed `https` address of
-`docs/GUIDE.md` (`commands/guide.rs`) through the `Launcher` trait, in the person's own browser. Petalock itself makes no
+the guide on Petalock's page, `https://petalock.arielmaningas.com/guide/` (`commands/guide.rs`), through the `Launcher` trait, in the person's own browser. Petalock itself makes no
 network call.
 
 **A failed start** (Ask 14, `launch.rs`). A failure of setup ends in `Failed`, which carries nothing, and a failed
