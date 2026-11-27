@@ -1491,3 +1491,836 @@ describe("in a real browser", { skip: driver ? false : "no Edge WebDriver given 
     }
   });
 });
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The deploy workflow (Plan 5, Task 7): .github/workflows/site.yml, read as text. There is no YAML library in the repository,
+// so it is read by indentation, one job and one step at a time, the way release-workflow.test.mjs reads the release workflow.
+// Each check is a function of the workflow's text, run on the real file (it must pass) and on copies with one thing changed
+// (it must fail), so a check that has gone blind shows up here. These tests need no browser and no network, so they stay
+// outside the PETALOCK_SITE_BROWSER gate and the scan job runs them too. What only GitHub can show (the environment's
+// deployment rule, the variable, the token) is checked live in Plan 5 Task 13.
+
+const SITE_WORKFLOW = ".github/workflows/site.yml";
+const wfRead = (path) => readFileSync(join(ROOT, path), "utf8").replace(/\r\n/g, "\n");
+const wfIndent = (line) => line.match(/^ */)[0].length;
+const wfBlank = (line) => line.trim() === "" || line.trim().startsWith("#");
+
+/** The lines under `lines[at]`: every following line indented deeper than it (blank and comment lines included). */
+function wfUnder(lines, at) {
+  const indent = wfIndent(lines[at]);
+  const out = [];
+  for (let i = at + 1; i < lines.length; i++) {
+    if (!wfBlank(lines[i]) && wfIndent(lines[i]) <= indent) break;
+    out.push(lines[i]);
+  }
+  while (out.length > 0 && wfBlank(out.at(-1))) out.pop();
+  return out;
+}
+
+/** The jobs: name -> { lines, text }. Fails when none are found. */
+function wfJobs(text) {
+  const lines = text.split("\n");
+  const at = lines.findIndex((l) => l === "jobs:");
+  assert.ok(at >= 0, "no jobs: section");
+  const block = wfUnder(lines, at);
+  const jobs = new Map();
+  block.forEach((line, i) => {
+    const m = line.match(/^ {2}([a-z][a-z0-9-]*):\s*$/);
+    if (m) {
+      const own = wfUnder(block, i);
+      jobs.set(m[1], { lines: own, text: own.join("\n") });
+    }
+  });
+  assert.ok(jobs.size >= 1, "no jobs found");
+  return jobs;
+}
+
+/** A job's own key at four spaces: its inline value, or null when absent. */
+const wfField = (job, key) => job.lines.find((l) => l.startsWith(`    ${key}:`))?.slice(`    ${key}:`.length).trim() ?? null;
+
+/** A job's permissions as an object, or undefined when it declares none. */
+function wfPermissions(job) {
+  const at = job.lines.findIndex((l) => /^ {4}permissions:/.test(l));
+  if (at < 0) return undefined;
+  const inline = job.lines[at].replace(/^ {4}permissions:/, "").trim();
+  if (inline === "{}") return {};
+  assert.equal(inline, "", `permissions written inline: ${inline}`);
+  const out = {};
+  for (const l of wfUnder(job.lines, at)) {
+    const m = l.match(/^ {6}([a-z-]+): (read|write|none)$/);
+    if (m) out[m[1]] = m[2];
+  }
+  return out;
+}
+
+/** A job's steps: { lines, text }. */
+function wfSteps(job) {
+  const at = job.lines.findIndex((l) => /^ {4}steps:\s*$/.test(l));
+  if (at < 0) return [];
+  const steps = [];
+  for (const line of wfUnder(job.lines, at)) {
+    if (/^ {6}- /.test(line)) steps.push([line]);
+    else if (steps.length > 0) steps.at(-1).push(line);
+  }
+  return steps.map((lines) => ({ lines, text: lines.join("\n") }));
+}
+
+const wfUses = (step) => step.text.match(/^\s*(?:- )?uses: (\S+)/m)?.[1] ?? null;
+const wfStepKey = (step, key) => step.lines.find((l) => new RegExp(`^(?: {6}- | {8})${key}:`).test(l))?.replace(new RegExp(`^(?: {6}- | {8})${key}:`), "").trim() ?? null;
+function wfRun(step) {
+  const at = step.lines.findIndex((l) => /^(?: {6}- | {8})run:/.test(l));
+  if (at < 0) return null;
+  const inline = step.lines[at].replace(/^(?: {6}- | {8})run:/, "").trim();
+  return inline === "|" ? wfUnder(step.lines, at).map((l) => l.trim()).join("\n") : inline;
+}
+/** A key inside a step's `with:` block. */
+const wfWith = (step, key) => step.text.match(new RegExp(`^ {10}${key}: (.*)$`, "m"))?.[1]?.trim() ?? null;
+/** A step's own `env:` block: name -> value text. */
+function wfEnv(step) {
+  const at = step.lines.findIndex((l) => /^ {8}env:\s*$/.test(l));
+  const out = new Map();
+  if (at < 0) return out;
+  for (const l of wfUnder(step.lines, at)) {
+    const m = l.match(/^ {10}([A-Za-z_][A-Za-z0-9_]*): (.*)$/);
+    if (m) out.set(m[1], m[2].trim());
+  }
+  return out;
+}
+
+/** The workflow's text without the lines that are only a comment. */
+const wfCode = (text) => text.split("\n").filter((l) => !l.trim().startsWith("#")).join("\n");
+
+/** One part of the text replaced by another: the part must be there, so a mutation that matches nothing is itself a failure. */
+function wfMutate(text, from, to) {
+  assert.ok(text.includes(from), `the mutation target ${JSON.stringify(from)} is not in the workflow`);
+  return text.replace(from, to);
+}
+
+/**
+ * The check must refuse the workflow with `from` changed to `to`. The change is made first, outside the assertion, so a target
+ * that is not in the file fails the test for that reason; and what the check throws must be one of its own assertions, not
+ * an accident of the changed text (a TypeError from a reader that no longer finds a step).
+ */
+function wfRefuses(check, text, from, to, ...rest) {
+  const changed = wfMutate(text, from, to);
+  assert.notEqual(changed, text, "the mutation changed nothing");
+  assert.throws(() => check(changed, ...rest), { name: "AssertionError" }, `the check passed a workflow with ${JSON.stringify(from)} changed to ${JSON.stringify(to)}`);
+}
+
+/** The `on:` block: the trigger names and the lines under them. */
+function wfTriggers(text) {
+  const lines = text.split("\n");
+  const on = lines.findIndex((l) => l === "on:");
+  assert.ok(on >= 0, "no on: block");
+  const block = wfUnder(lines, on);
+  return { block, triggers: block.filter((l) => /^ {2}[a-z_]+:/.test(l)).map((l) => l.trim().replace(/:.*$/, "")) };
+}
+
+/** The items of the block list under `    <key>:` (four spaces), without quotes. Fails when the list is empty or written inline. */
+function wfList(lines, key) {
+  const at = lines.findIndex((l) => new RegExp(`^ {4}${key}:\\s*$`).test(l));
+  assert.ok(at >= 0, `no block list ${key}:`);
+  const items = wfUnder(lines, at).filter((l) => !wfBlank(l)).map((l) => {
+    const m = l.match(/^ {6}- (.+?)\s*$/);
+    assert.ok(m, `not a list item: ${l}`);
+    return m[1].replace(/^(["'])(.*)\1$/, "$2");
+  });
+  assert.ok(items.length >= 1, `${key} is empty`);
+  return items;
+}
+
+/** The `./x.mjs` files a script reads, and theirs in turn (static imports and `import("./x.mjs")`), as repository paths. */
+function wfImportClosure(entry) {
+  const seen = new Set();
+  const todo = [entry];
+  while (todo.length > 0) {
+    const file = todo.pop();
+    if (seen.has(file)) continue;
+    seen.add(file);
+    const code = readFileSync(join(ROOT, file), "utf8");
+    for (const m of code.matchAll(/(?:\bfrom\s+|\bimport\(\s*)"(\.\/[A-Za-z0-9_.-]+\.mjs)"/g)) todo.push(`scripts/${m[1].slice(2)}`);
+  }
+  return [...seen].sort();
+}
+
+/** The workflow-file facts every check needs; `text` may be a changed copy. */
+const siteYml = () => wfRead(SITE_WORKFLOW);
+
+// ---- 1. runs only from main, in the site environment ----
+
+function checkRunsOnlyFromMain(text) {
+  const { block, triggers } = wfTriggers(text);
+  assert.deepEqual(triggers, ["push"], "the only trigger is a push (no release, dispatch, pull request, schedule or workflow_run)");
+  const push = wfUnder(block, block.findIndex((l) => l === "  push:"));
+  assert.deepEqual(push.filter((l) => /^ {4}[a-z-]+:/.test(l)).map((l) => l.trim()), ["branches:", "paths:"], "a push filtered by branch and by path, nothing else");
+  assert.deepEqual(wfList(push, "branches"), ["main"], "only main");
+  // Every file the page is built from, and the files that make the verify and the deploy: a change to any of them redeploys.
+  // The import closure is read from the scripts themselves, so a new import cannot slip past the list.
+  const closure = [...new Set([...wfImportClosure("scripts/site-build.mjs"), ...wfImportClosure("scripts/site-verify.mjs")])];
+  for (const needed of ["scripts/site-build.mjs", "scripts/site-verify.mjs", "scripts/release-guard.mjs", "scripts/site-picture.mjs"]) assert.ok(closure.includes(needed), `the import walk found ${needed}`);
+  // site-deploy/ holds the uploader's package.json and lockfile: a change to the uploader redeploys too.
+  assert.deepEqual(wfList(push, "paths").sort(), ["site/**", "site-deploy/**", SITE_WORKFLOW, ...closure].sort(), "the paths are site/**, site-deploy/**, this file and everything the build and the verify import");
+
+  const jobs = wfJobs(text);
+  assert.deepEqual([...jobs.keys()].sort(), ["build", "deploy"]);
+  assert.equal(wfField(jobs.get("deploy"), "environment"), "site", "the upload job runs in the site environment");
+  assert.equal(wfField(jobs.get("build"), "environment"), null, "the build job holds no environment, so no secret");
+  assert.equal([...text.matchAll(/^\s+environment:/gm)].length, 1, "one environment in the file");
+  const own = wfField(jobs.get("deploy"), "if");
+  assert.ok(own, "the upload job has its own if:");
+  assert.match(own, /github\.ref == 'refs\/heads\/main'/, "the upload job refuses any ref but main in its own if:");
+}
+
+test("deploy_runs_only_from_main_in_the_site_environment", () => {
+  const text = siteYml();
+  checkRunsOnlyFromMain(text);
+  // planted faults: each must be seen
+  for (const [from, to] of [
+    ["on:\n  push:", "on:\n  workflow_dispatch:\n  push:"],
+    ["on:\n  push:", "on:\n  pull_request:\n  push:"],
+    ["on:\n  push:", "on:\n  release:\n    types: [published]\n  push:"],
+    ["on:\n  push:", "on:\n  schedule:\n    - cron: \"0 3 * * *\"\n  push:"],
+    ["      - main\n", "      - main\n      - plan-5-release\n"],
+    ["    environment: site\n", "    environment: release\n"],
+    ["    environment: site\n", ""],
+    ["github.ref == 'refs/heads/main'", "github.ref != 'refs/heads/other'"],
+    ["      - scripts/site-build.mjs\n", ""],
+    ["      - scripts/site-verify.mjs\n", ""],
+    ["      - scripts/release-guard.mjs\n", ""],
+    ["      - site/**\n", ""],
+    ["      - site-deploy/**\n", ""],
+  ]) wfRefuses(checkRunsOnlyFromMain, text, from, to);
+});
+
+// ---- 2. off until activated ----
+
+/** Evaluates the one shape the upload job's condition may have: `a == 'x' && b == 'y' && ...`, nothing else. */
+function wfEvalIf(condition, context) {
+  const body = condition.match(/^\$\{\{ (.*) \}\}$/)?.[1];
+  assert.ok(body, `not an expression: ${condition}`);
+  const clauses = body.split(" && ").map((clause) => {
+    const m = clause.match(/^([A-Za-z_.]+) == '([^']*)'$/);
+    assert.ok(m, `a condition this test does not read: ${clause}`);
+    return { path: m[1], value: m[2] };
+  });
+  return { paths: clauses.map((c) => `${c.path}=${c.value}`).sort(), result: clauses.every((c) => (context[c.path] ?? "") === c.value) };
+}
+
+function checkOffUntilActivated(text) {
+  const jobs = wfJobs(text);
+  const condition = wfField(jobs.get("deploy"), "if");
+  assert.ok(condition, "the upload job has an if:");
+  const setting = { "github.event_name": "push", "github.ref": "refs/heads/main", "vars.SITE_DEPLOY": "on" };
+  const { paths, result } = wfEvalIf(condition, setting);
+  assert.deepEqual(paths, ["github.event_name=push", "github.ref=refs/heads/main", "vars.SITE_DEPLOY=on"], "the upload runs on a push to main with SITE_DEPLOY on, and on nothing less");
+  assert.equal(result, true, "on, on main: it runs");
+  for (const [what, change] of [
+    ["the variable unset", { "vars.SITE_DEPLOY": undefined }],
+    ["the variable off", { "vars.SITE_DEPLOY": "off" }],
+    ["the variable empty", { "vars.SITE_DEPLOY": "" }],
+    ["another branch", { "github.ref": "refs/heads/plan-5-release" }],
+    ["a pull request's ref", { "github.ref": "refs/pull/1/merge" }],
+    ["a dispatch", { "github.event_name": "workflow_dispatch" }],
+  ]) assert.equal(wfEvalIf(condition, { ...setting, ...change }).result, false, `${what}: nothing is uploaded`);
+  // With the variable unset the build and the tests still run: the build job has no condition of its own and waits for nothing.
+  const build = jobs.get("build");
+  assert.equal(wfField(build, "if"), null, "the build job has no if:");
+  assert.equal(wfField(build, "needs"), null, "the build job waits for nothing");
+  assert.equal([...wfCode(text).matchAll(/SITE_DEPLOY/g)].length, 1, "the variable is named once, in the upload job's if:");
+  // Nothing that uploads is in the build job, whatever the variable says.
+  assert.ok(!/wrangler|pages deploy|CLOUDFLARE|secrets\./i.test(wfCode(build.text)), "the build job holds nothing that uploads");
+}
+
+test("deploy_is_off_until_activated", () => {
+  const text = siteYml();
+  checkOffUntilActivated(text);
+  for (const [from, to] of [
+    ["vars.SITE_DEPLOY == 'on'", "vars.SITE_DEPLOY != 'off'"],
+    ["vars.SITE_DEPLOY == 'on'", "vars.SITE_DEPLOY == 'off'"],
+    [" && vars.SITE_DEPLOY == 'on'", ""],
+    [" && vars.SITE_DEPLOY == 'on'", " || vars.SITE_DEPLOY == 'on'"],
+    ["github.ref == 'refs/heads/main' && ", ""],
+    [" && github.event_name == 'push'", ""],
+    [" && github.event_name == 'push'", " || github.event_name == 'push'"],
+  ]) wfRefuses(checkOffUntilActivated, text, from, to);
+  // a build job gated on the variable would stop the tests from running while the deploy is off
+  wfRefuses(checkOffUntilActivated, text, "  build:\n", "  build:\n    if: ${{ vars.SITE_DEPLOY == 'on' }}\n");
+  wfRefuses(checkOffUntilActivated, text, "  build:\n", "  build:\n    needs: deploy\n");
+});
+
+// ---- 3. waits for the site tests ----
+
+function checkWaitsForTheTests(text) {
+  const jobs = wfJobs(text);
+  const build = jobs.get("build");
+  const deploy = jobs.get("deploy");
+  assert.equal(wfField(deploy, "needs"), "build", "the upload job waits for the job that built and tested");
+  assert.equal(wfField(build, "runs-on"), "windows-2025-vs2026", "the job with the browser tests runs where CI runs them");
+  assert.equal(wfField(build, "continue-on-error"), null);
+  assert.equal(wfField(deploy, "continue-on-error"), null);
+  const steps = wfSteps(build);
+  assert.ok(steps.length >= 6, `the build job's steps were found (${String(steps.length)})`);
+  const at = (predicate, what) => {
+    const i = steps.findIndex(predicate);
+    assert.ok(i >= 0, `the build job has ${what}`);
+    return i;
+  };
+  const axe = at((s) => wfRun(s) === "npm ci --ignore-scripts" && wfStepKey(s, "working-directory") === "ui", "the UI install that brings axe-core");
+  const verify = at((s) => /^node scripts\/site-verify\.mjs\b/.test(wfRun(s) ?? ""), "the verify step");
+  const make = at((s) => /^node scripts\/site-build\.mjs\b/.test(wfRun(s) ?? ""), "the build step");
+  const test = at((s) => wfRun(s) === "node --test scripts/site.test.mjs", "the site tests");
+  const upload = at((s) => wfUses(s)?.startsWith("actions/upload-artifact@") && wfWith(s, "name") === "site", "the artifact upload of the built site");
+  const tools = at((s) => wfUses(s)?.startsWith("actions/upload-artifact@") && wfWith(s, "name") === "site-deploy-tools", "the artifact upload of the uploader's package files");
+  assert.ok(axe < test && verify < make && make < test && test < upload, "install, verify, build, test, then keep the folder");
+  // The uploader's package files are kept straight after the checkout, before any step that runs repository code (setup-node, npm,
+  // the scripts, the tests): nothing that runs later can rewrite the lockfile the deploy job installs from.
+  const checkout = at((s) => wfUses(s)?.startsWith("actions/checkout@"), "the checkout");
+  assert.equal(tools, checkout + 1, "the uploader's package files are kept in the step right after the checkout");
+  assert.ok(tools < axe && tools < verify, "and before anything runs");
+  assert.equal(wfEnv(steps[test]).get("PETALOCK_SITE_BROWSER"), '"1"', "the browser tests are required to run, not skipped");
+  for (const i of [tools, verify, make, test, upload]) {
+    assert.equal(wfStepKey(steps[i], "if"), null, "no step that decides what is deployed can be skipped");
+    assert.equal(wfStepKey(steps[i], "continue-on-error"), null, "no step that decides what is deployed may fail quietly");
+  }
+  // What is kept is the folder the build step wrote, and the upload job takes that artifact, never a rebuild. (The browser
+  // tests run on the test suite's own fixture builds, not on this folder: the check says only what is true.)
+  const out = /--out (\S+)/.exec(wfRun(steps[make]))?.[1];
+  assert.ok(out, "the build names its output folder");
+  assert.equal(wfWith(steps[upload], "path"), out, "the folder that is kept is the folder the build step wrote");
+  assert.equal(wfWith(steps[upload], "if-no-files-found"), "error");
+  assert.equal(wfWith(steps[tools], "path"), "site-deploy", "the uploader's package files are kept from their own folder");
+  assert.equal(wfWith(steps[tools], "if-no-files-found"), "error");
+  const deploySteps = wfSteps(deploy);
+  const downloads = deploySteps.filter((s) => wfUses(s)?.startsWith("actions/download-artifact@"));
+  assert.deepEqual(downloads.map((s) => wfWith(s, "name")).sort(), ["site", "site-deploy-tools"], "it downloads the two artifacts the build job kept");
+  assert.ok(!/actions\/checkout@/.test(deploy.text), "the upload job checks out nothing: no repository code runs beside the token");
+  assert.ok(!/site-build|site-verify|site\.test/.test(wfCode(deploy.text)), "the upload job never rebuilds or re-tests");
+}
+
+test("deploy_waits_for_the_site_tests", () => {
+  const text = siteYml();
+  checkWaitsForTheTests(text);
+  for (const [from, to] of [
+    ["    needs: build\n", ""],
+    ["    needs: build\n", "    needs: []\n"],
+    ["run: node --test scripts/site.test.mjs", "run: node --test scripts/release-guard.test.mjs"],
+    ['PETALOCK_SITE_BROWSER: "1"', 'PETALOCK_SITE_BROWSER: "0"'],
+    ["    runs-on: windows-2025-vs2026", "    runs-on: ubuntu-24.04"],
+    ["--out target/site", "--out target/other"],
+    ["          name: site\n          path: target/site", "          name: site\n          path: site"],
+  ]) wfRefuses(checkWaitsForTheTests, text, from, to);
+  // the uploader's package files kept late (after the code that runs in the job), as the first version of this workflow did
+  {
+    const keep = text.match(/      # The uploader's package\.json and lockfile exactly as checked out[\s\S]*?          if-no-files-found: error\n/)?.[0];
+    assert.ok(keep, "the step that keeps the package files was found");
+    const step = keep.split("\n").slice(2).join("\n"); // without its two comment lines
+    const after = "          path: target/site\n          retention-days: 7\n          if-no-files-found: error\n";
+    const late = wfMutate(wfMutate(text, keep, ""), after, `${after}${step}`);
+    assert.throws(() => checkWaitsForTheTests(late), { name: "AssertionError", message: /right after the checkout/ });
+  }
+  // the package files' upload may not be skipped or fail quietly either
+  wfRefuses(checkWaitsForTheTests, text, "      - name: Keep the uploader's package files for the upload\n", "      - name: Keep the uploader's package files for the upload\n        if: ${{ always() }}\n");
+  wfRefuses(checkWaitsForTheTests, text, "          name: site-deploy-tools\n          path: site-deploy\n          retention-days: 7\n          if-no-files-found: error", "          name: site-deploy-tools\n          path: site-deploy\n          retention-days: 7\n          if-no-files-found: ignore");
+  // a tests step that may fail quietly, or be skipped, is refused
+  wfRefuses(checkWaitsForTheTests, text, "      - name: The site in a real browser\n", "      - name: The site in a real browser\n        continue-on-error: true\n");
+  wfRefuses(checkWaitsForTheTests, text, "      - name: The site in a real browser\n", "      - name: The site in a real browser\n        if: ${{ always() }}\n");
+  // a second build in the upload job
+  wfRefuses(checkWaitsForTheTests, text, "        run: node \"$RUNNER_TEMP/wrangler", "        run: node scripts/site-build.mjs && node \"$RUNNER_TEMP/wrangler");
+});
+
+// ---- 4. only the upload step sees the token ----
+
+function checkTokenOnlyInTheUploadStep(text) {
+  const code = wfCode(text);
+  assert.equal([...code.matchAll(/\bsecrets\b/g)].length, 1, "the word secrets appears once in the file's code");
+  assert.equal([...code.matchAll(/secrets\.CLOUDFLARE_API_TOKEN/g)].length, 1, "and it is the Cloudflare token");
+  assert.equal([...code.matchAll(/CLOUDFLARE_API_TOKEN/g)].length, 2, "the token's name appears twice: the variable and the secret it is read from, in one line");
+  const jobs = wfJobs(text);
+  const holders = [];
+  for (const [jobName, job] of jobs) {
+    assert.ok(!/^ {4}env:/m.test(job.text), `${jobName}: no job-level env (it would reach every step)`);
+    for (const step of wfSteps(job)) if (/secrets\./.test(step.text)) holders.push({ jobName, step });
+  }
+  assert.equal(holders.length, 1, "one step holds the secret");
+  const { jobName, step } = holders[0];
+  assert.equal(jobName, "deploy");
+  assert.equal(wfEnv(step).get("CLOUDFLARE_API_TOKEN"), "${{ secrets.CLOUDFLARE_API_TOKEN }}", "in its env, under the name Wrangler reads");
+  assert.ok(!/^ {10}[A-Za-z-]+: .*secrets\./m.test(step.text.replace(/^ {10}CLOUDFLARE_API_TOKEN: .*$/m, "")), "nowhere else in the step, a with: included");
+  assert.ok(!/^env:/m.test(text), "no workflow-level env");
+  assert.ok(/pages deploy/.test(wfRun(step) ?? ""), "the step that holds the token is the one that uploads");
+  assert.ok(!/TOKEN|\$\{\{/.test(wfRun(step)), "the token's name is not in the command, and nothing is interpolated into it");
+  // The account id is not a secret: a variable.
+  assert.match(code, /CLOUDFLARE_ACCOUNT_ID: \$\{\{ vars\.CLOUDFLARE_ACCOUNT_ID \}\}/);
+  assert.ok(!/CLOUDFLARE_ACCOUNT_ID.*secrets\./.test(code));
+  // No script of the repository is run with an expression pasted into it, in any job.
+  for (const job of jobs.values()) for (const s of wfSteps(job)) assert.ok(!/\$\{\{/.test(wfRun(s) ?? ""), `a run: with an expression in it: ${wfRun(s)}`);
+  // The step is the last one: nothing runs after it with the token still around (a step's env ends with the step, but a later step is later code to review).
+  assert.equal(wfSteps(jobs.get("deploy")).at(-1).text, step.text, "the upload is the job's last step");
+}
+
+test("only_the_upload_step_sees_the_token", () => {
+  const text = siteYml();
+  assert.doesNotThrow(() => checkTokenOnlyInTheUploadStep(text));
+  const tokenLine = "          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}\n";
+  for (const [what, from, to] of [
+    ["at job level", "    environment: site\n", `    environment: site\n    env:\n      ${tokenLine.trimStart()}`],
+    ["at workflow level", "permissions: {}\n", `permissions: {}\n\nenv:\n  CLOUDFLARE_API_TOKEN: \${{ secrets.CLOUDFLARE_API_TOKEN }}\n`],
+    ["in a second step", "      - name: Install Wrangler", `      - name: Look\n        env:\n${tokenLine}        run: echo hi\n      - name: Install Wrangler`],
+    ["in the install step's env", "      - name: Install Wrangler from the lockfile\n", `      - name: Install Wrangler from the lockfile\n        env:\n${tokenLine}`],
+    ["in a with:", "      - name: Upload the site to Cloudflare Pages\n", `      - name: Upload the site to Cloudflare Pages\n        with:\n          apiToken: \${{ secrets.CLOUDFLARE_API_TOKEN }}\n`],
+    ["as a second secret", tokenLine, `${tokenLine}          OTHER: \${{ secrets.OTHER }}\n`],
+    ["pasted into the command", "pages deploy", "pages deploy --token ${{ secrets.CLOUDFLARE_API_TOKEN }}"],
+    ["under another name", "          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}\n", "          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}\n"],
+    ["as the account id", "CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}", "CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}"],
+    ["with an expression in a run:", "      - name: Install Wrangler from the lockfile\n", "      - name: Install Wrangler from the lockfile\n        run: echo ${{ github.ref_name }}\n"],
+  ]) {
+    assert.ok(what);
+    wfRefuses(checkTokenOnlyInTheUploadStep, text, from, to);
+  }
+  // the file really has the one secret, so a check that finds none is not passing on an empty file
+  assert.equal([...text.matchAll(/secrets\.CLOUDFLARE_API_TOKEN/g)].length, 1);
+});
+
+// ---- 5. permissions ----
+
+function checkPermissions(text) {
+  assert.match(text, /^permissions: \{\}$/m, "the workflow's default permissions are none");
+  const jobs = wfJobs(text);
+  assert.deepEqual([...jobs.keys()].sort(), ["build", "deploy"]);
+  assert.deepEqual(wfPermissions(jobs.get("build")), { contents: "read", attestations: "read" }, "the build job reads the repository and the attestations of the release it checks");
+  assert.deepEqual(wfPermissions(jobs.get("deploy")), {}, "the upload job reads nothing of the repository: it has no checkout");
+  const code = wfCode(text);
+  assert.ok(!/:\s*write\b/.test(code), "no write permission anywhere");
+  assert.ok(!/id-token/.test(code), "no id-token anywhere");
+  assert.equal([...code.matchAll(/^ +permissions:/gm)].length, 2, "two permissions blocks: the jobs'");
+  assert.ok(!/\bpackages:|\bactions: |\bdeployments:|\bpages:|\bcontents: write/.test(code));
+}
+
+test("deploy_job_permissions_are_read_only", () => {
+  const text = siteYml();
+  checkPermissions(text);
+  for (const [from, to] of [
+    ["permissions: {}\n", "permissions:\n  contents: read\n"],
+    ["permissions: {}\n", ""],
+    ["      contents: read\n", "      contents: write\n"],
+    ["      attestations: read\n", "      attestations: write\n"],
+    ["      attestations: read\n", "      attestations: read\n      id-token: write\n"],
+    ["      attestations: read\n", "      attestations: read\n      id-token: read\n"],
+    ["    permissions: {}\n", "    permissions:\n      contents: read\n"],
+    ["    permissions: {}\n", "    permissions:\n      deployments: write\n"],
+    ["    permissions: {}\n", ""],
+  ]) wfRefuses(checkPermissions, text, from, to);
+});
+
+// ---- 6. every action pinned ----
+
+function wfUsesLines(text) {
+  return [...text.matchAll(/^\s*(?:-\s+)?uses:\s*(\S+)(?:\s+(#.*))?$/gm)].map((m) => ({ action: m[1], comment: m[2] ?? "" }));
+}
+
+function checkPinned(text, known) {
+  const uses = wfUsesLines(text);
+  assert.ok(uses.length >= 5, `only ${String(uses.length)} uses: lines found`);
+  assert.equal(uses.length, [...text.matchAll(/^\s*(?:-\s+)?uses:/gm)].length, "every uses: line was read");
+  for (const { action, comment } of uses) {
+    assert.match(action, /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+@[0-9a-f]{40}$/, `${action} is not pinned by a full commit hash`);
+    assert.match(comment, /^# v\d+(\.\d+){0,2}$/, `${action} has no version comment`);
+    // the same pin and version the other workflows use for the same action: nothing new and unreviewed
+    assert.ok(known.includes(`${action} ${comment}`), `${action} ${comment} is not a pin the other workflows use`);
+  }
+}
+
+test("every_action_is_pinned_by_sha", () => {
+  const text = siteYml();
+  const known = [".github/workflows/ci.yml", ".github/workflows/release.yml", ".github/workflows/build-installer.yml"].flatMap((f) => wfUsesLines(wfRead(f)).map((u) => `${u.action} ${u.comment}`));
+  assert.ok(known.length >= 25, "the other workflows' pins were read");
+  checkPinned(text, known);
+  const sha = (text.match(/uses: actions\/checkout@([0-9a-f]{40})/) ?? [])[1];
+  assert.ok(sha, "the checkout is in the file");
+  for (const [from, to] of [
+    [`actions/checkout@${sha} # v7`, "actions/checkout@v7"],
+    [`actions/checkout@${sha} # v7`, `actions/checkout@${sha.slice(0, 39)} # v7`],
+    [`actions/checkout@${sha} # v7`, `actions/checkout@${sha}`],
+    [`actions/checkout@${sha} # v7`, `actions/checkout@${sha} # latest`],
+    [`actions/checkout@${sha} # v7`, `actions/checkout@${"0".repeat(40)} # v7`],
+    [`actions/checkout@${sha} # v7`, `evil/checkout@${sha} # v7`],
+  ]) wfRefuses(checkPinned, text, from, to, known);
+  // an action the other workflows do not use, even pinned and commented, is refused
+  assert.throws(() => checkPinned(`${text}\n      - uses: cloudflare/wrangler-action@${sha} # v4.1.3\n`, known), { name: "AssertionError", message: /not a pin the other workflows use/ });
+});
+
+// ---- 7. the installer's attestation ----
+
+/** The workflow's side: the verify runs first in the build job, cannot be skipped, and holds the token it needs. */
+function checkVerifyStep(text) {
+  const build = wfJobs(text).get("build");
+  const steps = wfSteps(build);
+  const verify = steps.findIndex((s) => /^node scripts\/site-verify\.mjs\b/.test(wfRun(s) ?? ""));
+  const make = steps.findIndex((s) => /^node scripts\/site-build\.mjs\b/.test(wfRun(s) ?? ""));
+  assert.ok(verify >= 0 && make >= 0, "the verify and the build steps were found");
+  assert.ok(verify < make, "the installer is verified before the site is built");
+  assert.ok(steps.findIndex((s) => wfUses(s)?.startsWith("actions/checkout@")) < verify, "from the checked-out release choice");
+  assert.equal(wfStepKey(steps[verify], "if"), null, "the verify cannot be skipped");
+  assert.equal(wfStepKey(steps[verify], "continue-on-error"), null, "the verify cannot fail quietly");
+  assert.equal(wfStepKey(steps[verify], "shell"), "bash", "bash expands the folder below the same way on every runner");
+  assert.equal(wfEnv(steps[verify]).get("GH_TOKEN"), "${{ github.token }}", "gh reads the run's own token, nothing else");
+  assert.match(wfRun(steps[verify]), / --dir "\$RUNNER_TEMP\/[A-Za-z0-9-]+"$/, "the installer is downloaded into the runner's temp folder, outside the checkout");
+  assert.ok(!/\bsite-verify\b.*(?:\|\||;|&&)/.test(wfRun(steps[verify])), "nothing after the verify in the same line can hide its status");
+  // The build hashes its own download of the installer; it must be handed the digest of the file that was verified, from the
+  // folder the verify wrote it to, and refuses when they differ (the swap between the two downloads, Task 7 review finding 1).
+  const dir = /--dir "(\$RUNNER_TEMP\/[A-Za-z0-9-]+)"$/.exec(wfRun(steps[verify]))?.[1];
+  assert.ok(dir, "the verify's folder was read");
+  assert.equal(wfStepKey(steps[make], "shell"), "bash");
+  assert.equal(wfStepKey(steps[make], "if"), null);
+  assert.ok(wfRun(steps[make]).endsWith(` --verified-from "${dir}"`), `the build is told to take the verified digest from ${dir}: ${wfRun(steps[make])}`);
+  assert.equal(wfPermissions(build).attestations, "read", "the token may read the attestations");
+  // the identity is written once, in the build's code, never a second time in the workflow
+  assert.ok(!/release\.yml|cert-identity|source-ref|signer-workflow/.test(wfCode(text)), "the pins are not spelled in the workflow");
+}
+
+/** What the verify script is given by a test: a fake download and a fake `gh`. */
+function fakeTools({ status = 200, bytes = INSTALLER_BYTES, gh = { status: 0 } } = {}) {
+  const fetched = [];
+  const ran = [];
+  return {
+    fetched,
+    ran,
+    fetch: async (url, init = {}) => {
+      fetched.push({ url: String(url), init });
+      return new Response(status === 200 ? bytes : "no", { status });
+    },
+    run: (command, args, options) => {
+      ran.push({ command, args, options });
+      return gh;
+    },
+  };
+}
+
+const verifyLib = () => import("./site-verify.mjs");
+
+/** The pins the page shows beside its own check, as the words a program is given (the quotes are the shell's, not data). */
+const PAGE_PINS = ["--repo", REPO, "--cert-identity", IDENTITY, "--source-ref", "refs/heads/main"];
+
+async function runVerify(releaseText, tools, { dir } = {}) {
+  const { verifyInstaller } = await verifyLib();
+  const where = siteWith(releaseText);
+  const target = dir ?? join(where.root, "installer");
+  return { where, target, outcome: await verifyInstaller({ siteDir: where.siteDir, dir: target, fetch: tools.fetch, run: tools.run }) };
+}
+
+async function verifyRefuses(releaseText, tools, message) {
+  const { SiteBuildRefused } = await lib();
+  await assert.rejects(
+    () => runVerify(releaseText, tools),
+    (error) => {
+      assert.ok(error instanceof SiteBuildRefused, `expected a SiteBuildRefused, got ${String(error?.stack ?? error)}`);
+      if (message) assert.match(error.message, message);
+      return true;
+    },
+  );
+}
+
+test("deploy_verifies_the_installer_attestation", async () => {
+  // the workflow runs the verify before the build, and nothing can skip it
+  const text = siteYml();
+  checkVerifyStep(text);
+  for (const [from, to] of [
+    ["      - name: Verify the offered installer", "      - name: Verify the offered installer\n        if: ${{ false }}"],
+    ["      - name: Verify the offered installer", "      - name: Verify the offered installer\n        continue-on-error: true"],
+    ["          GH_TOKEN: ${{ github.token }}\n", ""],
+    ["      attestations: read\n", ""],
+    [' --verified-from "$RUNNER_TEMP/installer"', ""],
+    [' --verified-from "$RUNNER_TEMP/installer"', ' --verified-from "$RUNNER_TEMP/other"'],
+  ]) wfRefuses(checkVerifyStep, text, from, to);
+  assert.throws(() => checkVerifyStep(`${text}\n        run: gh attestation verify x --cert-identity y\n`), { name: "AssertionError", message: /pins are not spelled/ });
+  {
+    // swapping the two steps: the build first, the verify after
+    const lines = text.split("\n");
+    const v = lines.findIndex((l) => l.includes("node scripts/site-verify.mjs"));
+    const b = lines.findIndex((l) => l.includes("node scripts/site-build.mjs"));
+    assert.ok(v > 0 && b > v);
+    const swapped = lines.slice();
+    swapped[v] = lines[b];
+    swapped[b] = lines[v];
+    assert.throws(() => checkVerifyStep(swapped.join("\n")), { name: "AssertionError", message: /verified before the site is built/ });
+  }
+
+  // the script: the one public address, the pins the page shows, a refusal on any failure
+  const { attestationLine } = await lib();
+  const shown = attestationLine(INSTALLER);
+  const pinsAsShown = PAGE_PINS.map((word) => (word === IDENTITY ? `"${word}"` : word)).join(" ");
+  assert.ok(shown.endsWith(` ${pinsAsShown}`), `the pins this check holds are the ones the page shows: ${shown}`);
+  const { ATTEST_ARGS } = await lib();
+  assert.deepEqual([...ATTEST_ARGS], PAGE_PINS, "the build's own pins are the words the verify passes");
+
+  const good = fakeTools();
+  const { target, outcome } = await runVerify(choose(TAG), good);
+  assert.equal(outcome.state, "verified");
+  assert.deepEqual(good.fetched.map((c) => c.url), [`${GITHUB}/releases/download/${TAG}/${INSTALLER}`], "one download, from the public tag-and-file-name address");
+  assert.ok(!Object.keys(good.fetched[0].init.headers ?? {}).some((h) => h.toLowerCase() === "authorization"), "no credentials go with the download");
+  assert.equal(good.ran.length, 1);
+  assert.equal(good.ran[0].command, "gh");
+  assert.deepEqual(good.ran[0].args, ["attestation", "verify", join(target, INSTALLER), ...PAGE_PINS], "gh attestation verify on the downloaded file with the page's pins");
+  assert.ok(!("shell" in (good.ran[0].options ?? {})) || good.ran[0].options.shell === false, "no shell between the file name and gh");
+  assert.deepEqual(readFileSync(join(target, INSTALLER)), INSTALLER_BYTES, "gh is given exactly the bytes that came");
+  const { VERIFIED_FILE } = await lib();
+  assert.equal(readFileSync(join(target, VERIFIED_FILE), "utf8"), `${sha256(INSTALLER_BYTES)}\n`, "the digest of the verified bytes is written for the build to compare with");
+  // a failed check leaves no digest behind for a later step to take as verified
+  const failing = fakeTools({ gh: { status: 1 } });
+  const failedWhere = siteWith(choose(TAG));
+  await assert.rejects(async () => (await verifyLib()).verifyInstaller({ siteDir: failedWhere.siteDir, dir: join(failedWhere.root, "installer"), fetch: failing.fetch, run: failing.run }));
+  assert.equal(existsSync(join(failedWhere.root, "installer", VERIFIED_FILE)), false, "no digest is written unless gh accepted the file");
+  // it checks the file for the tag the choice names, not another
+  const second = fakeTools({ bytes: INSTALLER2_BYTES });
+  await runVerify(choose(TAG2), second);
+  assert.deepEqual(second.fetched.map((c) => c.url), [`${GITHUB}/releases/download/${TAG2}/${INSTALLER2}`]);
+  assert.match(second.ran[0].args[2], new RegExp(`${INSTALLER2.replace(/\./g, "\\.")}$`));
+
+  // a failing verify refuses, whatever the status looks like
+  for (const gh of [{ status: 1 }, { status: 2 }, { status: null, signal: "SIGTERM" }, { error: new Error("spawn gh ENOENT"), status: null }, { status: undefined }, {}]) {
+    await verifyRefuses(choose(TAG), fakeTools({ gh }), /attestation|gh/i);
+  }
+  // no installer to check is not a pass
+  await verifyRefuses(choose(TAG), fakeTools({ status: 404 }), /404/);
+  await verifyRefuses(choose(TAG), fakeTools({ status: 500 }), /500/);
+  await verifyRefuses(choose(TAG), fakeTools({ bytes: Buffer.alloc(0) }), /empty/);
+  const none = fakeTools({ status: 404 });
+  await assert.rejects(() => runVerify(choose(TAG), none));
+  assert.equal(none.ran.length, 0, "gh is not run when there is nothing to check");
+
+  // the skip is only for the explicit null (as the build's own Coming soon state is)
+  const soon = fakeTools();
+  const skipped = await runVerify('{"tag": null}\n', soon);
+  assert.equal(skipped.outcome.state, "skipped");
+  assert.equal(soon.fetched.length + soon.ran.length, 0, "nothing is fetched or run when no release is offered");
+  const { SiteBuildRefused } = await lib();
+  for (const bad of [null, "", "{}", "{}\n", '{"tag": "null"}', '{"tag": ""}', '{"tag": false}', '{"tag": 0}', '{"tag": null, "x": 1}', '{"tag": nul}', "null", "[]", '{"tag": [null]}', '{"Tag": null}', '{"tag": "v1.2"}', '{"tag": "v0.1.0-rc.1"}']) {
+    const tools = fakeTools();
+    await assert.rejects(
+      () => runVerify(bad, tools),
+      (error) => {
+        assert.ok(error instanceof SiteBuildRefused, `${JSON.stringify(bad)}: refused, not skipped (${String(error?.stack ?? error)})`);
+        return true;
+      },
+      `${JSON.stringify(bad)} must not skip the verify`,
+    );
+    assert.equal(tools.ran.length + tools.fetched.length, 0, `${JSON.stringify(bad)}: nothing fetched or run`);
+  }
+  // a file already in the folder is never overwritten or trusted
+  const again = fakeTools();
+  const where = siteWith(choose(TAG));
+  const dir = join(where.root, "installer");
+  mkdirSync(dir);
+  writeFileSync(join(dir, INSTALLER), "MU-planted");
+  await assert.rejects(async () => (await verifyLib()).verifyInstaller({ siteDir: where.siteDir, dir, fetch: again.fetch, run: again.run }));
+  assert.equal(again.ran.length, 0);
+});
+
+test("the_build_refuses_an_installer_that_is_not_the_one_verified", async () => {
+  const { buildSite, SiteBuildRefused, VERIFIED_FILE } = await lib();
+  const { verifyInstaller } = await verifyLib();
+  const SWAPPED = Buffer.concat([Buffer.from("MZ MU-swapped installer "), randomBytes(2048)]);
+
+  /** The verify step: the real function, with a fake download of `bytes` and a `gh` that accepts; returns the folder it wrote. */
+  async function verified(bytes) {
+    const tools = fakeTools({ bytes });
+    const where = siteWith(choose(TAG));
+    const dir = join(where.root, "installer");
+    await verifyInstaller({ siteDir: where.siteDir, dir, fetch: tools.fetch, run: tools.run });
+    return dir;
+  }
+  /** The build step, handed the verified folder (or nothing), against a GitHub that serves `bytes`. */
+  const buildWith = (releaseText, bytes, verifiedFrom) => {
+    const where = siteWith(releaseText);
+    return { where, run: () => buildSite({ siteDir: where.siteDir, outDir: where.outDir, fetch: fakeGithub(() => {}, { bytes }).fetch, verifiedFrom }) };
+  };
+  const refusedBuild = async (attempt, message) => {
+    await assert.rejects(attempt.run, (error) => {
+      assert.ok(error instanceof SiteBuildRefused, `expected a SiteBuildRefused, got ${String(error?.stack ?? error)}`);
+      assert.match(error.message, message);
+      return true;
+    });
+    assert.equal(existsSync(attempt.where.outDir), false, "a refused build leaves no output");
+    assert.deepEqual(readdirSync(attempt.where.root).sort(), ["site"], "and nothing beside the site");
+  };
+
+  // the same bytes in both downloads: built, with the fingerprint of the verified file
+  const same = buildWith(choose(TAG), INSTALLER_BYTES, await verified(INSTALLER_BYTES));
+  const result = await same.run();
+  assert.equal(result.release.fingerprint, sha256(INSTALLER_BYTES));
+
+  // THE SWAP: the file that was verified is not the file the build then downloads (and whose sidecar agrees with it). The build
+  // alone cannot tell (the control), the verified digest makes it refuse, and nothing is written.
+  const control = buildWith(choose(TAG), SWAPPED, undefined);
+  assert.equal((await control.run()).release.fingerprint, sha256(SWAPPED), "without the verified digest the swapped pair would be accepted");
+  const swapped = buildWith(choose(TAG), SWAPPED, await verified(INSTALLER_BYTES));
+  await refusedBuild(swapped, new RegExp(`${sha256(SWAPPED)}.*${sha256(INSTALLER_BYTES)}|not the file that was verified`, "s"));
+
+  // no digest, or one that is not exactly a digest: refused, never taken as "nothing to compare"
+  const folder = (text) => {
+    const dir = tempDir();
+    if (text !== null) writeFileSync(join(dir, VERIFIED_FILE), text);
+    return dir;
+  };
+  const good = sha256(INSTALLER_BYTES);
+  for (const bad of [null, "", "\n", good.slice(1), `${good}0`, good.toUpperCase(), `sha256:${good}`, `${good}  ${INSTALLER}`, `${good}\n${good}\n`, ` ${good}`, `${good}\r\n`, "0".repeat(64)]) {
+    await refusedBuild(buildWith(choose(TAG), INSTALLER_BYTES, folder(bad)), /verif/i);
+  }
+  await refusedBuild(buildWith(choose(TAG), INSTALLER_BYTES, join(tempDir(), "no-such-folder")), /verif/i);
+  assert.equal((await buildWith(choose(TAG), INSTALLER_BYTES, folder(`${good}\n`)).run()).release.fingerprint, good, "the exact form the verify writes is accepted");
+  assert.equal((await buildWith(choose(TAG), INSTALLER_BYTES, folder(good)).run()).release.fingerprint, good, "a digest with no final newline too");
+
+  // Coming soon offers no installer, so there is nothing that was verified: the folder is not read
+  assert.equal((await buildWith('{"tag": null}\n', INSTALLER_BYTES, join(tempDir(), "no-such-folder")).run()).state, "soon");
+
+  // the command takes the flag (a flag with no value is not understood)
+  const soon = siteWith('{"tag": null}\n');
+  const command = (extra) => spawnSync(process.execPath, [BUILD, "--site", soon.siteDir, "--out", soon.outDir, ...extra], { encoding: "utf8", windowsHide: true, env: { ...process.env, GITHUB_TOKEN: "" } });
+  assert.equal(command(["--verified-from"]).status, 2);
+  assert.equal(command(["--verified-from", join(tempDir(), "x")]).status, 0);
+});
+
+test("the_verify_follows_redirects_only_to_githubs_release_storage", async () => {
+  const attempt = async (change, message) => {
+    const github = fakeGithub(change);
+    const tools = fakeTools();
+    const job = runVerify(choose(TAG), { fetch: github.fetch, run: tools.run });
+    if (message === null) return { outcome: (await job).outcome, github, tools };
+    await assert.rejects(job, (error) => {
+      assert.match(error.message, message);
+      return true;
+    });
+    assert.equal(tools.ran.length, 0, "gh is not run on a file that did not come from GitHub's storage");
+    return { github, tools };
+  };
+  // as GitHub answers: the public address, a 302 to the release-storage host, nothing else asked for
+  const ok = await attempt(() => {}, null);
+  assert.equal(ok.outcome.state, "verified");
+  assert.deepEqual(ok.github.calls, [`${GITHUB}/releases/download/${TAG}/${INSTALLER}`, `https://release-assets.githubusercontent.com/MU/public/${INSTALLER}`]);
+  assert.equal(ok.tools.ran.length, 1);
+  for (const storage of ["https://evil.invalid/MU", "http://release-assets.githubusercontent.com/MU", "https://release-assets.githubusercontent.com:8443/MU", "https://user@release-assets.githubusercontent.com/MU", "https://release-assets.githubusercontent.com.evil.invalid/MU", "https://api.github.com/MU"]) {
+    const bad = await attempt((s) => { s.storage = storage; }, /storage|redirect|address/i);
+    assert.deepEqual(bad.github.calls, [`${GITHUB}/releases/download/${TAG}/${INSTALLER}`], `${storage}: nothing but the public address was fetched`);
+  }
+  await attempt((s) => { s.storageStatus = 500; }, /500/);
+});
+
+test("the_verify_command_runs_and_refuses_as_the_function_does", () => {
+  const SCRIPT = join(ROOT, "scripts", "site-verify.mjs");
+  const run = (args) => spawnSync(process.execPath, [SCRIPT, ...args], { encoding: "utf8", windowsHide: true, env: { ...process.env, GH_TOKEN: "", GITHUB_TOKEN: "" } });
+  const soon = siteWith('{"tag": null}\n');
+  const skipped = run(["--site", soon.siteDir, "--dir", join(soon.root, "installer")]);
+  assert.equal(skipped.status, 0, skipped.stderr);
+  assert.match(skipped.stdout, /no installer|nothing to verify/i);
+  assert.equal(existsSync(join(soon.root, "installer")), false, "nothing is downloaded when no release is offered");
+  const broken = siteWith("{}");
+  const refusedRun = run(["--site", broken.siteDir, "--dir", join(broken.root, "installer")]);
+  assert.equal(refusedRun.status, 1);
+  assert.match(refusedRun.stderr, /release\.json/);
+  assert.equal(run(["--nonsense"]).status, 2);
+  assert.equal(run(["--site", soon.siteDir]).status, 2, "the folder for the download is required");
+  assert.equal(run(["--dir"]).status, 2);
+});
+
+// ---- 8. the uploader ----
+
+/**
+ * The uploader's own package folder: kept by the build job (no secret) and installed from by the deploy job. It is outside
+ * site/ because everything in site/ is a candidate for what is published (the build copies named files only, but a folder that
+ * holds package files does not belong beside the pages); it is not under a dot folder because the artifact upload leaves
+ * hidden folders out by default; and its lockfile is read by the dependency scan (scripts/scan.mjs).
+ */
+const UPLOADER_DIR = "site-deploy";
+
+/** The package files: exactly one dependency at one exact version, and a lockfile that pins it and everything under it by hash. */
+function checkUploaderPackage(packageText, lockText, files) {
+  assert.deepEqual([...files].sort(), ["package-lock.json", "package.json"], "the folder holds the two files, nothing that could change where npm installs from (no .npmrc)");
+  const pkg = JSON.parse(packageText);
+  const lock = JSON.parse(lockText);
+  assert.deepEqual(Object.keys(pkg).sort(), ["dependencies", "description", "name", "private", "version"], "no scripts, no overrides, no other dependency kinds");
+  assert.equal(pkg.private, true);
+  assert.deepEqual(Object.keys(pkg.dependencies), ["wrangler"], "one dependency");
+  const version = pkg.dependencies.wrangler;
+  assert.match(version, /^\d+\.\d+\.\d+$/, "one exact version, no range and no tag");
+  assert.equal(lock.lockfileVersion, 3);
+  assert.deepEqual(lock.packages[""].dependencies, pkg.dependencies, "the lockfile was made from this package.json");
+  assert.equal(lock.packages["node_modules/wrangler"]?.version, version, "and pins the same version");
+  const entries = Object.entries(lock.packages).filter(([path]) => path !== "");
+  assert.ok(entries.length >= 20, `the lockfile's packages were found (${String(entries.length)})`);
+  for (const [path, entry] of entries) {
+    assert.match(entry.resolved ?? "", /^https:\/\/registry\.npmjs\.org\/[^\s]+\.tgz$/, `${path}: comes from the npm registry`);
+    assert.match(entry.integrity ?? "", /^sha512-[A-Za-z0-9+/]+={0,2}$/, `${path}: has an integrity hash`);
+  }
+}
+
+/** The workflow's side: installed from the lockfile in a step with no token, then run in the one step that has it. */
+function checkUploader(text) {
+  const deploy = wfJobs(text).get("deploy");
+  const steps = wfSteps(deploy);
+  const code = wfCode(text);
+  assert.ok(!/cloudflare\/wrangler-action/.test(text), "no third-party action holds the token");
+  assert.ok(!/wrangler@|npm install\b|npx\b|\s-g\b|--global/.test(code), "no version, range, tag or install of a package named in the workflow: the lockfile decides");
+  assert.ok([...code.matchAll(/\bwrangler\b/gi)].length >= 3);
+  // the two artifacts the build kept: the pages, and the uploader's package files into the folder the install runs in
+  const tools = steps.find((s) => wfUses(s)?.startsWith("actions/download-artifact@") && wfWith(s, "name") === "site-deploy-tools");
+  assert.ok(tools, "the package files are downloaded");
+  assert.equal(wfWith(tools, "path"), "${{ runner.temp }}/wrangler");
+  const install = steps.findIndex((s) => /^npm ci\b/.test(wfRun(s) ?? ""));
+  assert.ok(install >= 0, "the install step is npm ci, which refuses a lockfile that does not match package.json");
+  const run = wfRun(steps[install]);
+  assert.match(run, /^npm ci --prefix "\$RUNNER_TEMP\/wrangler" --ignore-scripts /, "from the folder the package files were downloaded to, with no install script run");
+  assert.ok(!/TOKEN|CLOUDFLARE/.test(steps[install].text), "the install step never sees the token");
+  const upload = steps.findIndex((s) => /pages deploy/.test(wfRun(s) ?? ""));
+  assert.equal(upload, steps.length - 1, "the upload is the last step");
+  assert.ok(steps.indexOf(tools) < install && install < upload, "download, install from the lockfile, then run");
+  assert.ok(steps.findIndex((s) => wfUses(s)?.startsWith("actions/download-artifact@") && wfWith(s, "name") === "site") < upload);
+  const command = wfRun(steps[upload]);
+  assert.ok(command.startsWith('node "$RUNNER_TEMP/wrangler/node_modules/wrangler/bin/wrangler.js" pages deploy '), "it runs the copy that was installed from the lockfile");
+  assert.match(command, /--project-name petalock-site(?=\s|$)/, "the one project");
+  assert.match(command, /--branch main(?=\s|$)/, "the production branch");
+  assert.ok(!/--project-name (?!petalock-site)/.test(command));
+  assert.equal(wfEnv(steps[upload]).get("WRANGLER_SEND_METRICS"), '"false"', "no usage report goes out");
+  assert.equal([...code.matchAll(/pages deploy/g)].length, 1, "one upload command in the file");
+}
+
+test("the_uploader_is_installed_from_a_lockfile_without_the_token", () => {
+  const text = siteYml();
+  checkUploader(text);
+  for (const [from, to] of [
+    ["run: npm ci --prefix", "run: npm install --prefix"],
+    ["npm ci --prefix \"$RUNNER_TEMP/wrangler\" --ignore-scripts", "npm ci --prefix \"$RUNNER_TEMP/wrangler\""],
+    ["npm ci --prefix \"$RUNNER_TEMP/wrangler\"", "npm ci --prefix \"$RUNNER_TEMP/other\""],
+    ["--no-fund", "--no-fund wrangler@latest"],
+    ["--no-fund", "--no-fund wrangler@4.168.0"],
+    ["          name: site-deploy-tools\n          path: ${{ runner.temp }}/wrangler", "          name: site-deploy-tools\n          path: ${{ runner.temp }}/other"],
+    ["--project-name petalock-site", "--project-name other"],
+    [" --branch main", ""],
+    ['WRANGLER_SEND_METRICS: "false"', 'WRANGLER_SEND_METRICS: "true"'],
+    ["        run: node \"$RUNNER_TEMP/wrangler/node_modules/wrangler/bin/wrangler.js\"", "        run: npx wrangler"],
+  ]) wfRefuses(checkUploader, text, from, to);
+  // the install step must not hold the token
+  wfRefuses(checkUploader, text, "      - name: Install Wrangler from the lockfile\n", "      - name: Install Wrangler from the lockfile\n        env:\n          CLOUDFLARE_API_TOKEN: x\n");
+
+  // the package files
+  const dir = join(ROOT, UPLOADER_DIR);
+  const files = readdirSync(dir);
+  const packageText = readFileSync(join(dir, "package.json"), "utf8");
+  const lockText = readFileSync(join(dir, "package-lock.json"), "utf8");
+  checkUploaderPackage(packageText, lockText, files);
+  const version = JSON.parse(packageText).dependencies.wrangler;
+  const breaks = (what, packageChange, lockChange, filesChange = files) => {
+    const p = packageChange ? wfMutate(packageText, packageChange[0], packageChange[1]) : packageText;
+    const l = lockChange ? wfMutate(lockText, lockChange[0], lockChange[1]) : lockText;
+    assert.throws(() => checkUploaderPackage(p, l, filesChange), { name: "AssertionError" }, `${what}: the check passed`);
+  };
+  breaks("a range", [`"wrangler": "${version}"`, `"wrangler": "^${version}"`], [`"wrangler": "${version}"\n      }`, `"wrangler": "^${version}"\n      }`]);
+  breaks("a tag", [`"wrangler": "${version}"`, '"wrangler": "latest"'], [`"wrangler": "${version}"\n      }`, '"wrangler": "latest"\n      }']);
+  breaks("a package.json the lockfile was not made from", [`"wrangler": "${version}"`, '"wrangler": "4.0.0"'], null);
+  breaks("a second dependency", [`"dependencies": {`, `"dependencies": {\n    "left-pad": "1.3.0",`], null);
+  breaks("a script", [`"private": true,`, `"private": true,\n  "scripts": { "install": "node x.js" },`], null);
+  breaks("a package without a hash", null, [/"integrity": "sha512-[^"]+",?\s*/.exec(lockText)?.[0] ?? "no integrity found", ""]);
+  breaks("a package from another address", null, ["https://registry.npmjs.org/", "http://registry.npmjs.org/"]);
+  breaks("a package from git", null, [/"resolved": "https:\/\/registry\.npmjs\.org\/[^"]+"/.exec(lockText)?.[0] ?? "no resolved found", '"resolved": "git+https://example.invalid/x.git"']);
+  breaks("an .npmrc beside them", null, null, [...files, ".npmrc"]);
+  breaks("a missing lockfile", null, null, ["package.json"]);
+});

@@ -112,7 +112,7 @@ fake("OSV");
     assert.equal(code, 0);
     const args = JSON.parse(readFileSync(argsFile, "utf8"));
     const lockfiles = args.flatMap((a, i) => (a === "-L" ? [args[i + 1]] : []));
-    assert.deepEqual(lockfiles, ["Cargo.lock", "ui/package-lock.json", "e2e/package-lock.json"]);
+    assert.deepEqual(lockfiles, ["Cargo.lock", "ui/package-lock.json", "e2e/package-lock.json", "site-deploy/package-lock.json"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -128,6 +128,12 @@ test("missing_e2e_lockfile_fails: e2e/package.json without its lockfile -> exit 
   const { code, out } = run({ PETALOCK_E2E_LOCK: "no/such/package-lock.json" });
   assert.equal(code, 2);
   assert.match(out, /INCOMPLETE: osv-scanner needs e2e\/package-lock\.json, which is missing/);
+});
+
+test("missing_site_deploy_lockfile_fails: site-deploy/package.json (Wrangler, which holds the deploy token) without its lockfile -> exit 2", () => {
+  const { code, out } = run({ PETALOCK_SITE_DEPLOY_LOCK: "no/such/package-lock.json" });
+  assert.equal(code, 2);
+  assert.match(out, /INCOMPLETE: osv-scanner needs site-deploy\/package-lock\.json, which is missing/);
 });
 
 test("semgrep scan errors -> exit 2, files it could not scan are not clean", () => {

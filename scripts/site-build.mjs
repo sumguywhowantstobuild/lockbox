@@ -2,7 +2,10 @@
 // Builds the public site (Plan 5, Task 6): the download page, the guide and the not-found page, from the templates in site/
 // and the one published release that site/release.json names.
 //
-//   node scripts/site-build.mjs [--site <folder>] [--out <folder>]     defaults: site/ and target/site/
+//   node scripts/site-build.mjs [--site <folder>] [--out <folder>] [--verified-from <folder>]     defaults: site/ and target/site/
+//
+// `--verified-from` names the folder scripts/site-verify.mjs wrote (the deploy workflow gives it): for a named release the
+// installer this build downloads must hash to the digest found there, or the build stops. Without the flag nothing is compared.
 //
 // `site/release.json` is read strictly. Only when it is exactly `{"tag": null}` is the page built in its "Coming soon" state,
 // with no question to GitHub. With `{"tag": "v<major>.<minor>.<patch>"}` the build asks GitHub for that PUBLISHED release of
@@ -104,10 +107,44 @@ export function formatDate(iso) {
 export const formatSize = (bytes) => `${(bytes / 1_000_000).toFixed(1)} MB`;
 
 /**
- * What the page is filled from: `{ tag, version, file, size, date, fingerprint }`, from the published release `tag` of the
- * fixed repository and the real bytes of its installer. Throws SiteBuildRefused for anything that is not as described.
+ * A file's bytes from the PUBLIC address the page's button uses, with no credentials (the token is for the API only). GitHub
+ * answers with a redirect to its release storage, followed by hand: https, one of GitHub's storage hosts, no port or
+ * user name, and nothing else is fetched. The deploy's verify (scripts/site-verify.mjs) downloads through this same function,
+ * so the file that is verified came by the same rule as the file that is hashed.
  */
-export async function resolveRelease({ tag, fetch = globalThis.fetch, token }) {
+export async function downloadPublic({ tag, name, fetch = globalThis.fetch }) {
+  const plain = async (url) => {
+    try {
+      return await fetch(url, { method: "GET", headers: { "user-agent": "petalock-site-build" }, redirect: "manual" });
+    } catch (error) {
+      return refuse(`${new URL(url).host} could not be reached for ${name}: ${String(error?.cause?.code ?? error?.message ?? error)}`);
+    }
+  };
+  const first = await plain(publicUrl(tag, name));
+  if (first.status === 200) return Buffer.from(await first.arrayBuffer());
+  if (first.status !== 302) refuse(`the download of ${name} answered ${String(first.status)}`);
+  let target;
+  try {
+    target = new URL(first.headers.get("location") ?? "");
+  } catch {
+    refuse(`the download of ${name} was redirected to no usable address`);
+  }
+  if (target.protocol !== "https:") refuse(`the download of ${name} was redirected to an address that is not https, and was not followed`);
+  if (!STORAGE_HOSTS.includes(target.hostname) || target.port !== "" || target.username !== "" || target.password !== "") {
+    refuse(`the download of ${name} was redirected to ${show(target.host)}, which is not one of GitHub's release storage hosts, and was not fetched`);
+  }
+  const stored = await plain(target.href);
+  if (stored.status !== 200) refuse(`the download of ${name} from storage answered ${String(stored.status)}`);
+  return Buffer.from(await stored.arrayBuffer());
+}
+
+/**
+ * What the page is filled from: `{ tag, version, file, size, date, fingerprint }`, from the published release `tag` of the
+ * fixed repository and the real bytes of its installer. Throws SiteBuildRefused for anything that is not as described. When
+ * `verified` (a SHA-256, lower-case hex) is given, the installer that came must hash to it: it is the digest of the file the
+ * deploy's verify checked the attestation of, so a file swapped between the two downloads is refused.
+ */
+export async function resolveRelease({ tag, fetch = globalThis.fetch, token, verified }) {
   let version;
   try {
     version = parseTag(tag);
@@ -156,36 +193,7 @@ export async function resolveRelease({ tag, fetch = globalThis.fetch, token }) {
     if (a.state !== "uploaded") refuse(`${a.name}: its upload is not finished (state ${show(a.state)})`);
   }
 
-  /**
-   * A file's bytes from the PUBLIC address the page's button uses, with no credentials (the token is for the API only). GitHub
-   * answers with a redirect to its release storage, followed by hand: https, one of GitHub's storage hosts, no port or
-   * user name, and nothing else is fetched.
-   */
-  const download = async (name) => {
-    const plain = async (url) => {
-      try {
-        return await fetch(url, { method: "GET", headers: { "user-agent": "petalock-site-build" }, redirect: "manual" });
-      } catch (error) {
-        return refuse(`${new URL(url).host} could not be reached for ${name}: ${String(error?.cause?.code ?? error?.message ?? error)}`);
-      }
-    };
-    const first = await plain(publicUrl(tag, name));
-    if (first.status === 200) return Buffer.from(await first.arrayBuffer());
-    if (first.status !== 302) refuse(`the download of ${name} answered ${String(first.status)}`);
-    let target;
-    try {
-      target = new URL(first.headers.get("location") ?? "");
-    } catch {
-      refuse(`the download of ${name} was redirected to no usable address`);
-    }
-    if (target.protocol !== "https:") refuse(`the download of ${name} was redirected to an address that is not https, and was not followed`);
-    if (!STORAGE_HOSTS.includes(target.hostname) || target.port !== "" || target.username !== "" || target.password !== "") {
-      refuse(`the download of ${name} was redirected to ${show(target.host)}, which is not one of GitHub's release storage hosts, and was not fetched`);
-    }
-    const stored = await plain(target.href);
-    if (stored.status !== 200) refuse(`the download of ${name} from storage answered ${String(stored.status)}`);
-    return Buffer.from(await stored.arrayBuffer());
-  };
+  const download = (name) => downloadPublic({ tag, name, fetch });
 
   /** What GitHub lists for an asset must agree with the bytes that came: the size, and the sha256 digest when it gives one. */
   const agrees = (a, bytes) => {
@@ -204,11 +212,29 @@ export async function resolveRelease({ tag, fetch = globalThis.fetch, token }) {
   agrees(installer, bytes);
   const fingerprint = sha256(bytes);
   if (fingerprint !== claimed) refuse(`the sidecar's fingerprint is not the hash of the installer's bytes (sidecar ${claimed}, bytes ${fingerprint})`);
+  if (verified !== undefined && fingerprint !== verified) {
+    refuse(`the installer that came is not the file that was verified (verified ${verified}, downloaded ${fingerprint}); the release changed while the deploy ran`);
+  }
   return { tag, version, file: names.installer, size: formatSize(bytes.length), date, fingerprint };
 }
 
+/** The file the deploy's verify writes, inside its folder, when `gh attestation verify` accepted the installer: the installer's SHA-256. */
+export const VERIFIED_FILE = "verified-sha256.txt";
+
+/** The digest the verify wrote in `dir`: exactly 64 lower-case hex digits and an optional final newline. Missing or anything else is refused. */
+function readVerifiedDigest(dir) {
+  let text;
+  try {
+    text = readFileSync(join(dir, VERIFIED_FILE), "utf8");
+  } catch {
+    return refuse(`${VERIFIED_FILE} is missing from ${dir}: the installer was not verified, so the site is not built`);
+  }
+  if (!/^[0-9a-f]{64}\n?$/.test(text)) refuse(`${VERIFIED_FILE} is not one SHA-256 (64 lower-case hex digits): the installer was not verified, so the site is not built`);
+  return text.trim();
+}
+
 /** The one public address of a release file: what the page's buttons point at and what the build downloads. */
-const publicUrl = (tag, file) => `${GITHUB}/releases/download/${tag}/${file}`;
+export const publicUrl =(tag, file) => `${GITHUB}/releases/download/${tag}/${file}`;
 
 /** The path the page's PowerShell line assumes: the Downloads folder of the person running it. */
 export const downloadsPath = (file) => `$HOME\\Downloads\\${file}`;
@@ -228,7 +254,14 @@ export const powershellAlternative = ({ fingerprint }) =>
  * names the file without a ref and cannot be combined with this; `--source-ref` also constrains the source ref. Flags checked
  * against `gh attestation verify --help`, gh 2.103.3.)
  */
-const ATTEST_PINS = `--repo ${REPOSITORY} --cert-identity "${GITHUB}/.github/workflows/release.yml@refs/heads/main" --source-ref refs/heads/main`;
+const ATTEST_IDENTITY = `${GITHUB}/.github/workflows/release.yml@refs/heads/main`;
+const ATTEST_PINS = `--repo ${REPOSITORY} --cert-identity "${ATTEST_IDENTITY}" --source-ref refs/heads/main`;
+
+/**
+ * The same pins as the words a program is given (no shell quoting): what the deploy's own check (scripts/site-verify.mjs) passes
+ * to `gh attestation verify`, so the check that runs before a deploy is the check the page tells a visitor to run.
+ */
+export const ATTEST_ARGS = Object.freeze(["--repo", REPOSITORY, "--cert-identity", ATTEST_IDENTITY, "--source-ref", "refs/heads/main"]);
 
 /** GitHub's build record for the file in Downloads, pinned to the release workflow on main. */
 export const attestationLine = (file) => `gh attestation verify "${downloadsPath(file)}" ${ATTEST_PINS}`;
@@ -358,7 +391,7 @@ export function renderSite({ siteDir, release }) {
  * Reads release.json, resolves the release if it names one, makes every page, and only then writes them into `outDir`
  * (beside it first, then moved). Returns `{ state, release, files }`.
  */
-export async function buildSite({ siteDir, outDir, fetch = globalThis.fetch, token }) {
+export async function buildSite({ siteDir, outDir, fetch = globalThis.fetch, token, verifiedFrom }) {
   requireRealSiteFolder(siteDir);
   if (existsSync(outDir) && readdirSync(outDir).length > 0) refuse(`the output folder ${outDir} already exists and is not empty; remove it first`);
   let text;
@@ -368,7 +401,10 @@ export async function buildSite({ siteDir, outDir, fetch = globalThis.fetch, tok
     text = undefined;
   }
   const choice = readReleaseChoice(text);
-  const release = choice.tag === null ? null : await resolveRelease({ tag: choice.tag, fetch, token });
+  // With `verifiedFrom` (the folder scripts/site-verify.mjs wrote to) a named release is built only if its installer is the one
+  // that was verified; with none named there is no installer, so nothing was verified and the folder is not read.
+  const verified = choice.tag !== null && verifiedFrom !== undefined ? readVerifiedDigest(verifiedFrom) : undefined;
+  const release = choice.tag === null ? null : await resolveRelease({ tag: choice.tag, fetch, token, verified });
   const files = renderSite({ siteDir, release });
 
   mkdirSync(dirname(resolve(outDir)), { recursive: true });
@@ -392,12 +428,12 @@ export async function buildSite({ siteDir, outDir, fetch = globalThis.fetch, tok
 // The command
 
 function parseArgs(argv) {
-  const out = { site: join(ROOT, "site"), out: join(ROOT, "target", "site") };
+  const out = { site: join(ROOT, "site"), out: join(ROOT, "target", "site"), verifiedFrom: undefined };
   for (let at = 0; at < argv.length; at += 2) {
     const flag = argv[at];
     const value = argv[at + 1];
-    if ((flag !== "--site" && flag !== "--out") || value === undefined || value.startsWith("-") || value === "") return null;
-    out[flag.slice(2)] = resolve(value);
+    if ((flag !== "--site" && flag !== "--out" && flag !== "--verified-from") || value === undefined || value.startsWith("-") || value === "") return null;
+    out[flag === "--verified-from" ? "verifiedFrom" : flag.slice(2)] = resolve(value);
   }
   return out;
 }
@@ -406,11 +442,11 @@ function parseArgs(argv) {
 export async function main(argv, env = process.env) {
   const args = parseArgs(argv);
   if (args === null) {
-    process.stderr.write("usage: node scripts/site-build.mjs [--site <folder>] [--out <folder>]\n");
+    process.stderr.write("usage: node scripts/site-build.mjs [--site <folder>] [--out <folder>] [--verified-from <folder>]\n");
     return 2;
   }
   try {
-    const result = await buildSite({ siteDir: args.site, outDir: args.out, token: env.GITHUB_TOKEN || undefined });
+    const result = await buildSite({ siteDir: args.site, outDir: args.out, token: env.GITHUB_TOKEN || undefined, verifiedFrom: args.verifiedFrom });
     const what = result.release === null ? "the Coming soon page" : `${result.release.file} (${result.release.size}, ${result.release.date}, SHA-256 ${result.release.fingerprint})`;
     process.stdout.write(`site-build: built ${what}; ${String(result.files.length)} files in ${args.out}\n`);
     return 0;

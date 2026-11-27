@@ -3,7 +3,7 @@
 // Exit 0 = CLEAN, 1 = FINDINGS, 2 = INCOMPLETE (a tool is missing or failed, so "clean" can't be claimed).
 // Usage: node scripts/scan.mjs [--json]
 // Env PETALOCK_GITLEAKS / PETALOCK_SEMGREP / PETALOCK_OSV point at a tool; a .mjs path is run with this Node (tests use that).
-// PETALOCK_CARGO_LOCK / PETALOCK_UI_LOCK / PETALOCK_E2E_LOCK override where the lockfiles are looked for (tests only).
+// PETALOCK_CARGO_LOCK / PETALOCK_UI_LOCK / PETALOCK_E2E_LOCK / PETALOCK_SITE_DEPLOY_LOCK override where the lockfiles are looked for (tests only).
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { delimiter, dirname, extname, join, resolve } from "node:path";
@@ -24,6 +24,12 @@ const lockfiles = [
     name: "e2e/package-lock.json",
     path: process.env.PETALOCK_E2E_LOCK ?? "e2e/package-lock.json",
     required: existsSync(join(root, "e2e", "package.json")),
+  },
+  {
+    // Wrangler, which runs holding the Cloudflare deploy token (.github/workflows/site.yml installs it from this lockfile).
+    name: "site-deploy/package-lock.json",
+    path: process.env.PETALOCK_SITE_DEPLOY_LOCK ?? "site-deploy/package-lock.json",
+    required: existsSync(join(root, "site-deploy", "package.json")),
   },
 ];
 // pip installs semgrep here (not on PATH); see docs/SETUP.md troubleshooting.
