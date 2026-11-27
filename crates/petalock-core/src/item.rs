@@ -724,6 +724,97 @@ mod tests {
         assert_eq!(copy.attachments[0].file_key.as_bytes(), &[0x42; 32]);
     }
 
+    /// Where a file key's 32 bytes are in memory.
+    fn key_address(fref: &FileRef) -> usize {
+        fref.file_key.as_bytes().as_ptr() as usize
+    }
+
+    fn addresses(list: &[FileRef]) -> Vec<usize> {
+        list.iter().map(key_address).collect()
+    }
+
+    /// A file record whose id and key are `n`, so the keys of a list tell apart.
+    fn numbered_ref(n: u8) -> FileRef {
+        let mut fref = file_ref();
+        fref.file_id = FileId([n; 16]);
+        fref.file_key = Key32::from_bytes([n; 32]);
+        fref
+    }
+
+    /// Whether `address` is inside the memory the list's own buffer holds.
+    fn inside_buffer(list: &Vec<FileRef>, address: usize) -> bool {
+        let start = list.as_ptr() as usize;
+        (start..start + list.capacity() * size_of::<FileRef>()).contains(&address)
+    }
+
+    #[test]
+    fn file_keys_do_not_move_when_the_list_grows() {
+        // Pushes, one at a time from empty: every capacity change moves the records, never the keys.
+        let mut list: Vec<FileRef> = Vec::new();
+        let mut before: Vec<usize> = Vec::new();
+        let mut moves = 0;
+        for n in 0..40u8 {
+            let capacity = list.capacity();
+            list.push(numbered_ref(n));
+            if list.capacity() != capacity {
+                moves += 1;
+            }
+            before.push(key_address(&list[usize::from(n)]));
+            assert_eq!(addresses(&list), before, "after push {n}");
+        }
+        assert!(moves >= 3, "the list changed capacity {moves} times");
+
+        // The copy a commit works on (`Item::clone`): its list has no spare room, so the next push moves it.
+        let mut item = login();
+        item.attachments = (0..5).map(numbered_ref).collect();
+        let mut next = item.clone();
+        let before = addresses(&next.attachments);
+        let capacity = next.attachments.capacity();
+        next.attachments.push(numbered_ref(5));
+        assert_ne!(
+            next.attachments.capacity(),
+            capacity,
+            "the push must grow the list"
+        );
+        assert_eq!(addresses(&next.attachments)[..5], before[..]);
+
+        // Dropping some (`retain`) and swapping in a rebuilt list (`item.attachments = attachments`).
+        let kept: Vec<usize> = [0usize, 2, 4].iter().map(|&i| before[i]).collect();
+        next.attachments.retain(|a| a.file_id.0[0] % 2 == 0);
+        assert_eq!(addresses(&next.attachments), kept);
+        let mut rebuilt = Vec::with_capacity(next.attachments.len());
+        rebuilt.append(&mut next.attachments);
+        let mut holder = login();
+        holder.attachments = rebuilt;
+        assert_eq!(addresses(&holder.attachments), kept);
+    }
+
+    #[test]
+    fn file_keys_read_from_json_are_not_inside_the_list() {
+        // serde_json gives no size hint for a sequence, so the list grows push by push as it reads.
+        let mut item = login();
+        item.attachments = (0..40).map(numbered_ref).collect();
+        let text = serde_json::to_string(&ItemOut(&item)).unwrap();
+        let ItemIn(back) = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.attachments.len(), 40);
+        let found = addresses(&back.attachments);
+        for (n, fref) in back.attachments.iter().enumerate() {
+            assert_eq!(fref.file_key.as_bytes(), &[n as u8; 32]);
+            assert!(
+                !inside_buffer(&back.attachments, found[n]),
+                "key {n} is held inside the list's own buffer"
+            );
+        }
+        let mut sorted = found.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 40, "every key has its own allocation");
+        // And it stays put when the list then grows.
+        let mut back = back;
+        back.attachments.push(numbered_ref(40));
+        assert_eq!(addresses(&back.attachments)[..40], found[..]);
+    }
+
     #[test]
     fn ciphertext_size_is_bucketed() {
         let (v, k) = vault();

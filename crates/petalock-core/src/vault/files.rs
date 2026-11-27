@@ -1205,6 +1205,46 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn keys_still_open_their_files_after_growth() {
+        let (parent, mut vault) = new_vault();
+        let id = vault.new_item(ItemKind::Note, "n", None).unwrap();
+        // Each attach works on a copy of the item whose list has no spare room, so every push moves the list.
+        let contents: Vec<Vec<u8>> = (0..6u8).map(|n| vec![n; 100 + usize::from(n)]).collect();
+        let mut files = Vec::new();
+        for (n, bytes) in contents.iter().enumerate() {
+            let src = source(&parent, &format!("f{n}.bin"), bytes);
+            files.push(
+                vault
+                    .attach_file(&id, &src, &CancelToken::new(), &NoProgress)
+                    .unwrap(),
+            );
+        }
+        let check = |vault: &Vault| {
+            let item = vault.get_item(&id).unwrap();
+            assert_eq!(item.attachments.len(), 6);
+            for (n, file) in files.iter().enumerate() {
+                let dest = parent.path().join(format!("out-{}-{n}", item.revision));
+                vault
+                    .export_file(
+                        &id,
+                        file,
+                        &dest,
+                        &crate::blob::NoJournal,
+                        &CancelToken::new(),
+                        &NoProgress,
+                    )
+                    .unwrap();
+                assert_eq!(fs::read(&dest).unwrap(), contents[n], "file {n}");
+            }
+        };
+        check(&vault);
+        let dir = vault.dir().to_path_buf();
+        drop(vault);
+        // Read back from the disk: the keys came out of the item's JSON, grown into a list push by push.
+        check(&Vault::unlock_with_password(&dir, PW).unwrap().0);
+    }
+
+    #[test]
     fn cancelled_import_leaves_nothing() {
         let (parent, mut vault) = new_vault();
         let src = source(&parent, "a.txt", b"hello");
