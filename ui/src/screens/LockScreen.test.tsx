@@ -3,7 +3,8 @@ import type { ReactElement } from "react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "../App";
 import { PetalockParts } from "../parts/PetalockParts";
-import { Pattern, VaultMark, vaultLook } from "../parts/Pattern";
+import { Intaglio } from "../parts/Intaglio";
+import { VaultMark, vaultLook } from "../parts/Pattern";
 import { debugState, resetStoreForTests, startStore } from "../store";
 import { expectNoAxe } from "../testing/axe";
 import { installFakeShell, PASSWORD, sampleItems, type FakeShell } from "../testing/fakeShell";
@@ -34,6 +35,25 @@ async function show(vaults: Parameters<typeof installFakeShell>[2]) {
   return view;
 }
 
+/** The path of a drawing rendered alone, to compare with what a screen draws. */
+function drawingOf(element: ReactElement): string {
+  const { container, unmount } = render(element);
+  const d = container.querySelector("path")?.getAttribute("d") ?? "";
+  unmount();
+  return d;
+}
+
+/** The engraved logo's ribbons, joined: as drawn alone, or as drawn in the dark side of a screen. */
+function engraving(): string {
+  const { container, unmount } = render(<Intaglio />);
+  const d = [...container.querySelectorAll("path")].map((path) => path.getAttribute("d")).join("|");
+  unmount();
+  return d;
+}
+function drawnIn(root: ParentNode | null | undefined): string {
+  return [...(root?.querySelectorAll("svg.rose path") ?? [])].map((path) => path.getAttribute("d")).join("|");
+}
+
 function passwordField(): HTMLInputElement {
   return screen.getByLabelText<HTMLInputElement>(/^Password for /);
 }
@@ -57,17 +77,11 @@ test("one_vault_is_already_chosen", async () => {
 });
 
 test("lock_screen_shows_the_app_mark_small", async () => {
-  const drawingOf = (element: ReactElement) => {
-    const { container, unmount } = render(element);
-    const d = container.querySelector("path")?.getAttribute("d") ?? "";
-    unmount();
-    return d;
-  };
   const appMark = drawingOf(<VaultMark points={3} />);
-  const firstVault = drawingOf(<Pattern points={vaultLook(0, false).points} />);
+  const logo = engraving();
   // Both drawings exist, so the comparisons below can't pass on two empty ones.
   expect(appMark).not.toBe("");
-  expect(firstVault).not.toBe("");
+  expect(logo).not.toBe("");
   const { container } = await show([{ id: 7, name: "My vault", items: sampleItems() }]);
   const field = container.querySelector(".field");
   // 1a: the app's small three-petal mark beside its name, drawn for the eye only (the name is the words beside it)...
@@ -76,9 +90,72 @@ test("lock_screen_shows_the_app_mark_small", async () => {
   const mark = name?.querySelector("svg.appmark");
   expect(mark?.getAttribute("aria-hidden")).toBe("true");
   expect(mark?.querySelector("path")?.getAttribute("d")).toBe(appMark);
-  // ...and the vault's own pattern large behind it, in the look of its place on the list.
-  expect(field?.querySelector("svg.rose path")?.getAttribute("d")).toBe(firstVault);
+  // ...and Petalock's engraved logo large behind it (Plan 5 Task 9b), the same for every vault.
+  expect(drawnIn(field)).toBe(logo);
   expect(field?.querySelectorAll("svg.appmark")).toHaveLength(1);
+});
+
+test("lock_and_setup_screens_show_the_engraved_logo", async () => {
+  // The lock screen's dark side shows the one picture whichever vault is chosen (places 0 and 1), and so does the save step;
+  // the setup screens' frame is checked beside it (Frame.test.tsx).
+  const logo = engraving();
+  expect(logo.split("|")).toHaveLength(26);
+  const { container } = await show([
+    { id: 7, name: "My vault", items: sampleItems() },
+    { id: 8, name: "Home", items: sampleItems() },
+  ]);
+  const picture = () => container.querySelector(".field svg.rose");
+  expect(drawnIn(container.querySelector(".field"))).toBe(logo);
+  expect(picture()?.getAttribute("aria-hidden")).toBe("true");
+  expect(container.querySelectorAll(".field svg.rose")).toHaveLength(1);
+  fireEvent.click(screen.getByRole("radio", { name: /Home/ }));
+  expect(screen.getByLabelText("Password for Home")).toBeTruthy();
+  expect(drawnIn(container.querySelector(".field"))).toBe(logo);
+  cleanup();
+
+  resetStoreForTests();
+  invoke.mockReset();
+  listen.mockReset();
+  shell = installFakeShell(invoke, listen, [{ id: 7, name: "My vault", items: sampleItems() }]);
+  const app = render(<App />);
+  await vi.waitFor(() => {
+    expect(shell.calls.some((call) => call.cmd === "capture_state")).toBe(true);
+  });
+  await act(async () => {
+    shell.press({ text: "MU-copied value" });
+    await Promise.resolve();
+  });
+  await screen.findByRole("heading", { level: 1, name: "Save what you copied" });
+  expect(drawnIn(app.container.querySelector(".field"))).toBe(logo);
+});
+
+test("the_unlock_heading_shows_the_chosen_vaults_mark", async () => {
+  // Every vault shows the same large picture, so the heading starts with the chosen vault's small mark in its colour, with
+  // one vault or many, and the mark follows the choice. It is for the eye only: the heading's name stays its words.
+  const markOf = (position: number) => drawingOf(<VaultMark points={vaultLook(position, false).points} />);
+  expect(markOf(0)).not.toBe(markOf(1));
+  const headingMark = (name: string) => {
+    const heading = screen.getByRole("heading", { level: 1, name });
+    const mark = heading.querySelector("svg.vmini");
+    expect(heading.firstElementChild).toBe(mark);
+    expect(mark?.getAttribute("aria-hidden")).toBe("true");
+    expect(mark?.getAttribute("class") ?? "").toMatch(/\bmode-(light|dark)\b/);
+    return { d: mark?.querySelector("path")?.getAttribute("d"), accent: /\bv-(work|home)\b/.exec(mark?.getAttribute("class") ?? "")?.[1] };
+  };
+  await show([{ id: 7, name: "My vault", items: sampleItems() }]);
+  expect(headingMark("Unlock My vault")).toEqual({ d: markOf(0), accent: "work" });
+  cleanup();
+
+  resetStoreForTests();
+  await show([
+    { id: 7, name: "My vault", items: sampleItems() },
+    { id: 8, name: "Home", items: sampleItems() },
+  ]);
+  expect(headingMark("Unlock a vault")).toEqual({ d: markOf(0), accent: "work" });
+  fireEvent.click(screen.getByRole("radio", { name: /Home/ }));
+  expect(headingMark("Unlock a vault")).toEqual({ d: markOf(1), accent: "home" });
+  fireEvent.click(screen.getByRole("radio", { name: /My vault/ }));
+  expect(headingMark("Unlock a vault")).toEqual({ d: markOf(0), accent: "work" });
 });
 
 test("two_vaults_list_with_the_first_chosen", async () => {

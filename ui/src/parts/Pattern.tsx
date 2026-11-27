@@ -1,6 +1,7 @@
-// The line drawings that tell vaults apart: the big pattern on the lock screen (fourteen closed lines) and the small
-// mark beside a vault's name (two). Both are drawn from one number, the pattern's points, the way the approved screens
-// were; the colour and the thickness come from the style sheet, so a contrast theme can change them.
+// The line drawing that tells vaults apart: the small mark beside a vault's name (two closed lines), drawn from one number,
+// its points, the way the approved screens were; the colour and the thickness come from the style sheet, so a contrast
+// theme can change them. (The large picture on the lock and setup screens is Petalock's engraved logo, `Intaglio`, the same
+// for every vault since Plan 5 Task 9b.)
 
 export interface VaultLook {
   accent: "work" | "home" | "old";
@@ -26,9 +27,9 @@ export const APP_POINTS = 3;
 
 const cache = new Map<string, string>();
 
-// `lines` closed curves of 360 degrees round a centre, each radius swelling `points` times; the lines differ a little
-// in size and in turn. The numbers are those of the approved drawings, drawn a point every degree so no petal shows
-// corners at any number of points (at three degrees, nine points showed them at the lock screen's size).
+// `count` closed curves of 360 degrees round a centre, each radius swelling `points` times; the lines differ in turn. The
+// numbers are those of the approved drawings, drawn a point every degree so no petal shows corners at any number of
+// points (at three degrees, nine points showed them at the lock screen's size).
 function lines(points: number, count: number, step: number, size: (index: number) => number, turn: (index: number) => number): string {
   const key = `${String(points)}/${String(count)}`;
   const known = cache.get(key);
@@ -52,16 +53,6 @@ interface DrawingProps {
   points: number;
   /** The style sheet's class for the drawing's size, place and stroke. */
   className?: string;
-}
-
-/** The fourteen-line pattern, for the lock screen. */
-export function Pattern({ points, className }: DrawingProps) {
-  const d = lines(points, 14, 1, (index) => 0.16 + index * 0.012, (index) => (index * Math.PI) / 14);
-  return (
-    <svg className={className} viewBox="0 0 200 200" aria-hidden="true">
-      <path d={d} />
-    </svg>
-  );
 }
 
 /** The two-line mark beside a vault's name. Its petals are shallow, so up to nine points stay clear at 36 pixels. */

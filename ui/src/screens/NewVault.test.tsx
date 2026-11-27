@@ -4,7 +4,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "../App";
-import { APP_POINTS, Pattern } from "../parts/Pattern";
+import { Intaglio } from "../parts/Intaglio";
 import { debugState, resetStoreForTests } from "../store";
 import { expectNoAxe } from "../testing/axe";
 import { rowReads } from "../testing/menuRows";
@@ -873,29 +873,29 @@ test("new_vault_screens_have_no_axe_violations", async () => {
   expect(container.querySelectorAll("style, [style]")).toHaveLength(0);
 });
 
-test("the_inside_new_vault_form_draws_its_places_pattern", async () => {
-  // 18b draws the new vault's own pattern, by the place it will take at the end of the list: with two listed, the third
-  // place's seven points (as the unlock step draws a vault's), on the form and on its cloud warning; the first-use screens
-  // keep the app's own three petals.
-  const drawn = () => document.querySelector("svg.rose path")?.getAttribute("d");
-  const pattern = (points: number) => {
-    const { container, unmount } = render(<Pattern points={points} />);
-    const d = container.querySelector("path")?.getAttribute("d");
+test("the_inside_new_vault_form_draws_the_engraved_logo", async () => {
+  // 18b, its cloud warning and the first-use screens all draw Petalock's engraved logo (Plan 5 Task 9b): the new vault's
+  // shape is no longer previewed in the large picture (its small mark shows it once the vault is made).
+  const drawn = () => [...document.querySelectorAll(".field svg.rose path")].map((path) => path.getAttribute("d")).join("|");
+  const logo = (() => {
+    const { container, unmount } = render(<Intaglio />);
+    const d = [...container.querySelectorAll("path")].map((path) => path.getAttribute("d")).join("|");
     unmount();
     return d;
-  };
+  })();
+  expect(logo.split("|")).toHaveLength(26);
   await unlocked([vault(7, "My vault"), vault(8, "Home")]);
   await toTheForm();
-  expect(drawn()).toBe(pattern(7));
+  expect(drawn()).toBe(logo);
   fill("Work", NEW);
   shell.cloudNext();
   create();
   await cloudWarning();
-  expect(drawn()).toBe(pattern(7));
+  expect(drawn()).toBe(logo);
   cleanup();
   resetStoreForTests();
   render(<CreateVault onBack={() => undefined} />);
-  expect(drawn()).toBe(pattern(APP_POINTS));
+  expect(drawn()).toBe(logo);
 });
 
 // ---- Plan 4C Task 13b: 18c names the service and says where the folder is ----

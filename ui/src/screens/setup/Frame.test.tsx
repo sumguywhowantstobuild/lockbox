@@ -1,44 +1,43 @@
 import { cleanup, render } from "@testing-library/react";
 import { afterEach, expect, test } from "vitest";
-import { Pattern } from "../../parts/Pattern";
+import { Intaglio } from "../../parts/Intaglio";
 import { Frame } from "./Frame";
 
 afterEach(cleanup);
 
-/** The path a drawing makes, to compare one drawing with another. */
-function drawn(element: Element | null): string {
-  return element?.querySelector("path")?.getAttribute("d") ?? "";
+/** The engraved logo's ribbons, joined, as drawn in `root`'s large picture. */
+function drawn(root: ParentNode | null): string {
+  return [...(root?.querySelectorAll("svg.rose path") ?? [])].map((path) => path.getAttribute("d")).join("|");
 }
 
-function reference(points: number): string {
-  const { container, unmount } = render(<Pattern points={points} />);
-  const d = drawn(container.querySelector("svg"));
+function engraving(): string {
+  const { container, unmount } = render(<Intaglio />);
+  const d = [...container.querySelectorAll("path")].map((path) => path.getAttribute("d")).join("|");
   unmount();
   return d;
 }
 
-test("setup_panel_shows_the_app_pattern", () => {
-  const three = reference(3);
+test("setup_panel_shows_the_app_mark_and_the_engraved_logo", () => {
+  const logo = engraving();
   // A drawing exists, so the comparison below can't pass on two empty ones.
-  expect(three).not.toBe("");
+  expect(logo.split("|")).toHaveLength(26);
   const { container } = render(<Frame say="A line.">steps</Frame>);
-  const pattern = container.querySelector(".field svg.rose");
-  // 21a's dark side shows the app's own three petals, in the white lines every pattern takes, not a vault's look...
-  expect(pattern?.getAttribute("class")).toBe("rose");
-  expect(drawn(pattern)).toBe(three);
+  const picture = container.querySelector(".field svg.rose");
+  // 21a's dark side shows Petalock's engraved logo (Plan 5 Task 9b), as the lock screen does...
+  expect(picture?.getAttribute("class")).toBe("rose");
+  expect(picture?.getAttribute("aria-hidden")).toBe("true");
+  expect(drawn(container.querySelector(".field"))).toBe(logo);
   // ...and the app's small mark beside its name, as on the lock screen: the only place its colour shows.
   const name = container.querySelector(".field .mark");
   expect(name?.textContent).toBe("Petalock");
   expect(name?.querySelector("svg.appmark")).not.toBeNull();
-  cleanup();
+});
 
-  // A new vault begun from the vault menu (18b) still shows the look of the place it will take.
-  const { container: placed } = render(
-    <Frame say="A line." points={6}>
-      steps
-    </Frame>,
-  );
-  const vault = placed.querySelector(".field svg.rose");
-  expect(vault?.getAttribute("class")).toBe("rose");
-  expect(drawn(vault)).toBe(reference(6));
+test("lock_and_setup_screens_show_the_engraved_logo", () => {
+  // Every full-screen step draws the one picture: the frame takes no vault's look any more (a new vault's place showed its
+  // shape here before Task 9b; its small mark shows it once the vault is made).
+  const logo = engraving();
+  const { container } = render(<Frame say="A line.">steps</Frame>);
+  expect(drawn(container.querySelector(".field"))).toBe(logo);
+  expect(container.querySelectorAll(".field svg.rose")).toHaveLength(1);
 });

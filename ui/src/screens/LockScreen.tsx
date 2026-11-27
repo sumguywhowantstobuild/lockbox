@@ -4,7 +4,8 @@ import { useLockEpoch } from "../jobs";
 import { messageFor, type Message } from "../messages";
 import { PasswordField } from "../parts/PasswordField";
 import { AppMark } from "../parts/AppMark";
-import { Pattern, VaultMark, vaultLook } from "../parts/Pattern";
+import { Intaglio } from "../parts/Intaglio";
+import { VaultMark, vaultLook } from "../parts/Pattern";
 import { focusButton } from "../focus";
 import { folderWords } from "../moveInWords";
 import {
@@ -41,6 +42,21 @@ function said(message: Message): string {
 }
 
 /**
+ * An unlock heading: the chosen vault's small mark in its colour, then the words (Plan 5 Task 9b). Every vault shows the same
+ * large picture, so the heading carries the vault's own look; the mark is for the eye only, so the heading's name is its words.
+ */
+function UnlockHeading({ words, position, mode }: { words: string; position: number | null; mode: string }) {
+  if (position === null) return <>{words}</>;
+  const look = vaultLook(position, false);
+  return (
+    <>
+      <VaultMark points={look.points} className={`vmini mode-${mode} v-${look.accent}`} />
+      <span>{words}</span>
+    </>
+  );
+}
+
+/**
  * The unlock step of one more vault while another is open (the vault menu, the vault strip and Copy to a vault bring it): the lock screen's own look and form, for the one
  * vault the step was opened for, with Back (and Escape) to the window that was on screen. The password is typed once and goes with the vault's registry ID; it is wiped from
  * the box as it is sent (so a refusal, "Wrong password.", shows an empty box), by Back, and by every lock epoch, and Ask 16 (kept for that vault alone) is said above the box.
@@ -61,6 +77,7 @@ export function UnlockStep({ step }: { step: UnlockStepOf }) {
     setSeenEpoch(epoch);
     setPassword("");
   }
+  const mode = useMode();
   const list = vaults ?? [];
   const vault = list.find((entry) => entry.id === step.vault);
   const position = vault === undefined ? 0 : list.indexOf(vault);
@@ -109,7 +126,7 @@ export function UnlockStep({ step }: { step: UnlockStepOf }) {
       }}
     >
       <header className="field">
-        <Pattern points={vaultLook(position, false).points} className="rose" />
+        <Intaglio className="rose" />
         <p className="mark">
           <AppMark />
           Petalock
@@ -117,7 +134,9 @@ export function UnlockStep({ step }: { step: UnlockStepOf }) {
         <p className="say">Your items stay encrypted until you enter the password.</p>
       </header>
       <main className="plate">
-        <h1>{`Unlock ${name}`}</h1>
+        <h1 className="vh">
+          <UnlockHeading words={`Unlock ${name}`} position={position} mode={mode} />
+        </h1>
         <div className="asks">
           <LockNote vault={vault.id} />
         </div>
@@ -337,7 +356,7 @@ export function LockScreen() {
     >
       {/* The page's banner: its line says what the save step holds, so a screen reader moving by landmarks must reach it. */}
       <header className="field">
-        <Pattern points={vaultLook(position, false).points} className="rose" />
+        <Intaglio className="rose" />
         <p className="mark">
           <AppMark />
           Petalock
@@ -351,8 +370,9 @@ export function LockScreen() {
         </p>
       </header>
       <main className="plate">
-        <h1 ref={headingRef} tabIndex={-1}>
-          {heading}
+        <h1 ref={headingRef} tabIndex={-1} className="vh">
+          {/* The chosen vault's mark starts an unlock heading, with one vault or many; the save step and an empty list have none. */}
+          <UnlockHeading words={heading} position={chosen !== undefined && capture === null ? position : null} mode={mode} />
         </h1>
         <LockScreenAsks
           chosen={chosen?.id ?? null}

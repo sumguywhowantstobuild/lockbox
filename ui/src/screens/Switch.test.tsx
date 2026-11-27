@@ -5,6 +5,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "../App";
 import { messageFor } from "../messages";
+import { Intaglio } from "../parts/Intaglio";
 import { VaultMark, vaultLook } from "../parts/Pattern";
 import { debugState, resetStoreForTests, showSession } from "../store";
 import { expectNoAxe } from "../testing/axe";
@@ -244,6 +245,20 @@ test("a_locked_vault_is_a_row_that_opens_its_unlock_step", async () => {
   expect(screen.queryByRole("radio")).toBeNull();
   expect(screen.getByRole("button", { name: "Forgot password?" })).toBeTruthy();
   expect(document.querySelector(".app")?.classList.contains(`v-${vaultLook(1, false).accent}`)).toBe(true);
+  // Its heading starts with Home's small mark in Home's colour (Plan 5 Task 9b), as on the lock screen.
+  const headingMark = screen.getByRole("heading", { level: 1, name: "Unlock Home" }).querySelector("svg.vmini");
+  const homeMark = render(<VaultMark points={vaultLook(1, false).points} />);
+  const expectedMark = homeMark.container.querySelector("path")?.getAttribute("d");
+  homeMark.unmount();
+  expect(expectedMark).toBeTruthy();
+  expect(headingMark?.querySelector("path")?.getAttribute("d")).toBe(expectedMark);
+  expect(headingMark?.getAttribute("class")).toMatch(new RegExp(`\\bv-${vaultLook(1, false).accent}\\b`));
+  // The dark side shows Petalock's engraved logo, as on the lock screen.
+  const logo = render(<Intaglio />);
+  const ribbons = [...logo.container.querySelectorAll("path")].map((path) => path.getAttribute("d")).join("|");
+  logo.unmount();
+  expect(ribbons.split("|").filter((one) => one !== "")).toHaveLength(26);
+  expect([...document.querySelectorAll(".field svg.rose path")].map((path) => path.getAttribute("d")).join("|")).toBe(ribbons);
   // The vault that was open is still open, with no command sent for it.
   expect(debugState().sessions.map((one) => one.vaultId)).toEqual([7]);
   expect(sent("lock_vault")).toEqual([]);

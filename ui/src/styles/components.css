@@ -35,10 +35,10 @@
   opacity: 0.5;
 }
 
+/* Petalock's engraved logo (Plan 5 Task 9b): filled ribbons, not lines, in the dark side's white at the strength above. */
 .rose path {
-  fill: none;
-  stroke: var(--field-ink);
-  stroke-width: 0.22;
+  fill: var(--field-ink);
+  stroke: none;
 }
 
 /* Petalock's small mark beside its name on the lock screen (1a) and the setup screens (21a), in the app's slate blue: the
@@ -67,6 +67,8 @@
   letter-spacing: 0.01em;
 }
 
+/* The dark side's words sit on a soft patch of its own colour (the box filled with it, its edge faded by a 28px blur), so
+   no line of the engraved logo crosses a letter at any window or text size (Plan 5 Task 9b). */
 .say {
   position: absolute;
   left: 40px;
@@ -76,6 +78,8 @@
   font-size: 30px;
   line-height: 1.2;
   font-weight: 500;
+  background: var(--field);
+  box-shadow: 0 0 28px 22px var(--field);
 }
 
 .plate {
@@ -101,6 +105,19 @@
   line-height: 1.2;
   /* A heading that wraps keeps its lines even, never one word alone on the last ("…synced to the / cloud", 18c). */
   text-wrap: balance;
+}
+
+/* An unlock heading starts with the chosen vault's small mark (Plan 5 Task 9b), centred on the words' lines; a long name
+   wraps beside it rather than push past the plate. */
+.plate h1.vh {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.plate h1.vh > span {
+  min-width: 0;
+  overflow-wrap: break-word;
 }
 
 .plate form label {

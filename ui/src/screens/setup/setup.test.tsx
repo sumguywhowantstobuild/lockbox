@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "../../App";
 import { messageFor, messageText } from "../../messages";
-import { APP_POINTS, Pattern } from "../../parts/Pattern";
+import { Intaglio } from "../../parts/Intaglio";
 import { debugState, makeNewKey, resetStoreForTests } from "../../store";
 import { expectNoAxe } from "../../testing/axe";
 import {
@@ -132,6 +132,19 @@ function pickAllRight(key: string): void {
   for (let n = 0; n < 3; n += 1) pick(key, true);
 }
 
+/** The engraved logo's ribbons, joined: as drawn alone, and as drawn in a screen's large picture. */
+function engraving(): string {
+  const { container, unmount } = render(<Intaglio />);
+  const d = [...container.querySelectorAll("path")].map((path) => path.getAttribute("d")).join("|");
+  unmount();
+  // A drawing exists, so a comparison can't pass on two empty ones.
+  expect(d.split("|").filter((one) => one !== "")).toHaveLength(26);
+  return d;
+}
+function engravingIn(root: ParentNode): string {
+  return [...root.querySelectorAll(".field svg.rose path")].map((path) => path.getAttribute("d")).join("|");
+}
+
 function commandsSent(): string[] {
   return shell.calls.map((call) => call.cmd);
 }
@@ -144,10 +157,8 @@ test("no_vaults_goes_to_welcome", async () => {
   expect(screen.getByRole("button", { name: "I already have a vault or a backup" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: "I already have a vault" })).toBeNull();
   expect(screen.queryByText(/forgot/i)).toBeNull();
-  // The app's own three petals on the setup screens, not a vault's own.
-  const drawn = container.querySelector(".rose path")?.getAttribute("d");
-  const three = render(<Pattern points={APP_POINTS} />).container.querySelector("path")?.getAttribute("d");
-  expect(drawn).toBe(three);
+  // Petalock's engraved logo on the setup screens (Plan 5 Task 9b), as on the lock screen.
+  expect(engravingIn(container)).toBe(engraving());
   await expectNoAxe(container);
 });
 
@@ -341,9 +352,8 @@ test("key_shows_once_with_the_plain_warning", async () => {
   // The vault is marked and the key was made once: asking for another is not how this screen works.
   expect(shell.unconfirmed(1)).toBe(true);
   expect(commandsSent()).not.toContain("regenerate_recovery");
-  // The app's own three petals.
-  const three = render(<Pattern points={APP_POINTS} />).container.querySelector("path")?.getAttribute("d");
-  expect(container.querySelector(".rose path")?.getAttribute("d")).toBe(three);
+  // Petalock's engraved logo.
+  expect(engravingIn(container)).toBe(engraving());
   await expectNoAxe(container);
 });
 

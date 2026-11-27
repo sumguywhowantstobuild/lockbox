@@ -134,8 +134,20 @@
   }
 
   /* Marks drawn in a fixed colour would disappear on a dark or a light contrast theme. */
-  .app :is(.vmini, .rose, .vprint, .dmark, .appmark) path {
+  .app :is(.vmini, .vprint, .dmark, .appmark) path {
     stroke: CanvasText !important;
+  }
+
+  /* The engraved logo is filled ribbons: the theme's text colour fills them, with no stroke round them. */
+  .app .rose path {
+    fill: CanvasText !important;
+    stroke: none !important;
+  }
+
+  /* The words' patch keeps its filled box in the theme's own background, without the fade (Windows drops shadows here). */
+  .app .say {
+    box-shadow: none !important;
+    background: Canvas !important;
   }
 
   .app .ki {
