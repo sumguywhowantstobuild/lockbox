@@ -185,7 +185,10 @@ jobs:
       - name: Install tauri-driver
         if: steps.tauri-driver.outputs.cache-hit != 'true'
         run: cargo install tauri-driver --locked --version 2.1.0
-      # The driver and the web-view runtime must share a major version; the run refuses otherwise, and says both.
+      # The driver and the web-view runtime must match in their first three parts (only the last may differ); the run
+      # refuses otherwise, and says both. The image's driver follows the image's Edge browser, and the runtime updates on
+      # its own, so they can differ: the end-to-end step gets a driver downloaded for the runtime's exact version (the
+      # download step below). The site's browser tests below keep the image's driver, which matches the image's Edge browser.
       - name: Show the web-view runtime and the Edge WebDriver versions
         shell: pwsh
         run: |
@@ -199,7 +202,15 @@ jobs:
         env:
           PETALOCK_SITE_BROWSER: "1"
         run: node --test scripts/site.test.mjs
+      # The Edge WebDriver for the runtime's exact version, from Microsoft's driver host: its signature must be valid and
+      # Microsoft Corporation's before it is used, and it is handed to the end-to-end step alone (scripts/webview-driver.mjs).
+      # Just before that step, so a failed download does not stop the site's browser tests above.
+      - name: Download the Edge WebDriver that matches the web-view runtime
+        id: webview-driver
+        run: node scripts/webview-driver.mjs
       - name: End-to-end tests
+        env:
+          PETALOCK_EDGEDRIVER: ${{ steps.webview-driver.outputs.path }}
         run: node scripts/e2e.mjs
       # A run that did not pass leaves its build and test logs in target/e2e-logs (made-up test state only, never the
       # web-view data), kept for a week to read why.
