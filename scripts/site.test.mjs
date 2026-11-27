@@ -473,14 +473,24 @@ test("the_two_line_alternative_takes_the_path_as_data", async (t) => {
   const decoy = join(dir, "decoy.bin");
   writeFileSync(chosen, "MU chosen bytes");
   writeFileSync(decoy, "MU decoy bytes");
+  // Windows PowerShell 5.1 by its full path, without the module path of the PowerShell 7 that may have started node (CI's
+  // default shell): 5.1 would autoload 7's Microsoft.PowerShell.Utility for Get-FileHash and fail; it works its own out
+  const exe = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  const env = { ...process.env };
+  delete env.PSModulePath;
   const run = (typed, lines) => {
     const encoded = Buffer.from(lines.replace(/\n/g, "; "), "utf16le").toString("base64");
-    const r = spawnSync("powershell.exe", ["-NoProfile", "-EncodedCommand", encoded], { input: `${typed}\n`, encoding: "utf8", windowsHide: true, timeout: 60_000 });
-    return `${r.stdout}`.replace(/^Full path of the downloaded file:\s*/, "").trim();
+    const r = spawnSync(exe, ["-NoProfile", "-EncodedCommand", encoded], { input: `${typed}\n`, encoding: "utf8", env, windowsHide: true, timeout: 60_000 });
+    const out = `${r.stdout}`.replace(/^Full path of the downloaded file:\s*/, "").trim();
+    // PowerShell's own errors (CLIXML on stderr) beside the output, so a failure says why
+    const errors = `${r.stderr}`.replace(/_x000D__x000A_/g, "\n").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+    return { out, why: `status ${r.status}${r.error ? `; spawn: ${r.error.code ?? r.error.message}` : ""}; stderr: ${errors.slice(-1500)}` };
   };
   const right = powershellAlternative({ fingerprint: sha256(readFileSync(chosen)).toUpperCase() });
-  assert.match(run(chosen, right), /True$/, "the file at the typed path matches its own digest");
-  assert.match(run(decoy, right), /False$/, "another file does not");
+  const ok = run(chosen, right);
+  assert.match(ok.out, /True$/, `the file at the typed path matches its own digest (${ok.why})`);
+  const other = run(decoy, right);
+  assert.match(other.out, /False$/, `another file does not (${other.why})`);
   // (had `$( )` in the folder name been run, the path would not name the file and the first check would print False)
 });
 
