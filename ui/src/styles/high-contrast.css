@@ -144,8 +144,9 @@
     stroke: none !important;
   }
 
-  /* The words' patch keeps its filled box in the theme's own background, without the fade (Windows drops shadows here). */
-  .app .say {
+  /* The words' patches, behind the name and the sentence, keep their filled box in the theme's own background, without the
+     fade (Windows drops shadows here). */
+  .app :is(.mark, .say) {
     box-shadow: none !important;
     background: Canvas !important;
   }

@@ -6,9 +6,15 @@ import { readBeside } from "../testing/files";
 const COMPONENTS = readBeside(import.meta.url, "./components.css").replace(/\/\*[\s\S]*?\*\//g, "");
 const HIGH_CONTRAST = readBeside(import.meta.url, "./high-contrast.css").replace(/\/\*[\s\S]*?\*\//g, "");
 
+/** Whether a rule's selector list is `selector`, or names it as one of its parts (a list is split on its commas, which a
+ *  selector such as `:is(.mark, .say)` holds inside itself, so the whole list is compared too). */
+function names(selectors: string, selector: string): boolean {
+  return selectors.trim() === selector || selectors.split(",").some((part) => part.trim() === selector);
+}
+
 function declarationsFor(selector: string): string {
   for (const rule of COMPONENTS.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
-    if ((rule[1] ?? "").split(",").some((part) => part.trim() === selector)) return (rule[2] ?? "").replace(/\s+/g, " ");
+    if (names(rule[1] ?? "", selector)) return (rule[2] ?? "").replace(/\s+/g, " ");
   }
   throw new Error(`${selector} has no rule in components.css`);
 }
@@ -42,7 +48,7 @@ const FORCED = HIGH_CONTRAST.slice(HIGH_CONTRAST.indexOf("@media (forced-colors:
 /** The declarations of the rule for `selector` inside the contrast theme's block. */
 function forcedDeclarationsFor(selector: string): string {
   for (const rule of FORCED.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
-    if ((rule[1] ?? "").split(",").some((part) => part.trim() === selector)) return (rule[2] ?? "").replace(/\s+/g, " ");
+    if (names(rule[1] ?? "", selector)) return (rule[2] ?? "").replace(/\s+/g, " ");
   }
   throw new Error(`${selector} has no rule in high-contrast.css's forced-colors block`);
 }
@@ -70,13 +76,27 @@ test("the_engraved_logo_is_filled_white_at_half_strength_and_a_contrast_theme_fi
 });
 
 test("the_dark_sides_words_sit_on_a_soft_patch_and_a_contrast_theme_keeps_the_box_without_the_fade", () => {
-  // The words ("Your items stay encrypted…" and each step's line) on a patch of the side's own colour, its edge faded by a
-  // 28px blur, so no engraved line crosses a letter; a contrast theme drops the fade (Windows removes shadows there anyway)
-  // and keeps the filled box in its own background colour.
-  const say = declarationsFor(".say");
-  expect(say).toMatch(/background: var\(--field\)/);
-  expect(say).toMatch(/box-shadow: 0 0 28px 22px var\(--field\)/);
-  const forced = forcedDeclarationsFor(".app .say");
+  // The words ("Your items stay encrypted…" and each step's line) and, since Task 9d, the name above them (the lines crossed
+  // it at 960 by 460), on a patch of the side's own colour, its edge faded by a 28px blur, so no engraved line crosses a
+  // letter. One rule holds both, so they can't drift apart. A contrast theme drops the fade (Windows removes shadows there
+  // anyway) and keeps the filled box in its own background colour.
+  const patch = declarationsFor(".field :is(.mark, .say)");
+  expect(patch).toMatch(/background: var\(--field\)/);
+  expect(patch).toMatch(/box-shadow: 0 0 28px 22px var\(--field\)/);
+  for (const own of [".mark", ".say"]) {
+    expect(declarationsFor(own), `${own} keeps no patch of its own`).not.toMatch(/box-shadow|background/);
+  }
+  // A flex box fills the side's width, and the name's patch would be a band across the whole top: its box hugs the words.
+  expect(declarationsFor(".mark")).toMatch(/(^|[\s;])width: fit-content/);
+  const forced = forcedDeclarationsFor(".app :is(.mark, .say)");
   expect(forced).toMatch(/box-shadow: none !important/);
   expect(forced).toMatch(/background: Canvas !important/);
+  // No rule of the sentence's own in the contrast theme brings back a patch of its own (another kind of rule may come).
+  let own = "";
+  try {
+    own = forcedDeclarationsFor(".app .say");
+  } catch {
+    // None: the shared rule above is the sentence's only one there.
+  }
+  expect(own, "the sentence keeps no contrast patch of its own").not.toMatch(/box-shadow|background/);
 });

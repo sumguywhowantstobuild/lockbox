@@ -56,9 +56,11 @@
   stroke-width: 12.5;
 }
 
+/* The name's box hugs the mark and the word, so its patch (below) is a soft spot behind them, not a band across the top. */
 .mark {
   position: relative;
   display: flex;
+  width: fit-content;
   align-items: center;
   gap: 8px;
   margin: 0;
@@ -67,8 +69,6 @@
   letter-spacing: 0.01em;
 }
 
-/* The dark side's words sit on a soft patch of its own colour (the box filled with it, its edge faded by a 28px blur), so
-   no line of the engraved logo crosses a letter at any window or text size (Plan 5 Task 9b). */
 .say {
   position: absolute;
   left: 40px;
@@ -78,6 +78,12 @@
   font-size: 30px;
   line-height: 1.2;
   font-weight: 500;
+}
+
+/* The dark side's words, the name and the sentence, sit on one soft patch of its own colour (the box filled with it, its
+   edge faded by a 28px blur), so no line of the engraved logo crosses a letter at any window or text size (Plan 5 Task 9b;
+   the name since Task 9d, after the lines crossed it at 960 by 460). */
+.field :is(.mark, .say) {
   background: var(--field);
   box-shadow: 0 0 28px 22px var(--field);
 }
