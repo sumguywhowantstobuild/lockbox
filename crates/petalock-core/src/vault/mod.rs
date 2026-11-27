@@ -147,11 +147,18 @@ impl HeaderGuard {
     /// `replacing` is the slot type the write replaces; `None` is `accept_header`, the only
     /// write the pending consent lets through, and which never spreads a slot.
     fn check(&self, replacing: Option<SlotType>) -> Result<()> {
+        self.check_with(replacing, self.consent_pending)
+    }
+
+    /// [`check`](Self::check) with `consent_held` saying whether a pending consent holds the write back: a write that
+    /// accepts the changed header itself in the same commit (`Vault::change_password_accepting_header_with`) passes
+    /// `false`, and is still held back by everything else.
+    fn check_with(&self, replacing: Option<SlotType>, consent_held: bool) -> Result<()> {
         let refuse = |what| Err(CoreError::InvalidInput { what });
         if self.uncertain {
             return refuse("header state unknown; reopen the vault");
         }
-        if self.consent_pending && replacing.is_some() {
+        if consent_held && replacing.is_some() {
             return refuse("accept the header change first");
         }
         match &self.unverified {
@@ -372,7 +379,40 @@ impl Vault {
         new_password: &str,
         before_write: impl FnOnce() -> Result<()>,
     ) -> Result<()> {
-        self.guard.check(Some(SlotType::Password))?;
+        self.set_password(new_password, before_write, false)
+    }
+
+    /// [`change_password_with`](Self::change_password_with) for a header changed outside Petalock that the user has
+    /// agreed to accept ([`UnlockReport::header_mac_mismatch`]): the acceptance and the new password are ONE write, so
+    /// a stop at `before_write` (after the slow derivation, before any file is written) leaves both files exactly as
+    /// they were, and a write that lands carries both. The header is signed again with the new slot in it and both
+    /// files get it (`vault.json` first, as for a password change); the pending consent is cleared only once it landed.
+    ///
+    /// The password slot is the slot this write replaces, so a password slot the two copies disagree on (a recovery
+    /// unlock cannot check it) is replaced in both files, as `accept_header` followed by a password change would. A
+    /// recovery slot the copies disagree on (opened with the password) is refused in the guard's words, before
+    /// anything is derived or written: this write would copy one file's recovery slot over the other's, and
+    /// [`accept_header`](Self::accept_header), which keeps each file's own, is the write for that case. The
+    /// recovery slot is otherwise kept as it is. With nothing pending this is a plain password change.
+    pub fn change_password_accepting_header_with(
+        &mut self,
+        new_password: &str,
+        before_write: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        self.set_password(new_password, before_write, true)
+    }
+
+    /// The password change both public forms share; `accepting` also signs the header again (it replaces the pending
+    /// consent, which is cleared with the rest of the guard once the write has landed).
+    fn set_password(
+        &mut self,
+        new_password: &str,
+        before_write: impl FnOnce() -> Result<()>,
+        accepting: bool,
+    ) -> Result<()> {
+        let consent_held = self.guard.consent_pending && !accepting;
+        self.guard
+            .check_with(Some(SlotType::Password), consent_held)?;
         check_new_password(new_password)?;
         let old = self
             .header
@@ -394,7 +434,7 @@ impl Vault {
             &self.vault_key,
         );
         before_write()?;
-        self.replace_slot(slot, write_headers)
+        self.replace_slot(slot, write_headers, accepting)
     }
 
     /// Replaces the recovery secret; the old one stops working. Returns the new one, to
@@ -429,16 +469,18 @@ impl Vault {
             &derive_recovery_key(&secret, &salt),
             &self.vault_key,
         );
-        self.replace_slot(slot, write_headers_backup_first)?;
+        self.replace_slot(slot, write_headers_backup_first, false)?;
         Ok(secret)
     }
 
     /// Writes the header with `slot` in place of the slot of the same type, using `write`
     /// to pick the file order, then removes leftover `*.tmp` files (which may hold the old slot).
+    /// `resign` signs the header again first (the write that accepts a changed header).
     fn replace_slot(
         &mut self,
         slot: KeySlot,
         write: fn(&Path, &VaultHeader) -> Result<()>,
+        resign: bool,
     ) -> Result<()> {
         let mut header = self.header.clone();
         let target = header
@@ -447,6 +489,9 @@ impl Vault {
             .find(|s| s.slot_type == slot.slot_type)
             .ok_or(CoreError::Damaged { what: "key slots" })?;
         *target = slot;
+        if resign {
+            header.header_mac = Some(header_mac(&header, &self.vault_key));
+        }
         let primary = header.clone();
         self.commit(header, &primary, |dir| write(dir, &primary))?;
         // The guard let this write through, so it replaced the unverified slot (if any), and
@@ -1069,6 +1114,221 @@ mod tests {
         assert!(what(vault.change_password(NEW)).contains("copies disagree"));
         vault.regenerate_recovery().unwrap();
         assert_eq!(read_pair(&dir).0, read_pair(&dir).1);
+    }
+
+    /// A vault with the name changed outside Petalock (both files), opened with its recovery key: the header change is
+    /// pending. Returns the folder, the recovery secret, and the two files as they were left.
+    fn changed_header_opened_with_the_key() -> (TempDir, Vault, RecoverySecret, (Vec<u8>, Vec<u8>))
+    {
+        let parent = TempDir::new();
+        let created = Vault::create(parent.path(), "Family", PW).unwrap();
+        let dir = created.vault.dir().to_path_buf();
+        let recovery = created.recovery;
+        drop(created.vault);
+        let mut header = header_on_disk(&dir, HEADER_FILE);
+        header.name = "Renamed".to_owned();
+        for file in [HEADER_FILE, HEADER_BACKUP] {
+            fs::write(dir.join(file), serialize_header(&header)).unwrap();
+        }
+        let before = read_pair(&dir);
+        let (vault, report) = Vault::unlock_with_recovery(&dir, &recovery).unwrap();
+        assert!(report.header_mac_mismatch);
+        (parent, vault, recovery, before)
+    }
+
+    /// Task 9c: accepting a changed header and setting the new password is one write. Nothing is on disk before the
+    /// stop check (`before_write`, run once), then both files carry the same header: the new password slot, the
+    /// recovery slot as it was, and a MAC that verifies (the next unlock reports no change). One commit: the header
+    /// pair's write (`write_headers.before_first`) is reached exactly once, so a second pair of writes would fail.
+    #[test]
+    fn accepting_a_changed_header_and_setting_the_password_is_one_write() {
+        let (_parent, mut vault, recovery, before) = changed_header_opened_with_the_key();
+        let dir = vault.dir().to_path_buf();
+        let mut calls = 0;
+        let commits = std::rc::Rc::new(std::cell::Cell::new(0_u32));
+        let counted = std::rc::Rc::clone(&commits);
+        failpoint::observe(
+            "write_headers.before_first",
+            Box::new(move || counted.set(counted.get() + 1)),
+        );
+        vault
+            .change_password_accepting_header_with(NEW, || {
+                calls += 1;
+                assert_eq!(
+                    read_pair(&dir),
+                    before,
+                    "nothing written ahead of the check"
+                );
+                Ok(())
+            })
+            .unwrap();
+        failpoint::disarm_all();
+        assert_eq!(calls, 1, "the stop check ran once");
+        assert_eq!(commits.get(), 1, "one commit of the header pair, no more");
+        let (main, bak) = read_pair(&dir);
+        assert_eq!(main, bak, "both files carry the same header");
+        assert_ne!(main, before.0);
+        assert!(
+            !vault.guard.consent_pending,
+            "consent cleared once it landed"
+        );
+        drop(vault);
+
+        let (vault, report) = Vault::unlock_with_password(&dir, NEW).unwrap();
+        assert!(!report.header_mac_mismatch, "the header MAC verifies");
+        assert!(!report.used_backup_header);
+        assert_eq!(vault.name(), "Renamed", "the changed header was accepted");
+        assert_eq!(vault.unverified_slot(), None);
+        drop(vault);
+        assert!(is_wrong_password(Vault::unlock_with_password(&dir, PW)));
+        assert!(
+            Vault::unlock_with_recovery(&dir, &recovery).is_ok(),
+            "the recovery slot is as it was"
+        );
+    }
+
+    /// The password slot the copies disagree on (a recovery unlock cannot check it) is the one this write replaces:
+    /// both files get the new slot, so nothing is left unverified, and each credential works.
+    #[test]
+    fn accepting_with_an_unverified_password_slot_replaces_it_in_both_files() {
+        let parent = TempDir::new();
+        let created = Vault::create(parent.path(), "Family", PW).unwrap();
+        let dir = created.vault.dir().to_path_buf();
+        let recovery = created.recovery;
+        drop(created.vault);
+        edit_and_damage(&dir, 0);
+        let (mut vault, report) = Vault::unlock_with_recovery(&dir, &recovery).unwrap();
+        assert!(report.header_mac_mismatch);
+        assert_eq!(vault.unverified_slot(), Some(UnverifiedSlot::Password));
+
+        vault
+            .change_password_accepting_header_with(NEW, || Ok(()))
+            .unwrap();
+        assert_eq!(vault.unverified_slot(), None);
+        let (main, bak) = read_pair(&dir);
+        assert_eq!(main, bak);
+        drop(vault);
+
+        let (vault, report) = Vault::unlock_with_password(&dir, NEW).unwrap();
+        assert!(!report.header_mac_mismatch && !report.used_backup_header);
+        assert_eq!(vault.name(), "Renamed");
+        drop(vault);
+        assert!(is_wrong_password(Vault::unlock_with_password(&dir, PW)));
+        assert!(Vault::unlock_with_recovery(&dir, &recovery).is_ok());
+    }
+
+    /// A `before_write` error writes nothing and leaves the consent pending, so the acceptance can still be given.
+    #[test]
+    fn a_stop_before_the_combined_write_changes_nothing_and_keeps_the_consent_pending() {
+        let (_parent, mut vault, _recovery, before) = changed_header_opened_with_the_key();
+        let dir = vault.dir().to_path_buf();
+        let stopped =
+            vault.change_password_accepting_header_with(NEW, || Err(CoreError::Cancelled));
+        assert!(matches!(stopped, Err(CoreError::Cancelled)));
+        assert_eq!(read_pair(&dir), before);
+        assert!(vault.guard.consent_pending);
+        assert_eq!(vault.name(), "Renamed");
+        assert_eq!(
+            what(vault.change_password(NEW)),
+            "accept the header change first"
+        );
+        vault
+            .change_password_accepting_header_with(NEW, || Ok(()))
+            .unwrap();
+        assert_eq!(read_pair(&dir).0, read_pair(&dir).1);
+    }
+
+    /// The refusals are the guard's own words, before the password is derived or anything is written: a header state
+    /// left unknown, and (opened with the password) a recovery slot the copies disagree on, which this write would
+    /// copy over.
+    #[test]
+    fn the_combined_write_refuses_in_the_guards_words_before_deriving() {
+        // A failed write whose read-back finds no `vault.json` leaves the header state unknown: reopen first.
+        let (_parent, mut vault, _recovery, _before) = changed_header_opened_with_the_key();
+        let dir = vault.dir().to_path_buf();
+        fs::remove_file(dir.join(HEADER_FILE)).unwrap();
+        failpoint::arm("write_headers.before_first");
+        assert!(vault.accept_header().is_err());
+        failpoint::disarm_all();
+        let after_failure = (
+            fs::read(dir.join(HEADER_FILE)).ok(),
+            fs::read(dir.join(HEADER_BACKUP)).unwrap(),
+        );
+        let mut asked = false;
+        let refused = vault.change_password_accepting_header_with(NEW, || {
+            asked = true;
+            Ok(())
+        });
+        assert!(what(refused).contains("reopen the vault"));
+        assert!(!asked);
+        assert_eq!(
+            (
+                fs::read(dir.join(HEADER_FILE)).ok(),
+                fs::read(dir.join(HEADER_BACKUP)).unwrap()
+            ),
+            after_failure
+        );
+        drop(vault);
+
+        // Opened with the password, the recovery slot of the other copy is unchecked: replace it first.
+        let parent = TempDir::new();
+        let created = Vault::create(parent.path(), "Family", PW).unwrap();
+        let dir = created.vault.dir().to_path_buf();
+        drop(created);
+        edit_and_damage(&dir, 1);
+        let before = read_pair(&dir);
+        let (mut vault, report) = Vault::unlock_with_password(&dir, PW).unwrap();
+        assert!(report.header_mac_mismatch);
+        assert_eq!(vault.unverified_slot(), Some(UnverifiedSlot::Recovery));
+        let mut asked = false;
+        let refused = vault.change_password_accepting_header_with(NEW, || {
+            asked = true;
+            Ok(())
+        });
+        assert_eq!(
+            what(refused),
+            "header copies disagree; replace the unchecked credential first"
+        );
+        assert!(!asked);
+        assert_eq!(read_pair(&dir), before);
+        assert!(vault.guard.consent_pending, "still to be accepted");
+    }
+
+    /// A write that dies between the two files: `vault.json` holds the whole change (new password, MAC that
+    /// verifies), `.bak` is one version behind, as for a password change; with an unverified slot in play the vault
+    /// blocks until reopened.
+    #[test]
+    fn a_failed_combined_write_leaves_vault_json_whole_or_blocks() {
+        let (_parent, mut vault, _recovery, before) = changed_header_opened_with_the_key();
+        let dir = vault.dir().to_path_buf();
+        failpoint::arm("write_headers.before_second");
+        let failed = vault.change_password_accepting_header_with(NEW, || Ok(()));
+        failpoint::disarm_all();
+        assert!(matches!(failed, Err(CoreError::Io(_))));
+        let (main, bak) = read_pair(&dir);
+        assert_ne!(main, before.0, "vault.json landed");
+        assert_eq!(bak, before.1, ".bak is one version behind");
+        drop(vault);
+        let (vault, report) = Vault::unlock_with_password(&dir, NEW).unwrap();
+        assert!(!report.header_mac_mismatch && !report.used_backup_header);
+        drop(vault);
+
+        // With a password slot the copies disagree on, nothing can be reconciled: blocked until reopened.
+        let parent = TempDir::new();
+        let created = Vault::create(parent.path(), "Family", PW).unwrap();
+        let dir = created.vault.dir().to_path_buf();
+        let recovery = created.recovery;
+        drop(created.vault);
+        edit_and_damage(&dir, 0);
+        let (mut vault, _) = Vault::unlock_with_recovery(&dir, &recovery).unwrap();
+        failpoint::arm("write_headers.before_second");
+        let failed = vault.change_password_accepting_header_with(NEW, || Ok(()));
+        failpoint::disarm_all();
+        assert!(matches!(failed, Err(CoreError::Io(_))));
+        assert!(
+            what(vault.change_password_accepting_header_with(NEW, || Ok(())))
+                .contains("reopen the vault")
+        );
     }
 
     /// A failed replacement while a slot is unverified blocks until reopened; the reopened

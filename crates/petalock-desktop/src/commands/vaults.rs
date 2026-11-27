@@ -815,14 +815,15 @@ impl Shell {
             return Err(ShellError::ChoiceExpired);
         }
         not_cancelled(cancel)?;
-        if header_changed && accept_changed_header {
-            vault.accept_header()?;
-        }
         // The stop check right before the header writes, after the new password's derivation, as a password change
-        // has it: a lock during that second is `Locked`, with nothing written.
-        if let Err(error) =
-            vault.change_password_with(&new_password, || before_header_writes(cancel))
-        {
+        // has it: a lock during that second is `Locked`, with nothing written. A changed header the person accepted
+        // goes in the same write (never ahead of it), so that `Locked` is true of the acceptance too.
+        let before_write = || before_header_writes(cancel);
+        let set = match header_changed && accept_changed_header {
+            true => vault.change_password_accepting_header_with(&new_password, before_write),
+            false => vault.change_password_with(&new_password, before_write),
+        };
+        if let Err(error) = set {
             if let CoreError::Cancelled = error {
                 return Err(ShellError::Locked);
             }
@@ -1819,8 +1820,9 @@ mod tests {
         let ts = TestShell::new();
 
         // Recovery: the session never opens. The lock lands while the confirm's closure runs; whether its cancel is
-        // seen before the header is accepted (`Locked`, nothing changed; fix round 2) or after the password is set
-        // (`LockedAfterChange`) depends on timing, and both are right.
+        // seen before the one header write (which accepts the changed header and sets the password together: `Locked`,
+        // both files as they were) or after it (`LockedAfterChange`) depends on timing, and both are right. Task 9c:
+        // `Locked` never comes with a changed file, whatever the timing.
         let (id, dir, recovery) = registered(&ts);
         change_header(&dir);
         let before = headers(&dir);
@@ -3052,6 +3054,46 @@ mod tests {
         assert!(ts.shell.sessions.list().is_empty());
         assert!(is_free(&dir));
         assert!(password_works(&dir, PW));
+    }
+
+    /// Task 9c: a lock that lands while the new password is derived, on a recovery that also accepts a changed header,
+    /// is seen at the stop check right before the one header write: `Locked`, and both header files are byte for byte
+    /// as before (the acceptance was not written ahead of the password). The lock is forced at that stop check, so
+    /// the window is hit on every run, not by timing; the flag proves the lock came there.
+    #[test]
+    fn a_lock_while_the_new_password_is_derived_after_accepting_changes_nothing() {
+        let ts = TestShell::new();
+        let (id, dir, recovery) = registered(&ts);
+        change_header(&dir);
+        let before = headers(&dir);
+        let checked = check(&ts, id, &recovery).unwrap();
+        assert_eq!(checked.kind, RecoveryCheckKind::HeaderChanged);
+        let shell = Arc::clone(&ts.shell);
+        let locked_there = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&locked_there);
+        failpoint::observe(
+            BEFORE_HEADER_WRITES,
+            Box::new(move || {
+                flag.store(true, Ordering::SeqCst);
+                shell.sessions.lock_all(LockReason::WindowsLocked);
+            }),
+        );
+        let answer = finish(&ts, &checked.choice, NEW_PW, true);
+        failpoint::disarm_all();
+        assert!(
+            locked_there.load(Ordering::SeqCst),
+            "the lock came at the stop check"
+        );
+        assert_eq!(answer.err(), Some(ShellError::Locked));
+        assert_eq!(
+            headers(&dir),
+            before,
+            "neither the acceptance nor the password was written"
+        );
+        assert!(ts.shell.sessions.list().is_empty());
+        assert!(is_free(&dir));
+        assert!(password_works(&dir, PW), "the old password still opens it");
+        assert!(!password_works(&dir, NEW_PW));
     }
 
     /// The check and the finish are refused for a vault that is not on the list and for one that is unlocked, the
