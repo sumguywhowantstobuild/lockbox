@@ -69,6 +69,10 @@ const tools = [
       // and a timed-out pair is a file not scanned: INCOMPLETE. 60 s still stops a rule that truly hangs.
       "--timeout", "60",
       ...["rust", "typescript", "secrets", "security-audit"].flatMap((p) => ["--config", `p/${p}`]),
+      // var-in-href is for server templates filled with visitor input. The only templated links here are the site's
+      // (site/*.html), filled at build by scripts/site-build.mjs from the fixed GitHub address, a checked version tag and
+      // file name, and escaped; the site's CSP blocks script addresses anyway (Plan 5 Task 6).
+      "--exclude-rule", "generic.html-templates.security.var-in-href.var-in-href",
       "--json", "--output", out,
       ...repoFiles(),
     ],

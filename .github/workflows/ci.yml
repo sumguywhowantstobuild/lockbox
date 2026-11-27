@@ -193,6 +193,12 @@ jobs:
           "WebView2 runtime: $((Get-ItemProperty $key -ErrorAction SilentlyContinue).pv)"
           "EDGEWEBDRIVER: $env:EDGEWEBDRIVER"
           & (Join-Path $env:EDGEWEBDRIVER 'msedgedriver.exe') --version
+      # The download page, guide and not-found page in the runner's Edge: every request same-site, axe at both sizes in
+      # light and dark, the contrast-theme rules (Plan 5 Task 6). Set to fail, not skip, when the driver or axe is missing.
+      - name: The site in a real browser
+        env:
+          PETALOCK_SITE_BROWSER: "1"
+        run: node --test scripts/site.test.mjs
       - name: End-to-end tests
         run: node scripts/e2e.mjs
       # A run that did not pass leaves its build and test logs in target/e2e-logs (made-up test state only, never the

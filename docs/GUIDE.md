@@ -4,6 +4,9 @@ Petalock keeps your passwords, keys, notes and files on your own PC, in an encry
 account and no server. This guide is short on purpose. The longer, exact version of what Petalock can and can't protect is
 in [SECURITY.md](../SECURITY.md).
 
+How to install, check the download, update and uninstall Petalock is on the guide page, https://petalock.arielmaningas.com/guide/
+(the page's own text is in `site/guide/index.html`). This document covers using Petalock once it is installed.
+
 Petalock is still being built and **hasn't been checked by an independent security expert**. Please don't keep your real
 passwords in it yet.
 

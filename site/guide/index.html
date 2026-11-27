@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Petalock: guide</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="ghero">
+<svg class="ht" viewBox="0 0 1280 300" preserveAspectRatio="xMaxYMid slice" aria-hidden="true">{{{picture_guide}}}</svg>
+<nav class="top" aria-label="Main"><a class="brand" href="/">{{{icon_menu}}}Petalock</a><a href="/">Download</a><a href="/guide/" aria-current="page">Guide</a><a class="hide-s" href="{{repo_url}}">Source code</a></nav>
+<h1>Guide</h1>
+<p><span>Installing, checking, updating and removing Petalock, and what happens to your vaults.</span></p>
+</header>
+<main id="main"><div class="wrap gl">
+<nav class="toc" aria-label="On this page"><p>On this page</p>
+<ol><li><a href="#install">Install</a></li><li><a href="#check-the-file">Check the file</a></li><li><a href="#the-warnings">The warnings</a></li><li><a href="#internet-and-webview2">Internet and WebView2</a></li><li><a href="#update">Update</a></li><li><a href="#uninstall">Uninstall</a></li><li><a href="#going-back">Going back</a></li><li><a href="#delete-a-vault">Delete a vault</a></li><li><a href="#if-petalock-won-t-start">If Petalock won't start</a></li></ol></nav>
+<article>
+<div class="intro">
+<p>Petalock is an early preview: it is unsigned and has not been independently audited.</p>
+<p>Get Petalock only from petalock.arielmaningas.com or github.com/sumguywhowantstobuild/petalock.</p>
+<p>Windows 11, 64-bit is the only tested setup. Windows 10 (64-bit) should work but hasn't been tested.</p>
+</div>
+<section id="install"><h2>Install</h2>
+<p>Get the installer from the <a href="/">download page</a>, check its fingerprint (the next section), then open it. No administrator password is needed: Petalock goes into your own user folder. If Petalock is running, setup asks you to quit it from its icon by the clock, with Retry and Cancel; it never closes Petalock itself.</p></section>
+<section id="check-the-file"><h2>Check the file</h2>
+<p>Every release lists the file's fingerprint. Paste the PowerShell line from the download page; it prints True when the file is ours.</p>
+<label class="ps-label" for="ps-line"><!--if:release-->PowerShell line to check the file, for version {{version}}<!--/if--><!--if:soon-->PowerShell line to check the file, for the first release<!--/if--></label>
+<textarea id="ps-line" class="code m" readonly rows="3" spellcheck="false">{{ps_line}}</textarea>
+<p>If you saved the file somewhere other than Downloads, or your browser renamed it, use these two lines instead. Paste both, then type or paste the file’s full path when PowerShell asks, without quotation marks.</p>
+<label class="ps-label" for="ps-alt"><!--if:release-->PowerShell lines for a file saved elsewhere or renamed, for version {{version}}<!--/if--><!--if:soon-->PowerShell lines for a file saved elsewhere or renamed, for the first release<!--/if--></label>
+<textarea id="ps-alt" class="code m" readonly rows="3" spellcheck="false">{{ps_alt}}</textarea>
+<p class="stop"><strong>If it prints False, stop and delete the file.</strong></p>
+<p>If you have GitHub’s command-line tool, you can also check GitHub’s build record for the file. It should report the release workflow on <code>main</code>; if it reports anything else or fails, stop and delete the file.</p>
+<label class="ps-label" for="gh-line">GitHub build record check (needs GitHub’s command-line tool)</label>
+<textarea id="gh-line" class="code m" readonly rows="4" spellcheck="false">{{gh_line}}</textarea>
+<p>For a file saved elsewhere or renamed, run this in the same PowerShell window right after the two lines above, so it checks the same file:</p>
+<label class="ps-label" for="gh-alt">GitHub build record check for the file at that path</label>
+<textarea id="gh-alt" class="code m" readonly rows="4" spellcheck="false">{{gh_alt}}</textarea></section>
+<section id="the-warnings"><h2>The warnings</h2>
+<p>An unsigned, new file gets warnings from your browser and from Windows. They mean Windows doesn't know the file yet, not that it found something wrong; the exact words may differ on your PC. A matching fingerprint shows the file is the one we published. It does not mean no security product will object to it.</p>
+<p>Your browser may say the file isn't commonly downloaded: choose to keep it, and only for that notice. Then check the saved file (the section above). Windows may show “Windows protected your PC”: only after the check printed True, choose More info, then Run anyway, and only for that screen.</p>
+<p class="stop"><strong>Stop and delete the file if your browser or a security product says it found malware or a virus, or if Windows asks for administrator permission in any form (a password or a Yes/No prompt): setup never needs it.</strong></p>
+<p>If Smart App Control is on, Windows may block Petalock with no Run anyway option. This preview can’t run on that PC until Petalock is signed; we don’t suggest turning Smart App Control off for it.</p></section>
+<section id="internet-and-webview2"><h2>Internet and WebView2</h2>
+<p>Setup goes online only when Microsoft Edge WebView2 is missing, to get it from Microsoft. Windows 11 includes it. Microsoft installs a shared WebView2 Runtime that other apps use too; Petalock’s uninstall leaves it installed. If setup’s download fails, install Microsoft’s official “Evergreen Standalone” WebView2 Runtime from Microsoft’s website, then run setup again. What the WebView2 installer itself changes on the PC is Microsoft’s, not Petalock’s.</p>
+<p>Petalock has no online features: it sends nothing about you or your vaults anywhere.</p></section>
+<section id="update"><h2>Update</h2>
+<p>Install the new version over the old one. Your vaults, settings and “start with Windows” stay as they are. Petalock doesn’t update itself or tell you about new versions: check the <a href="/">download page</a> or the <a href="{{releases_url}}">releases list</a>.</p></section>
+<section id="uninstall"><h2>Uninstall</h2>
+<p>Before you uninstall, note where your vaults are: new vaults go in %USERPROFILE%\Petalock Vaults\, and a vault you made somewhere else stays there. Finish any restore that is in progress, because you need Petalock for both.</p>
+<p>Open Settings, then Apps, then Installed apps, find Petalock and choose Uninstall: the program and the temporary copies of opened files go; your vaults stay where they are.</p>
+<p>If the uninstaller says some opened copies of your files are still in use or could not be removed, close whatever holds them, then choose Retry. Cancel stops there and leaves Petalock installed. Some copies may already have been removed by then.</p>
+<p>The “Delete the application data” box removes only the two folders under AppData where Petalock’s web view keeps its data. It never removes a vault, and it leaves Petalock’s settings and its list of vaults.</p>
+<p>Optionally, once the uninstall has finished, you can also remove Petalock’s own records by deleting the folder %LOCALAPPDATA%\Petalock: it holds the settings, the list of vaults and the restore and output records, never the vaults.</p>
+<ol class="steps"><li>Press the Windows key and R, type %LOCALAPPDATA% and press Enter.</li><li>In File Explorer, delete the folder named Petalock. If the deleted folder appears in the Recycle Bin, you can select that entry only and delete it permanently; if Windows says it will delete permanently and you didn't expect that, cancel.</li></ol></section>
+<section id="going-back"><h2>Going back</h2>
+<p>Older versions stay on the <a href="{{releases_url}}">releases list</a>. Each release lists its own installer and its own fingerprint (the .sha256 file on its page). Check the exact file you will open against that release's fingerprint, not against this page's: the PowerShell line above is for <!--if:release-->version {{version}}<!--/if--><!--if:soon-->the first release<!--/if--> only.</p>
+<p>Setup lets you install one over a newer version, but going back hasn’t been tested: an older version may not open vaults or settings a newer one has changed, so keep a tested backup before you try. If a release is withdrawn, the download page goes back to the last good one and the withdrawn release’s notes say why.</p></section>
+<section id="delete-a-vault"><h2>Delete a vault</h2>
+<p>First note the vault's exact folder (in Petalock, choose Show in File Explorer). If you might want the vault back, make sure you have a tested backup you can restore. Then remove the vault from Petalock's list, then delete that folder in File Explorer. It usually goes to the Recycle Bin; a very large folder or some drives delete it for good, so if Windows says it will delete it permanently and you didn't expect that, cancel. If the deleted folder appears in the Recycle Bin, you can select that entry only and delete it permanently.</p></section>
+<section id="if-petalock-won-t-start"><h2>If Petalock won't start</h2>
+<p>Restart your PC and try again. Look for Petalock's icon by the clock. Check that Microsoft Edge WebView2 Runtime is installed. Your vaults stay safe in their folders either way.</p></section>
+</article></div></main>
+<footer><div class="wrap"><span class="f">{{{icon_foot}}}Petalock</span>
+<ul class="links"><li><a href="{{notes_url}}">Release notes</a></li><li><span aria-hidden="true">·</span> <a href="{{releases_url}}">Older versions</a></li><li><span aria-hidden="true">·</span> <a href="{{repo_url}}">Source code</a></li><li><span aria-hidden="true">·</span> <a href="{{security_url}}">Security policy</a></li></ul>
+<p>Petalock is free and open source (MIT). Made by Ariel Maningas.</p></div></footer>
+</body>
+</html>

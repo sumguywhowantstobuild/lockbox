@@ -100,9 +100,11 @@ there would vanish). Links in running text are always underlined, so they never 
 the band are decorative, and no text sits on the picture's lines at any width. **standard** (AA asks 4.5:1 for text, 3:1 for the focus ring).
 
 **High contrast** (Windows contrast themes, `forced-colors: active`): the picture (drawn inline; if Task 6 picks image
-files, the picture is hidden instead, see [What Task 6 still decides](#what-task-6-still-decides)) and the band switch to
-the system's text colour on the system's background, buttons and cards get a visible system-coloured border, and nothing depends on
-colour alone (the stop line is also bold and starts with "stop"). **standard**.
+files, the picture is hidden instead, see [What Task 6 still decides](#what-task-6-still-decides)) switches to the
+system's text colour on the system's background; the band is hidden, since both of its sides become the system's
+background and a dissolve between them would read as a solid bar (Task 6, 2026-11-27); buttons and cards get a visible
+system-coloured border, and nothing depends on colour alone (the stop line is also bold and starts with "stop").
+**standard**.
 
 ### Type
 
@@ -207,17 +209,18 @@ on the paper: a list of sections on the left that stays in view while reading ("
 right. At 900 px and narrower the list goes above the sections. The guide's full words are written in Task 6 from `docs/GUIDE.md`
 and reviewed with that task (high risk, so an independent review reads them before they ship); the check and deletion
 steps are word for word the ones below. Its sections, in this order, each with an anchor (`#install`,
-`#delete-a-vault` and so on), and what each must say:
+`#delete-a-vault` and so on), after a short opening (below) that gives the preview disclosure, the official sources and
+the tested Windows version before any install instruction, and what each must say:
 
 | Section | Must say |
 |---|---|
 | Install | No administrator password; Petalock goes into your own user folder. If Petalock is running, setup asks you to quit it from its icon by the clock, with Retry and Cancel; it never closes Petalock itself. |
-| Check the file | The words below, the PowerShell line, and what to do on False. For people with GitHub's command-line tool, GitHub's build record too: `gh attestation verify <file> --repo sumguywhowantstobuild/petalock`, which should report the release workflow on `main`. |
-| The warnings | The browser's and Windows' warnings, More info then Run anyway, only after the fingerprint matches; Smart App Control, as on the download page. |
-| Internet and WebView2 | Setup goes online only when WebView2 is missing, to get it from Microsoft. If that fails, install "Microsoft Edge WebView2 Runtime" from Microsoft's website, then run setup again. What the WebView2 installer itself changes on the PC is Microsoft's, not Petalock's. |
+| Check the file | The words below, the PowerShell line (labelled with its version in the guide), and what to do on False. For people with GitHub's command-line tool, GitHub's build record too, as a quoted path pinned to the release workflow file on `main` by its certificate identity: `gh attestation verify "$HOME\Downloads\Petalock_<version>_x64-setup.exe" --repo sumguywhowantstobuild/petalock --cert-identity "https://github.com/sumguywhowantstobuild/petalock/.github/workflows/release.yml@refs/heads/main" --source-ref refs/heads/main`, which should report the release workflow on `main`; anything else or a failure means stop and delete the file. For a file saved elsewhere or renamed, the two-line alternative (below) takes the path once as data in `$f`, and the guide's `gh attestation verify $f` with the same pins checks the same file. |
+| The warnings | In this order: keep the file only for the "not commonly downloaded" notice; check the saved file; More info then Run anyway only for "Windows protected your PC" and only after it printed True; stop and delete the file on a malware or virus finding or any administrator permission prompt (a password or a Yes/No); Smart App Control, as on the download page (the words are below). |
+| Internet and WebView2 | Setup goes online only when WebView2 is missing, to get it from Microsoft. Microsoft installs a shared WebView2 Runtime that other apps use too; Petalock's uninstall leaves it installed. If setup's download fails, install Microsoft's official "Evergreen Standalone" WebView2 Runtime from Microsoft's website, then run setup again. What the WebView2 installer itself changes on the PC is Microsoft's, not Petalock's. |
 | Update | Install over the old version; what stays; no automatic updates (below). |
-| Uninstall | Where to find it in Settings; the program and the copies of opened files go, vaults stay; if a copy is still open the uninstall stops before removing anything else, so close it and run it again; what the "Delete the application data" box removes and what stays, with the steps to delete `%LOCALAPPDATA%\Petalock` by hand for no trace (it holds the settings and the vault list, not the vaults). |
-| Going back | Older versions on the releases list, with the caution below. |
+| Uninstall | Where to find it in Settings; the program and the copies of opened files go, vaults stay; if the uninstaller says some opened copies are still in use or could not be removed, close whatever holds them, then choose Retry (Cancel leaves Petalock installed, and some copies may already be gone); what the "Delete the application data" box removes and what stays. Before the uninstall steps (Petalock is needed for both): note where your vaults are (new vaults default to `%USERPROFILE%\Petalock Vaults\`, others stay where they were made) and finish any restore in progress. After a successful uninstall, as an optional removal of Petalock's own records (not a promise of "no trace"): delete `%LOCALAPPDATA%\Petalock`, which holds the settings, the vault list and the restore and output records, never the vaults; if the deleted folder appears in the Recycle Bin, select that entry only and delete it permanently (never "empty" the bin). |
+| Going back | Older versions on the releases list, with the caution below; each release lists its own installer and its own fingerprint (its `.sha256` file), so the exact file to be opened is checked against that release's fingerprint, not the page's. |
 | Delete a vault | The words below. |
 | If Petalock won't start | Restart, look for the icon by the clock, check WebView2 is installed; the vaults stay safe in their folders. |
 
@@ -266,16 +269,23 @@ may use either.
   you or your vaults anywhere. / Button: Download
 - 2 Check the file is ours: Before you open it, check that the file you got is the one we published. Open PowerShell
   and paste this line (click in the box, press Ctrl+A, then Ctrl+C):
-  `(Get-FileHash "$HOME\Downloads\Petalock_0.1.0_x64-setup.exe").Hash -eq "<FINGERPRINT IN CAPITALS>"`
-  / If you saved it somewhere else, or your browser renamed it (for example with “(1)” at the end), change the line to
-  match the file you’ll open. / It should print True. / **If it prints False,
+  `(Get-FileHash -LiteralPath "$HOME\Downloads\Petalock_0.1.0_x64-setup.exe").Hash -eq "<FINGERPRINT IN CAPITALS>"`
+  / If you saved it somewhere else, or your browser renamed it (for example with “(1)” at the end), use these two lines
+  instead. Paste both, then type or paste the file’s full path when PowerShell asks, without quotation marks. / Label:
+  PowerShell lines for a file saved elsewhere or renamed, with the two lines in a second read-only box:
+  `$f = Read-Host "Full path of the downloaded file"` then
+  `(Get-FileHash -LiteralPath $f).Hash -eq "<FINGERPRINT IN CAPITALS>"` (the path is typed at a prompt, so it is data and
+  never parsed as code). / It should print True. / **If it prints False,
   stop. Don't open the file: delete it and download it again from this page.** / Folded: See the fingerprint → the
   fingerprint (SHA-256) in groups of eight.
 - 3 Open it: Because the file is unsigned and new, you'll see warnings. The exact words may differ on your PC. / Your
-  browser may say the file isn't commonly downloaded. Choose to keep it. / Windows may show “Windows protected your
-  PC”. Choose More info, then Run anyway. / These warnings mean Windows doesn't know the file yet, not that it found
-  something wrong. A fake copy would bring the same warnings, which is why checking the fingerprint matters. / If
-  Smart App Control is on, Windows may block Petalock with no Run anyway option. This preview can’t run on that PC
+  browser may say the file isn't commonly downloaded. Choose to keep it, and only for that notice. Then check the saved
+  file in step 2. / Windows may show “Windows protected your PC”. Only after step 2 printed True, choose More info, then
+  Run anyway, and only for that screen. / **Stop and delete the file if your browser or a security product says it found
+  malware or a virus, or if Windows asks for administrator permission in any form (a password or a Yes/No prompt): setup
+  never needs it.** / These warnings mean
+  Windows doesn't know the file yet, not that it found something wrong. A fake copy would bring the same warnings, which
+  is why checking the fingerprint matters. / If Smart App Control is on, Windows may block Petalock with no Run anyway option. This preview can’t run on that PC
   until Petalock is signed; we don’t suggest turning Smart App Control off for it.
 
 **What happens to your vaults**
@@ -288,9 +298,11 @@ may use either.
   hasn’t been tested: an older version may not open vaults or settings a newer one has changed, so keep a tested backup
   before you try. If a release is
   withdrawn, this page goes back to the last good one and the withdrawn release’s notes say why.
-- Deleting a vault on purpose: Petalock can't delete a vault for you yet. Remove it from the list in Petalock, check
-  you have a tested backup if you might want it back, then delete its folder in File Explorer. / Link: Step by step in
-  the guide.
+- Deleting a vault on purpose: Petalock can't delete a vault for you yet. First note the vault's exact folder (in
+  Petalock, choose Show in File Explorer). If you might want the vault back, make sure you have a tested backup you can
+  restore. Then remove it from the list in Petalock, then delete that folder in File Explorer. / Link: Step by step in
+  the guide. (Reordered after the Task 6 review, 2026-11-27, to match the guide; the tested backup restored in the
+  corrections.)
 
 **What you need:** Windows 11, 64-bit. Windows 10 (64-bit) should work but hasn't been tested. / Setup needs the
 internet only if your PC lacks Microsoft Edge WebView2 (the same line as step 1).
@@ -303,12 +315,46 @@ GitHub’s build record).
 Made by Ariel Maningas.
 
 **Guide: Check the file:** Every release lists the file's fingerprint. Paste the PowerShell line from the download page;
-it prints True when the file is ours. If you saved the file somewhere other than Downloads, or your browser renamed it,
-change the line to match the file you’ll open. If it prints False, stop and delete the file.
+it prints True when the file is ours. / If you saved the file somewhere other than Downloads, or your browser renamed it,
+use these two lines instead. Paste both, then type or paste the file’s full path when PowerShell asks, without quotation
+marks. (The two lines as on the download page; in the guide, each box is labelled with its version, "for version
+0.1.0" or "for the first release".) / **If it prints False, stop and delete the file.** / For people with GitHub's
+command-line tool: if it reports anything else or fails, stop and delete the file. For a file saved elsewhere or
+renamed, run this in the same PowerShell window right after the two lines above, so it checks the same file:
+`gh attestation verify $f --repo sumguywhowantstobuild/petalock --cert-identity
+"https://github.com/sumguywhowantstobuild/petalock/.github/workflows/release.yml@refs/heads/main" --source-ref
+refs/heads/main`.
 
-**Guide: Delete a vault:** Remove the vault from Petalock's list, make sure you have a tested backup if you might want
-it back, then delete its folder in File Explorer. It goes to the Recycle Bin; empty just that folder from the bin to
-delete it for good.
+**Guide: Uninstall (the records):** Before you uninstall, note where your vaults are: new vaults go in
+%USERPROFILE%\Petalock Vaults\, and a vault you made somewhere else stays there. Finish any restore that is in progress,
+because you need Petalock for both. / (the Settings steps and the uninstaller's Retry words, as in the table) /
+Optionally, once the uninstall has finished, you can also remove Petalock’s own records by deleting the folder
+%LOCALAPPDATA%\Petalock: it holds the settings, the list of vaults and the restore and output records, never the
+vaults. In File Explorer, delete the folder named Petalock. If the deleted folder appears in the Recycle Bin, you can
+select that entry only and delete it permanently; if Windows says it will delete permanently and you didn't expect
+that, cancel.
+
+**Guide: Delete a vault:** First note the vault's exact folder (in Petalock, choose Show in File Explorer). If you
+might want the vault back, make sure you have a tested backup you can restore. Then remove the vault from Petalock's
+list, then delete that folder in File Explorer. It usually goes to the Recycle Bin; a very large folder or some drives
+delete it for good, so if Windows says it will delete it permanently and you didn't expect that, cancel. If the deleted
+folder appears in the Recycle Bin, you can select that entry only and delete it permanently. (Changed after the Task 6
+review, 2026-11-27: the folder is noted before the list entry goes, the Recycle Bin is not promised, and the bin is
+never "emptied", which would delete unrelated files.)
+
+**Guide: opening (before Install):** Petalock is an early preview: it is unsigned and has not been independently
+audited. / Get Petalock only from petalock.arielmaningas.com or github.com/sumguywhowantstobuild/petalock. / Windows 11,
+64-bit is the only tested setup. Windows 10 (64-bit) should work but hasn't been tested.
+
+**Guide: The warnings:** An unsigned, new file gets warnings from your browser and from Windows. They mean Windows
+doesn't know the file yet, not that it found something wrong; the exact words may differ on your PC. A matching
+fingerprint shows the file is the one we published. It does not mean no security product will object to it. / Your
+browser may say the file isn't commonly downloaded: choose to keep it, and only for that notice. Then check the saved
+file (the section above). Windows may show “Windows protected your PC”: only after the check printed True, choose More
+info, then Run anyway, and only for that screen. / **Stop and delete the file if your browser or a security product says
+it found malware or a virus, or if Windows asks for administrator permission in any form (a password or a Yes/No
+prompt): setup never needs it.** / Smart App
+Control, as on the download page.
 
 **Not-found page:** 404 · Page not found / This page isn't here. / The address may be mistyped, or the page has moved.
 Download Petalock only from this site or its GitHub releases. / Buttons: Go to the download page · Read the guide
@@ -334,8 +380,9 @@ The drawings carried draft words and a few gaps; this document changes them as f
   turn it off. **standard**.
 - **Uninstalling:** the settings and vault list stay after an uninstall (the "Delete the application data" box removes
   only the app's two identifier folders under `AppData`, where the browser engine keeps its data, by the installer's
-  rules), so the page says so and the guide shows the manual removal; no trace is left only with the box ticked and
-  that folder deleted by hand. **standard**.
+  rules), so the page says so and the guide shows the manual removal of Petalock's records as optional, after the
+  uninstall and after noting where the vaults are (it does not promise "no trace": a deleted folder sits in the Recycle
+  Bin until it is emptied). **standard**.
 - **The PowerShell line's box:** a read-only text box instead of a selectable code block, so keyboard users can copy
   it too. **standard**.
 - **Updating and "not offered yet":** no automatic updates, signatures or package managers, said on the page as the
