@@ -9,13 +9,14 @@ name: Site
 # build and its tests run on every such push and nothing is uploaded.
 #
 # Two jobs, each holding only what it needs:
-#   build   reads the repository and the release's attestations, holds no secret. In order: the installer the page would
-#           offer is downloaded and its attestation verified, and the digest of that file is written (a failure stops here,
-#           nothing is built or uploaded); the site is built from that choice, and the build stops if the installer it
-#           downloads for the page's fingerprint is not the file that was verified; the site's own tests run in a real
-#           browser, on the test suite's fixture builds (not on the built folder); and the folder the build wrote is kept as
-#           an artifact, with the uploader's package files. With release.json at {"tag": null} (Coming soon) there is no
-#           installer and the verify ends at once.
+#   build   reads the repository and the release's attestations, holds no secret. In order: straight after the checkout,
+#           before any of the repository's code or packages run, the uploader's package files (site-deploy/) are kept as
+#           an artifact, so nothing later in the job can change them; the installer the page would offer is downloaded and
+#           its attestation verified, and the digest of that file is written (a failure stops here, nothing is built or
+#           uploaded); the site is built from that choice, and the build stops if the installer it downloads for the page's
+#           fingerprint is not the file that was verified; the site's own tests run in a real browser, on the test suite's
+#           fixture builds (not on the built folder); and the folder the build wrote is kept as an artifact. With
+#           release.json at {"tag": null} (Coming soon) there is no installer and the verify ends at once.
 #   deploy  no checkout and no repository rights: it runs none of the repository's code beside the token. It takes the
 #           two artifacts the build kept (never a rebuild), installs Wrangler from its lockfile (site-deploy/) in a step that
 #           has no token, and uploads in the last step, the only one that sees the token.
