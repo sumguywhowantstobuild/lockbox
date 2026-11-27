@@ -663,17 +663,7 @@ FunctionEnd
 !insertmacro PETALOCK_COMMON ""
 !insertmacro PETALOCK_COMMON "un."
 
-; The installer's folder page: the folder chosen is checked when the person leaves the page, and the page stays when it
-; is refused.
-Function PetalockLeaveDirectory
-  Call PetalockSetMode
-  StrCpy $PetalockA $INSTDIR
-  Call PetalockGuardFolder
-  ${If} $PetalockWhy != ""
-    MessageBox MB_OK|MB_ICONSTOP "Petalock cannot be installed in this folder: it is part of Petalock's own data, a vault, a link, it is not empty, or it could not be read.$\r$\n$\r$\nChoose another folder."
-    Abort
-  ${EndIf}
-FunctionEnd
+; (Task 9e: the folder page is gone; the page that replaced it checks the folder when it is left, in setup-ui.nsh.)
 
 ; Before the installer runs the uninstaller of an earlier install. Out: $4, the recorded install folder, and $R1, the command:
 ; "<that folder>\uninstall.exe", built here from the folder and the fixed file name. The folder is the uninstall key's
@@ -828,3 +818,7 @@ Function un.PetalockRemoveTree
   Pop $1
   Pop $0
 FunctionEnd
+
+; Plan 5, Task 9e: the installer's one screen (the pages, their words, the checks that start an install, the three lines). It
+; uses the folder guard and the running check above, and PETALOCK_CONSOLE.
+!include "${__FILEDIR__}\setup-ui.nsh"

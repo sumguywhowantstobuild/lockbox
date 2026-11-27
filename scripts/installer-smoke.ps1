@@ -47,7 +47,11 @@ $AllTests = @(
   "a_held_or_read_only_copy_is_reported_not_left_silently",
   "running_petalock_is_never_ended_and_silent_refuses_first",
   "uninstall_says_where_vaults_stay",
-  "installed_copy_has_the_notices_file"
+  "installed_copy_has_the_notices_file",
+  # Plan 5, Task 9e: the one screen in Petalock's look (default folder and receipt; a folder chosen under Options; /P and /S).
+  "quick_install_default_folder_and_receipt",
+  "quick_install_folder_from_options",
+  "quiet_installs_return_exit_codes_and_launch_nothing"
 )
 
 # Plan 5, Task 4: the checks that need two versions of the same code, -Installer the earlier and -Upgrade the later.
@@ -569,6 +573,26 @@ function Wait-Box([string]$Button, [int]$Seconds = 60) {
   throw "no message box with a '$Button' button appeared within $Seconds s"
 }
 
+# Plan 5, Task 9e: the window of an installer this run started ($Process), with Petalock running. The page says so only after
+# its default button is pressed (the checks run then), so the first page is waited for, its default button pressed once, and
+# the window that then says "Close Petalock, then try again." is returned (its default button is Retry, its other one Cancel).
+function Wait-RunningPage($Process, [int]$Seconds = 90) {
+  $deadline = (Get-Date).AddSeconds($Seconds)
+  $pressed = $false
+  while ((Get-Date) -lt $deadline) {
+    foreach ($d in @(Get-Dialogs @([int]$Process.Id) -Owned)) {
+      $text = Get-DialogText $d
+      if ($text -like '*Close Petalock, then try again*') { return $d }
+      if (-not $pressed -and $text -like '*What Setup will do*') {
+        $next = [SmokeDlg]::Item($d.Handle, 1)
+        if ($next -ne [IntPtr]::Zero -and [SmokeDlg]::Enabled($next)) { Start-Sleep -Milliseconds 1000; [void][SmokeDlg]::Press($d.Handle, $next); $pressed = $true }
+      }
+    }
+    Start-Sleep -Milliseconds 250
+  }
+  throw 'the installer window never said "Close Petalock, then try again."'
+}
+
 function Save-Screen([string]$Name) {
   try {
     Add-Type -AssemblyName System.Windows.Forms, System.Drawing
@@ -755,21 +779,28 @@ function Drive-Wizard($Process, [string]$Kind, [bool]$Tick = $false, [string]$On
       }
       # Nothing is pressed while the outer dialog is off (a message box is up) or its Next is off (the install is running).
       if (-not [SmokeDlg]::Enabled($d.Handle) -or -not [SmokeDlg]::Enabled($next)) { continue }
-      # The reinstall page's second choice (-UninstallFirst): "Uninstall Petalock" (same version) or "Uninstall before
-      # installing". A real click (the page reads only the first choice's box, so a choice that did not take would silently
-      # install over), and it must read as ticked before Next is pressed.
+      # The main page's other way (-UninstallFirst), a real click each time: on the same version the link "Uninstall Petalock
+      # instead..." (a full uninstall: the existing uninstaller opens, and Setup ends when it has finished); on an update, the link
+      # "Other choices" and then its check box "Remove ... before installing ..." (the page reads the box, so a choice that did not
+      # take would silently install over), which must read as ticked before Install is pressed.
       if ($UninstallFirst -and -not $chosen) {
-        $radio = @($d.Kids | Where-Object { $_.Class -eq 'Button' -and ($_.Text -eq 'Uninstall Petalock' -or $_.Text -eq 'Uninstall before installing') })[0]
-        if ($radio) {
-          if ([SmokeDlg]::GetCheck($radio.Handle) -eq 1) { $chosen = $true }
-          elseif ($radioTries -ge 3) { throw "the reinstall page's choice '$($radio.Text)' did not take after $radioTries clicks" }
-          else { [SmokeDlg]::Click($radio.Handle); $radioTries++; Start-Sleep -Milliseconds 800; continue }
+        $uninstallLink = @($d.Kids | Where-Object { $_.Visible -and $_.Text -like 'Uninstall Petalock instead*' })[0]
+        if ($uninstallLink) { [SmokeDlg]::Click($uninstallLink.Handle); $chosen = $true; Start-Sleep -Milliseconds 800; continue }
+        $remove = @($d.Kids | Where-Object { $_.Class -eq 'Button' -and $_.Visible -and $_.Text -like 'Remove*before installing*' })[0]
+        $other = @($d.Kids | Where-Object { $_.Visible -and $_.Text -eq 'Other choices' })[0]
+        if ($remove) {
+          if ([SmokeDlg]::GetCheck($remove.Handle) -eq 1) { $chosen = $true }
+          elseif ($radioTries -ge 3) { throw "the main page's choice '$($remove.Text)' did not take after $radioTries clicks" }
+          else { [SmokeDlg]::Click($remove.Handle); $radioTries++; Start-Sleep -Milliseconds 800; continue }
+        } elseif ($other) {
+          if ($radioTries -ge 3) { throw "the main page's 'Other choices' did not open its choice after $radioTries clicks" }
+          [SmokeDlg]::Click($other.Handle); $radioTries++; Start-Sleep -Milliseconds 800; continue
         }
       }
       $box = @($d.Kids | Where-Object { $_.Class -eq 'Button' -and $_.Text -like 'Delete the application data*' })[0]
       if ($box -and $Kind -eq 'uninstall') { [SmokeDlg]::SetCheck($box.Handle, $Tick) }
-      # The finish page's two boxes are cleared: nothing is started, and no shortcut is made by the window.
-      foreach ($run in @($d.Kids | Where-Object { $_.Class -eq 'Button' -and ($_.Text -like 'Run Petalock*' -or $_.Text -like 'Create desktop shortcut*') })) { [SmokeDlg]::SetCheck($run.Handle, $false) }
+      # The last page's box is cleared: nothing is started by the window ("Open Petalock", or the older "Run Petalock").
+      foreach ($run in @($d.Kids | Where-Object { $_.Class -eq 'Button' -and ($_.Text -like 'Open Petalock*' -or $_.Text -like 'Run Petalock*' -or $_.Text -like 'Create desktop shortcut*') })) { [SmokeDlg]::SetCheck($run.Handle, $false) }
       # One press per page, once the page has stood for 1 s (its boxes exist and are set before it is left); posted again
       # only after a press that could not be queued.
       if (-not $pageQueued -and ((Get-Date) - $pageWndSince).TotalMilliseconds -gt 1000 -and ((Get-Date) - $lastPress).TotalMilliseconds -gt 1500) {
@@ -929,55 +960,61 @@ function Assert-OneInstallation([string]$Dir, [string]$Version) {
   if (($folders.Count + $elsewhere.Count) -ne 1) { throw "there are $($folders.Count + $elsewhere.Count) folders holding a Petalock program, not one" }
 }
 
-# Runs the installer -Exe through its window to the end (Drive-Wizard, taking each page's default) and reads its reinstall
-# page on the way, the one that offers 'Uninstall before installing' (an upgrade or a downgrade) or 'Uninstall Petalock' (the
-# same version); it comes after the Welcome page: its words and its two choices, each with whether it can be chosen and
-# whether it is ticked, and the installer's exit code.
-function Read-ReinstallPage([string]$Exe) {
+# Runs the installer -Exe through its window to the end (Drive-Wizard, taking each page's default) and reads its first page on the
+# way (Plan 5, Task 9e: the one page that says what Setup will do, whatever is installed): its words, the words on its default
+# button (Install, Update, Reinstall, Replace or Downgrade), the links it offers, and (after "Other choices" is opened) the check
+# box "Remove ... before installing ..." with whether it can be chosen and whether it is ticked; and the installer's exit code.
+function Read-MainPage([string]$Exe) {
   # Filled by the page reader below, which Drive-Wizard calls from its own scope: found by name through the caller's scope.
-  $ReinstallFound = @{}
+  $MainFound = @{}
   $reader = {
     param($d)
-    if ($ReinstallFound.Count -gt 0) { return }
-    if (-not (Find-Button $d 'Uninstall before installing') -and -not (Find-Button $d 'Uninstall Petalock')) { return }
-    $ReinstallFound['Choices'] = @($d.Kids | Where-Object { $_.Class -eq 'Button' -and ($_.Text -eq 'Uninstall before installing' -or $_.Text -like 'Do not uninstall*' -or $_.Text -eq 'Uninstall Petalock' -or $_.Text -eq 'Add/Reinstall components') } |
-      ForEach-Object { [pscustomobject]@{ Text = $_.Text; Enabled = [bool]$_.Enabled; Checked = ([SmokeDlg]::GetCheck($_.Handle) -eq 1); Focused = ([SmokeDlg]::FocusOf($d.Handle) -eq $_.Handle) } })
-    $ReinstallFound['Text'] = (Get-DialogText $d) -replace '\s+', ' '
+    if ($MainFound.Count -gt 0) { return }
+    if ((Get-DialogText $d) -notlike '*What Setup will do*') { return }
+    $MainFound['Text'] = (Get-DialogText $d) -replace '\s+', ' '
+    $MainFound['Next'] = [SmokeDlg]::Text([SmokeDlg]::Item($d.Handle, 1)) -replace '&', ''
+    # (The script is plain ASCII: the ellipsis after "instead" is matched with a wildcard, and the link is named without it.)
+    $MainFound['Links'] = @($d.Kids | Where-Object { $_.Class -eq 'Button' -and $_.Visible -and ($_.Text -in @('Options', 'Other choices', 'Licence (MIT)') -or $_.Text -like 'Uninstall Petalock instead*') } |
+      ForEach-Object { if ($_.Text -like 'Uninstall Petalock instead*') { 'Uninstall Petalock instead' } else { $_.Text } })
+    # Open "Other choices" (an update, a newer or an unknown version) and read the box that appears.
+    $other = @($d.Kids | Where-Object { $_.Visible -and $_.Text -eq 'Other choices' })[0]
+    $MainFound['Choices'] = @()
+    if ($other) {
+      [SmokeDlg]::Click($other.Handle)
+      Start-Sleep -Milliseconds 1000
+      $now = @(Get-Dialogs | Where-Object { $_.Handle -eq $d.Handle })[0]
+      if ($now) {
+        $MainFound['Choices'] = @($now.Kids | Where-Object { $_.Class -eq 'Button' -and $_.Visible -and $_.Text -like 'Remove*before installing*' } |
+          ForEach-Object { [pscustomobject]@{ Text = $_.Text; Enabled = [bool]$_.Enabled; Checked = ([SmokeDlg]::GetCheck($_.Handle) -eq 1) } })
+      }
+    }
   }
   $p = Start-Tracked $Exe @()
   [void](Drive-Wizard $p 'install' $false '' $null 240 $false $reader)
   $exit = Get-ExitCode $p
-  if ($ReinstallFound.Count -eq 0) { Save-Screen 'no-reinstall-page'; throw 'the window went through no reinstall page' }
-  $choices = $ReinstallFound['Choices']
-  Write-Log "  reinstall page: $($ReinstallFound['Text']) | choices: $(($choices | ForEach-Object { "'$($_.Text)' enabled=$($_.Enabled) ticked=$($_.Checked) focused=$($_.Focused)" }) -join '; ') | exit $exit"
-  return [pscustomobject]@{ Text = $ReinstallFound['Text']; Choices = $choices; Exit = $exit }
+  if ($MainFound.Count -eq 0) { Save-Screen 'no-main-page'; throw 'the window went through no page that says what Setup will do' }
+  Write-Log "  main page: $($MainFound['Text']) | button: $($MainFound['Next']) | links: $($MainFound['Links'] -join ', ') | choices: $(($MainFound['Choices'] | ForEach-Object { "'$($_.Text)' enabled=$($_.Enabled) ticked=$($_.Checked)" }) -join '; ') | exit $exit"
+  return [pscustomobject]@{ Text = $MainFound['Text']; Next = $MainFound['Next']; Links = $MainFound['Links']; Choices = $MainFound['Choices']; Exit = $exit }
 }
 
-# Plan 5, Task 4b. A page read by Read-ReinstallPage, on an upgrade or a downgrade: opens with 'Do not uninstall' ticked, and still
-# offers 'Uninstall before installing' (enabled, not ticked). Each choice must be found: a reader that found none must fail.
+# Plan 5, Task 4b (kept by Task 9e). A page read by Read-MainPage, on an upgrade or a downgrade: its default action installs over
+# ('Update', or 'Downgrade' / 'Replace'), and the other way, 'Remove ... before installing ...', is offered under 'Other choices'
+# (enabled, not ticked). Each part must be found: a reader that found none must fail.
 function Assert-InstallOverDefault($Page, [string]$What) {
-  $stay = @($Page.Choices | Where-Object { $_.Text -eq 'Do not uninstall' })[0]
-  $first = @($Page.Choices | Where-Object { $_.Text -eq 'Uninstall before installing' })[0]
-  if (-not $stay) { throw "the reinstall page on $What does not offer 'Do not uninstall'" }
-  if (-not $first) { throw "the reinstall page on $What does not offer 'Uninstall before installing'" }
-  if (-not $stay.Enabled -or -not $first.Enabled) { throw "the reinstall page on $What shows a choice that cannot be chosen" }
-  if (-not $stay.Checked) { throw "the reinstall page on $What does not open with 'Do not uninstall' ticked" }
-  if ($first.Checked) { throw "the reinstall page on $What opens with 'Uninstall before installing' ticked as well" }
-  # The keyboard focus is on the ticked button: a keyboard user's Space must not pick the other choice.
-  if (-not $stay.Focused) { throw "the reinstall page on $What does not put the keyboard focus on 'Do not uninstall'" }
-  if ($first.Focused) { throw "the reinstall page on $What puts the keyboard focus on 'Uninstall before installing', which is not ticked" }
+  if ($Page.Next -notin @('Update', 'Downgrade', 'Replace')) { throw "the main page on $What does not offer to install over ('$($Page.Next)')" }
+  if ($Page.Links -notcontains 'Other choices') { throw "the main page on $What does not offer 'Other choices'" }
+  $remove = @($Page.Choices | Where-Object { $_.Text -like 'Remove*before installing*' })[0]
+  if (-not $remove) { throw "the main page on $What does not offer 'Remove ... before installing ...' under 'Other choices'" }
+  if (-not $remove.Enabled) { throw "the main page on $What shows a choice that cannot be chosen" }
+  if ($remove.Checked) { throw "the main page on $What opens with 'Remove ... before installing ...' ticked" }
 }
 
-# The same-version page is Tauri's, unchanged: 'Add/Reinstall components' ticked, 'Uninstall Petalock' offered, not ticked.
-function Assert-ReinstallDefaultIsFirst($Page) {
-  $add = @($Page.Choices | Where-Object { $_.Text -eq 'Add/Reinstall components' })[0]
-  $gone = @($Page.Choices | Where-Object { $_.Text -eq 'Uninstall Petalock' })[0]
-  if (-not $add) { throw "the same-version reinstall page does not offer 'Add/Reinstall components'" }
-  if (-not $gone) { throw "the same-version reinstall page does not offer 'Uninstall Petalock'" }
-  if (-not $add.Checked) { throw "the same-version reinstall page does not open with 'Add/Reinstall components' ticked" }
-  if ($gone.Checked) { throw "the same-version reinstall page opens with 'Uninstall Petalock' ticked as well" }
-  if (-not $add.Focused) { throw "the same-version reinstall page does not put the keyboard focus on 'Add/Reinstall components'" }
-  if ($gone.Focused) { throw "the same-version reinstall page puts the keyboard focus on 'Uninstall Petalock', which is not ticked" }
+# The same version: 'Reinstall' is the action, and 'Uninstall Petalock instead' (with its ellipsis) is the way to the full uninstall;
+# no check box.
+function Assert-ReinstallPage($Page) {
+  if ($Page.Next -ne 'Reinstall') { throw "the same-version page's action is '$($Page.Next)', not 'Reinstall'" }
+  if ($Page.Links -notcontains 'Uninstall Petalock instead') { throw "the same-version page does not offer 'Uninstall Petalock instead'" }
+  if (@($Page.Choices).Count -ne 0) { throw 'the same-version page offers a remove-first box' }
 }
 
 # Plan 5, Task 4b fix round (review finding 3). A page reader for Drive-Wizard's -OnPage that notes the uninstaller's confirm page
@@ -1285,8 +1322,9 @@ $Checks["files_added_after_install_survive_upgrade_and_uninstall"] = {
   if ($code -ne 0) { throw "an upgrade over a registered installation whose program was missing exited $code" }
   if (-not (Test-Installed $dir)) { throw 'the upgrade did not put the program back' }
 
-  # An upgrade that uninstalls first (the second choice on the window's reinstall page) runs the uninstaller in the
-  # recorded folder, built from that folder: a command planted in the uninstall key's UninstallString is never run.
+  # An upgrade that uninstalls first (Task 9e: "Other choices", then "Remove ... before installing ..." on the main page; on the same
+  # version, the link "Uninstall Petalock instead", a full uninstall that ends Setup) runs the uninstaller in the recorded
+  # folder, built from that folder: a command planted in the uninstall key's UninstallString is never run.
   Reset-World
   $dir = Join-Path $Work 'MU-first\Petalock'
   Install-Good $dir
@@ -1302,8 +1340,14 @@ $Checks["files_added_after_install_survive_upgrade_and_uninstall"] = {
   if ([System.IO.File]::Exists($marker)) { throw 'the command planted in UninstallString was run' }
   if ([System.IO.File]::Exists($proof)) { throw 'the old uninstaller did not run (the opened copy planted in open\ is still there)' }
   if ((Get-ExitCode $p) -ne 0) { throw 'the interactive upgrade that uninstalls first did not end with exit 0' }
-  if (-not (Test-Installed $dir)) { throw 'the upgrade that uninstalls first left no program' }
-  if ([string](Get-UninstallValue 'UninstallString') -ne ('"' + (Join-Path $dir 'uninstall.exe') + '"')) { throw 'the uninstall command was not written back as the recorded folder''s own uninstaller' }
+  if ((Get-EmbeddedVersion $Installer) -eq (Get-EmbeddedVersion $Upgrade)) {
+    # The same version: the page's way is the full uninstall, which ends Setup (nothing is installed after it).
+    if (Test-Installed $dir) { throw "the same version's 'Uninstall Petalock instead' left the program installed" }
+    if (Get-UninstallValue 'DisplayName') { throw "the same version's 'Uninstall Petalock instead' left the uninstall entry" }
+  } else {
+    if (-not (Test-Installed $dir)) { throw 'the upgrade that uninstalls first left no program' }
+    if ([string](Get-UninstallValue 'UninstallString') -ne ('"' + (Join-Path $dir 'uninstall.exe') + '"')) { throw 'the uninstall command was not written back as the recorded folder''s own uninstaller' }
+  }
 }
 
 $Checks["install_writes_only_its_own_places"] = {
@@ -1624,9 +1668,12 @@ $Checks["running_petalock_is_never_ended_and_silent_refuses_first"] = {
   foreach ($kind in @('install', 'upgrade')) {
     $exe = if ($kind -eq 'install') { $Installer } else { $Upgrade }
     $p = Start-Tracked $exe @()
-    $box = Wait-Box 'Retry'
-    if ((Get-DialogText $box) -notlike '*Petalock is running*') { throw "the $kind box does not say Petalock is running: $(Get-DialogText $box)" }
-    [SmokeDlg]::Click((Find-Button $box 'Cancel').Handle)
+    # Plan 5, Task 9e: in the window (not a message box): its words, Retry as its default button, and the keyboard route in words.
+    $box = Wait-RunningPage $p
+    if ((Get-DialogText $box) -notlike '*Quit it from its icon near the clock*') { throw "the $kind window does not say how to quit Petalock: $(Get-DialogText $box)" }
+    if ((Get-DialogText $box) -notlike '*press Windows+B*') { throw "the $kind window gives no keyboard route to Quit: $(Get-DialogText $box)" }
+    if (-not (Find-Button $box 'Retry')) { throw "the $kind window has no Retry button" }
+    [void][SmokeDlg]::Press($box.Handle, [SmokeDlg]::Item($box.Handle, 2))
     if (-not $p.WaitForExit(60000)) { throw "the $kind did not end after Cancel" }
     if ($app.HasExited) { throw "Cancel in the $kind ended Petalock" }
     Assert-Unchanged $baseline (Get-InstallState $DefaultDir) "the program after Cancel in the $kind"
@@ -1657,9 +1704,11 @@ $Checks["running_petalock_is_never_ended_and_silent_refuses_first"] = {
     $app = Start-PetalockHidden $DefaultDir
     Set-ItemProperty -LiteralPath $UninstallKey -Name 'NoModify' -Value 0 -Type DWord
     $p = Start-Tracked $exe @()
-    $box = Wait-Box 'Retry'
+    $box = Wait-RunningPage $p
     & $stand
-    [SmokeDlg]::Click((Find-Button $box 'Retry').Handle)
+    [void][SmokeDlg]::Press($box.Handle, [SmokeDlg]::Item($box.Handle, 1))
+    # The Retry press leaves the page, which then installs: give it a moment, so the driver never sees the page that was left.
+    Start-Sleep -Seconds 3
     $texts = Drive-Wizard $p 'install'
     $exit = Get-ExitCode $p
     if ($exit -ne 0) { throw "the interactive $kind after Retry ended with exit $exit" }
@@ -1769,13 +1818,13 @@ $Checks["candidate_versions_upgrade_in_order"] = {
 
   Reset-World
   Install-Good $DefaultDir
-  # The page's default choice is taken, whichever it is (Task 4b sets it); this check asserts the page's words and the result.
-  $page = Read-ReinstallPage $Upgrade
-  if ($page.Text -notlike '*An older version of Petalock is installed*') { throw "the reinstall page does not call the installed version older: $($page.Text)" }
+  # The page's default choice is taken (Task 4b: installs over); this check asserts the page's words and the result.
+  $page = Read-MainPage $Upgrade
+  if ($page.Text -notlike "*Petalock $FromVersion is on this PC. This updates it to $ToVersion.*") { throw "the main page does not say that Petalock $FromVersion is installed and will be updated to ${ToVersion}: $($page.Text)" }
   if ($page.Exit -ne 0) { throw "the upgrade through the window ended with exit $($page.Exit)" }
   Start-Sleep -Seconds 2
   Assert-OneInstallation $DefaultDir $ToVersion
-  Write-Log "  through the window: the page called $FromVersion older, and $ToVersion is installed"
+  Write-Log "  through the window: the page said $FromVersion is installed and updates to $ToVersion, and $ToVersion is installed"
 }
 
 # Specified here (Task 4): downgrades are allowed (Tauri's allowDowngrades, left at its default true; the page links older
@@ -1801,19 +1850,19 @@ $Checks["downgrade_behaviour_is_the_specified_one"] = {
   if ($code -ne 0) { throw "the silent install of $ToVersion exited $code" }
   Start-Sleep -Seconds 2
   $planted = New-StateFixture
-  # The page's default choice is taken, whichever it is (Task 4b sets it); both choices must be offered and enabled.
-  $page = Read-ReinstallPage $Installer
-  if ($page.Text -notlike '*A newer version of Petalock is already installed*') { throw "the reinstall page does not say a newer version is installed: $($page.Text)" }
-  foreach ($name in @('Uninstall before installing', 'Do not uninstall')) {
-    $choice = @($page.Choices | Where-Object { $_.Text -eq $name })[0]
-    if (-not $choice) { throw "the reinstall page on a downgrade does not offer '$name'" }
-    if (-not $choice.Enabled) { throw "the reinstall page on a downgrade shows '$name' but it cannot be chosen" }
-  }
+  # The page's default action is taken (Cancel is the default button on this screen, Enter cancels; the harness presses the
+  # Downgrade button itself); Downgrade and the other way ('Remove ... before installing ...' under 'Other choices') must both be offered.
+  $page = Read-MainPage $Installer
+  if ($page.Text -notlike "*A newer Petalock, $ToVersion, is on this PC.*") { throw "the main page does not say a newer version is installed: $($page.Text)" }
+  if ($page.Next -ne 'Downgrade') { throw "the main page on a downgrade offers '$($page.Next)', not 'Downgrade'" }
+  $remove = @($page.Choices | Where-Object { $_.Text -like 'Remove*before installing*' })[0]
+  if (-not $remove) { throw "the main page on a downgrade does not offer 'Remove ... before installing ...'" }
+  if (-not $remove.Enabled) { throw "the main page on a downgrade shows 'Remove ... before installing ...' but it cannot be chosen" }
   if ($page.Exit -ne 0) { throw "the downgrade through the window ended with exit $($page.Exit)" }
   Start-Sleep -Seconds 2
   Assert-OneInstallation $DefaultDir $FromVersion
   Assert-Unchanged (Without-Open $planted) (Without-Open (Get-Listing $State -Hash)) 'the state folder after the downgrade through the window (open\ aside)'
-  Write-Log "  through the window: the page said a newer version is installed, both choices offered, $FromVersion installed, state kept"
+  Write-Log "  through the window: the page said a newer version is installed, both ways offered, $FromVersion installed, state kept"
 }
 
 # Task 1's uninstall checks after an upgrade: the program, its entry, the Run value and open\ go; every other planted file,
@@ -1888,19 +1937,23 @@ $Checks["interactive_upgrade_keeps_start_with_windows"] = {
   Reset-World
   $ConfirmPage = @{ Seen = 0; Box = 0 }
   $r = Invoke-WindowOver $Installer $Installer $true $confirmReader
-  Assert-OneInstallation $DefaultDir $FromVersion
-  if ($null -ne (Get-RegValue $RunKey 'Petalock')) { throw "the same-version 'Uninstall Petalock' left the Run\Petalock value: a full uninstall removes it" }
-  Assert-ConfirmPageBox $ConfirmPage $true "the same-version 'Uninstall Petalock'"
-  Write-Log "  the same version's 'Uninstall Petalock' stays a full uninstall (the Run value went, the app-data box was offered)"
+  # Plan 5, Task 9e: the same version's link "Uninstall Petalock instead" opens the existing uninstaller and Setup ends when it has
+  # finished: nothing is installed afterwards (the earlier page uninstalled and then went on to install again).
+  if (Test-Installed $DefaultDir) { throw "the same-version 'Uninstall Petalock instead' left the program installed" }
+  if (Get-UninstallValue 'DisplayName') { throw "the same-version 'Uninstall Petalock instead' left the uninstall entry" }
+  if ($null -ne (Get-RegValue $RunKey 'Petalock')) { throw "the same-version 'Uninstall Petalock instead' left the Run\Petalock value: a full uninstall removes it" }
+  Assert-ConfirmPageBox $ConfirmPage $true "the same-version 'Uninstall Petalock instead'"
+  Write-Log "  the same version's 'Uninstall Petalock instead' is a full uninstall that ends Setup (the Run value went, the app-data box was offered)"
 }
 
-# The reinstall page opens on 'Do not uninstall' when the installed version is older or newer, and 'Uninstall before installing'
-# stays offered; the same version's page is Tauri's (reinstall first). Each is read through the window, which then installs.
+# The main page's default action installs over when the installed version is older or newer, and 'Remove ... before installing ...'
+# stays offered under 'Other choices'; the same version's page offers Reinstall and a link to the full uninstall. Each is read
+# through the window, which then installs.
 $Checks["upgrade_page_defaults_to_install_over"] = {
   Assert-VersionPair
   Reset-World
   Install-Good $DefaultDir
-  $page = Read-ReinstallPage $Upgrade
+  $page = Read-MainPage $Upgrade
   Assert-InstallOverDefault $page "an upgrade from $FromVersion to $ToVersion"
   if ($page.Exit -ne 0) { throw "the upgrade through the window ended with exit $($page.Exit)" }
   Start-Sleep -Seconds 2
@@ -1910,7 +1963,7 @@ $Checks["upgrade_page_defaults_to_install_over"] = {
   $code = Install-Silent $Upgrade ''
   if ($code -ne 0) { throw "the silent install of $ToVersion exited $code" }
   Start-Sleep -Seconds 2
-  $page = Read-ReinstallPage $Installer
+  $page = Read-MainPage $Installer
   Assert-InstallOverDefault $page "a downgrade from $ToVersion to $FromVersion"
   if ($page.Exit -ne 0) { throw "the downgrade through the window ended with exit $($page.Exit)" }
   Start-Sleep -Seconds 2
@@ -1918,10 +1971,106 @@ $Checks["upgrade_page_defaults_to_install_over"] = {
 
   Reset-World
   Install-Good $DefaultDir
-  $page = Read-ReinstallPage $Installer
-  Assert-ReinstallDefaultIsFirst $page
+  $page = Read-MainPage $Installer
+  Assert-ReinstallPage $page
   if ($page.Exit -ne 0) { throw "the reinstall of the same version through the window ended with exit $($page.Exit)" }
-  Write-Log "  upgrade and downgrade open on 'Do not uninstall' with 'Uninstall before installing' offered; the same version opens on 'Add/Reinstall components'"
+  Write-Log "  upgrade and downgrade install over by default with 'Remove ... before installing ...' offered under 'Other choices'; the same version offers Reinstall and a link to the full uninstall"
+}
+
+# --- Plan 5, Task 9e: the one screen in Petalock's look --------------------------------------------------------------------------
+
+# A new install through the window with the default folder: the page says what Setup will do (the three lines, in words), the
+# progress becomes the same three lines, the last page is the receipt, and the program is not started (the box on the last page
+# is cleared by the driver, as it is on every run).
+$Checks["quick_install_default_folder_and_receipt"] = {
+  Reset-World
+  $result = Install-Interactive $Installer ''
+  $all = ($result.Texts -join "`n") -replace '\s+', ' '
+  foreach ($sentence in @(
+      'What Setup will do', 'Check for Microsoft WebView2', 'Install Petalock for this Windows account', 'Add it to the Start menu and to Installed apps',
+      'What Setup did', 'Petalock is installed for this Windows account', 'Added to the Start menu and to Installed apps')) {
+    if ($all -notlike "*$sentence*") { throw "the window never said: $sentence; it said: $all" }
+  }
+  # Row 1 on the receipt says what really happened to WebView2.
+  if ($all -notlike '*Already installed*' -and $all -notlike '*Installed by Setup*') { throw "the receipt does not say what happened to WebView2: $all" }
+  $want = Get-EmbeddedVersion $Installer
+  if ($all -notlike "*Version $want*") { throw "the window does not show the build's version ($want): $all" }
+  if (-not (Test-Installed $DefaultDir)) { throw "no program and uninstaller in $DefaultDir" }
+  Assert-OneInstallation $DefaultDir $want
+  if (Get-Process -Name 'petalock' -ErrorAction SilentlyContinue) { throw 'Petalock was started by the installer window (its box was cleared)' }
+  Write-Log "  the page said what Setup will do, the receipt said what it did, version $want, the program installed and not started"
+}
+
+# A folder chosen for Options: a new install into a folder under $Work (the driver cannot use the system's folder dialog, so the
+# folder comes with /D=, which the page must keep and show in its read-only field once Options is open), the program lands there
+# and nowhere else, and the uninstall entry records it.
+$Checks["quick_install_folder_from_options"] = {
+  Reset-World
+  $chosen = Join-Path $Work 'MU-options\Petalock'
+  $seen = @{}
+  $reader = {
+    param($d)
+    if ($seen.Count -gt 0) { return }
+    if ((Get-DialogText $d) -notlike '*What Setup will do*') { return }
+    $options = @($d.Kids | Where-Object { $_.Visible -and $_.Text -eq 'Options' })[0]
+    if (-not $options) { throw 'the new-install page has no Options link' }
+    [SmokeDlg]::Click($options.Handle)
+    Start-Sleep -Milliseconds 1000
+    $now = @(Get-Dialogs | Where-Object { $_.Handle -eq $d.Handle })[0]
+    $field = @($now.Kids | Where-Object { $_.Class -eq 'Edit' -and $_.Visible })[0]
+    $seen['Field'] = if ($field) { $field.Text } else { '' }
+    $seen['Browse'] = [bool](@($now.Kids | Where-Object { $_.Class -eq 'Button' -and $_.Visible -and $_.Text -like 'Browse*' }).Count)
+  }
+  $p = Start-Tracked $Installer @("/D=$chosen")
+  [void](Drive-Wizard $p 'install' $false '' $null 240 $false $reader)
+  $exit = Get-ExitCode $p
+  if ($exit -ne 0) { throw "the install into the chosen folder ended with exit $exit" }
+  if ($seen.Count -eq 0) { Save-Screen 'no-options'; throw 'the reader never saw the new-install page' }
+  if ($seen['Field'] -ne $chosen) { throw "Options shows '$($seen['Field'])', not the folder given ($chosen)" }
+  if (-not $seen['Browse']) { throw 'Options shows no Browse button' }
+  if (-not (Test-Installed $chosen)) { throw "no program and uninstaller in the chosen folder $chosen" }
+  if ([System.IO.Directory]::Exists($DefaultDir)) { throw 'the install also made the default folder' }
+  $location = [string](Get-UninstallValue 'InstallLocation')
+  if ($location.Trim('"') -ne $chosen) { throw "the uninstall entry records $location, not the chosen folder" }
+  Uninstall-AsWindowsDoes $chosen
+  Write-Log "  Options showed the folder, Browse was offered, the program landed in $chosen only, and the entry records it"
+}
+
+# /P shows progress and ends by itself (no Finish click) with exit 0; /S shows no window and starts nothing; both end with an error
+# code when they fail (a folder that is refused, with no window at all).
+$Checks["quiet_installs_return_exit_codes_and_launch_nothing"] = {
+  Reset-World
+  $p = Start-Tracked $Installer @('/P')
+  if (-not $p.WaitForExit(240000)) { try { $p.Kill() } catch { }; throw 'the /P install did not end by itself (it waits for a click)' }
+  $code = Get-ExitCode $p
+  if ($code -ne 0) { throw "the /P install exited $code" }
+  if (-not (Test-Installed $DefaultDir)) { throw 'the /P install left no program' }
+  if (Get-Process -Name 'petalock' -ErrorAction SilentlyContinue) { throw 'the /P install started Petalock' }
+  Write-Log '  /P: progress, no click, exit 0, nothing started'
+  Reset-World
+  $shown = $false
+  $p = Start-Tracked $Installer @('/S')
+  while (-not $p.HasExited) {
+    if (@(Get-Dialogs @([int]$p.Id) -Owned).Count -gt 0) { $shown = $true }
+    Start-Sleep -Milliseconds 100
+  }
+  $code = Get-ExitCode $p
+  if ($code -ne 0) { throw "the /S install exited $code" }
+  if ($shown) { throw 'the /S install showed a window' }
+  if (-not (Test-Installed $DefaultDir)) { throw 'the /S install left no program' }
+  Start-Sleep -Seconds 2
+  if (Get-Process -Name 'petalock' -ErrorAction SilentlyContinue) { throw 'the /S install started Petalock' }
+  Write-Log '  /S: no window, exit 0, nothing started'
+  # Failure: a folder that is refused (the state folder), quiet and passive, ends with an error code and no click.
+  foreach ($flags in @(@('/S'), @('/P'))) {
+    $before = Get-InstallState $DefaultDir
+    $p = Start-Tracked $Installer ($flags + @("/D=$State"))
+    if (-not $p.WaitForExit(120000)) { try { $p.Kill() } catch { }; throw "the $($flags[0]) install into the state folder did not end by itself" }
+    $code = Get-ExitCode $p
+    if ($code -eq 0) { throw "the $($flags[0]) install into the state folder exited 0" }
+    Assert-Unchanged $before (Get-InstallState $DefaultDir) "the program after the refused $($flags[0]) install"
+    Write-Log "  $($flags[0]) into the state folder: refused with exit $code, nothing changed"
+  }
 }
 
 # ---------------------------------------------------------------------------------------------------------------------

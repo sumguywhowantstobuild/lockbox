@@ -109,6 +109,7 @@ test("shipped_grants_and_config_allow_only_the_listed_commands", { skip: SKIP, t
     active: true,
     targets: ["nsis"],
     publisher: "Petalock",
+    licenseFile: "../../LICENSE",
     icon: ["icons/icon.ico", "icons/icon.png"],
     useLocalToolsDir: true,
     windows: {
@@ -118,6 +119,7 @@ test("shipped_grants_and_config_allow_only_the_listed_commands", { skip: SKIP, t
         languages: ["English"],
         installerIcon: "icons/icon.ico",
         uninstallerIcon: "icons/icon.ico",
+        headerImage: "windows/band.bmp",
         template: "windows/installer.nsi",
         installerHooks: "windows/hooks.nsh",
       },
