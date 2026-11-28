@@ -16,7 +16,7 @@
 <p class="pill">Early preview · Unsigned and not independently audited.</p>
 <h1>Your secrets, in print only you can read.</h1>
 <p class="lead">A password manager and file vault for Windows. Your vaults stay on your PC, encrypted.</p>
-<p class="made">Made by Ariel Maningas. It’s unsigned, so your browser and Windows will warn you. <a href="#check">Check the file before you open it.</a></p>
+<p class="made">Made by Ariel Maningas. It’s unsigned, so your browser and Windows may warn you. <a href="#open">Which warnings mean stop?</a></p>
 <div class="cta">
 <!--if:release--><a class="btn" href="{{download_url}}">{{{arrow}}}Download for Windows</a><!--/if-->
 <!--if:soon--><span class="btn btn-soon">Coming soon</span><!--/if-->
@@ -29,7 +29,7 @@
 <svg class="band" viewBox="0 0 1280 110" preserveAspectRatio="xMidYMid slice" aria-hidden="true">{{{band}}}</svg>
 <main id="main">
 <section class="s" aria-labelledby="h-plain"><div class="wrap two"><h2 id="h-plain">An early preview, said plainly</h2>
-<div class="cols"><div><h3>Unsigned</h3><p>Petalock has no code-signing certificate yet, so Windows can't tell who made the file. Your browser and Windows will warn you before it runs.</p></div>
+<div class="cols"><div><h3>Unsigned</h3><p>Petalock has no code-signing certificate yet, so Windows can't tell who made the file. Your browser and Windows may warn you before it runs.</p></div>
 <div><h3>Not independently audited</h3><p>No outside security firm has checked Petalock's code yet. The code is public, so anyone can read it.</p></div></div></div></section>
 <section class="s" aria-labelledby="h-steps"><div class="wrap"><h2 id="h-steps">Three steps to install</h2>
 <ol class="st">
@@ -40,14 +40,14 @@
 <!--if:release--><a class="btn" href="{{download_url}}">{{{arrow}}}Download</a><!--/if-->
 <!--if:soon--><span class="btn btn-soon">Coming soon</span><!--/if-->
 </li>
-<li id="check"><h3>Check the file is ours</h3>
-<p>Before you open it, check that the file you got is the one we published. Open PowerShell and paste this line (click in the box, press Ctrl+A, then Ctrl+C):</p>
+<li id="check"><h3>Check the file matches (optional)</h3>
+<p>About a minute. If you downloaded it from petalock.arielmaningas.com or Petalock’s GitHub releases, you can skip this. Got it anywhere else? The simplest is to download it again from this page; to use that copy anyway, check it first (for another version, against that release’s fingerprint on GitHub, as the guide shows). Open PowerShell and paste this line (click in the box, press Ctrl+A, then Ctrl+C):</p>
 <label class="ps-label" for="ps-line">PowerShell line to check the file</label>
 <textarea id="ps-line" class="code m" readonly rows="3" spellcheck="false">{{ps_line}}</textarea>
 <p>If you saved it somewhere else, or your browser renamed it (for example with “(1)” at the end), use these two lines instead. Paste both, then type or paste the file’s full path when PowerShell asks, without quotation marks.</p>
 <label class="ps-label" for="ps-alt">PowerShell lines for a file saved elsewhere or renamed</label>
 <textarea id="ps-alt" class="code m" readonly rows="3" spellcheck="false">{{ps_alt}}</textarea>
-<p>It should print True.</p>
+<p>It should print True, which means the file matches the fingerprint published for this version.</p>
 <p class="stop"><strong>If it prints False, stop. Don't open the file: delete it and download it again from this page.</strong></p>
 <details><summary>See the fingerprint</summary>
 <!--if:release--><p class="dim">Fingerprint (SHA-256)</p><p class="fp m">{{{fingerprint_groups}}}</p><!--/if-->
@@ -55,11 +55,11 @@
 </details>
 </li>
 <li id="open"><h3>Open it</h3>
-<p>Because the file is unsigned and new, you'll see warnings. The exact words may differ on your PC.</p>
-<p>Your browser may say the file isn't commonly downloaded. Choose to keep it, and only for that notice. Then check the saved file in step 2.</p>
-<p>Windows may show “Windows protected your PC”. Only after step 2 printed True, choose More info, then Run anyway, and only for that screen.</p>
+<p>Because the file is unsigned and new, you may see warnings. The exact words may differ on your PC.</p>
 <p class="stop"><strong>Stop and delete the file if your browser or a security product says it found malware or a virus, or if Windows asks for administrator permission in any form (a password or a Yes/No prompt): setup never needs it.</strong></p>
-<p class="dim">These warnings mean Windows doesn't know the file yet, not that it found something wrong. A fake copy would bring the same warnings, which is why checking the fingerprint matters.</p>
+<p>Your browser may say the file isn't commonly downloaded. Choose to keep it, and only for that notice.</p>
+<p>Windows may show “Windows protected your PC”, saying it prevented an unrecognized app from starting. If any check you ran on this file failed, don’t run it: delete it. Otherwise, if the file came from this site or Petalock’s GitHub releases, or it printed True in step 2, choose More info, then Run anyway, for that screen only.</p>
+<p class="dim">These notices mean Windows doesn't know the file yet, not that it found something wrong. A fake copy can show the same notices, so get Petalock only from this site or its GitHub releases.</p>
 <p>If Smart App Control is on, Windows may block Petalock with no Run anyway option. This preview can’t run on that PC until Petalock is signed; we don’t suggest turning Smart App Control off for it.</p>
 </li>
 </ol></div></section>
@@ -76,7 +76,7 @@
 <div class="need"><p>Windows 11, 64-bit. Windows 10 (64-bit) should work but hasn't been tested.</p>
 <p class="dim">Setup needs the internet only if your PC lacks Microsoft Edge WebView2, which Windows 11 includes: setup then gets it from Microsoft. Petalock has no online features: it sends nothing about you or your vaults anywhere.</p>
 <h3>Not offered yet</h3>
-<p class="dim">No code signature (Authenticode or PGP), no package managers and no automatic updates in this preview: the fingerprint above is how you check a file (the guide also shows GitHub’s build record).</p></div></div></section>
+<p class="dim">No code signature (Authenticode or PGP), no package managers and no automatic updates in this preview: the optional check in step 2 shows a file matches the one published (the guide also shows GitHub’s build record, which shows the workflow that built it).</p></div></div></section>
 </main>
 <footer><div class="wrap"><span class="f">{{{icon_foot}}}Petalock</span>
 <ul class="links"><li><a href="{{notes_url}}">Release notes</a></li><li><span aria-hidden="true">·</span> <a href="{{releases_url}}">Older versions</a></li><li><span aria-hidden="true">·</span> <a href="{{repo_url}}">Source code</a></li><li><span aria-hidden="true">·</span> <a href="{{security_url}}">Security policy</a></li></ul>

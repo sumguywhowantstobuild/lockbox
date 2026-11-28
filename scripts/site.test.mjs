@@ -759,29 +759,31 @@ const WORDS = {
     "Early preview · Unsigned and not independently audited.",
     "Your secrets, in print only you can read.",
     "A password manager and file vault for Windows. Your vaults stay on your PC, encrypted.",
-    "Made by Ariel Maningas. It’s unsigned, so your browser and Windows will warn you. Check the file before you open it.",
+    // amendment 2026-11-28: "may warn you", and the link asks which warnings mean stop (to step 3)
+    "Made by Ariel Maningas. It’s unsigned, so your browser and Windows may warn you. Which warnings mean stop?",
     "Windows 11, 64-bit",
     "An early preview, said plainly",
-    "Unsigned Petalock has no code-signing certificate yet, so Windows can't tell who made the file. Your browser and Windows will warn you before it runs.",
+    "Unsigned Petalock has no code-signing certificate yet, so Windows can't tell who made the file. Your browser and Windows may warn you before it runs.",
     "Not independently audited No outside security firm has checked Petalock's code yet. The code is public, so anyone can read it.",
     "Three steps to install",
     "Get Petalock only from petalock.arielmaningas.com or github.com/sumguywhowantstobuild/petalock.",
     "Setup needs the internet only if your PC lacks Microsoft Edge WebView2, which Windows 11 includes: setup then gets it from Microsoft. Petalock has no online features: it sends nothing about you or your vaults anywhere.",
-    "Check the file is ours Before you open it, check that the file you got is the one we published. Open PowerShell and paste this line (click in the box, press Ctrl+A, then Ctrl+C):",
+    // the check is optional: skip it for a file from an official place, download again or check a copy from anywhere else
+    "Check the file matches (optional) About a minute. If you downloaded it from petalock.arielmaningas.com or Petalock’s GitHub releases, you can skip this. Got it anywhere else? The simplest is to download it again from this page; to use that copy anyway, check it first (for another version, against that release’s fingerprint on GitHub, as the guide shows). Open PowerShell and paste this line (click in the box, press Ctrl+A, then Ctrl+C):",
     "PowerShell line to check the file",
     // correction 3: a path typed once, as data, instead of an edited string
     "If you saved it somewhere else, or your browser renamed it (for example with “(1)” at the end), use these two lines instead. Paste both, then type or paste the file’s full path when PowerShell asks, without quotation marks.",
     "PowerShell lines for a file saved elsewhere or renamed",
-    "It should print True.",
+    "It should print True, which means the file matches the fingerprint published for this version.",
     "If it prints False, stop. Don't open the file: delete it and download it again from this page.",
     "See the fingerprint",
-    "Open it Because the file is unsigned and new, you'll see warnings. The exact words may differ on your PC.",
-    // finding 4: the order is explicit: keep only for that notice, check the saved file, Run anyway only after True
-    "Your browser may say the file isn't commonly downloaded. Choose to keep it, and only for that notice. Then check the saved file in step 2.",
-    "Windows may show “Windows protected your PC”. Only after step 2 printed True, choose More info, then Run anyway, and only for that screen.",
+    // step 3 in the amendment's order: the stop rule right after the opening line, then the browser notice, then SmartScreen
+    "Open it Because the file is unsigned and new, you may see warnings. The exact words may differ on your PC.",
     // correction 2: any form of administrator permission
     "Stop and delete the file if your browser or a security product says it found malware or a virus, or if Windows asks for administrator permission in any form (a password or a Yes/No prompt): setup never needs it.",
-    "These warnings mean Windows doesn't know the file yet, not that it found something wrong. A fake copy would bring the same warnings, which is why checking the fingerprint matters.",
+    "Your browser may say the file isn't commonly downloaded. Choose to keep it, and only for that notice.",
+    "Windows may show “Windows protected your PC”, saying it prevented an unrecognized app from starting. If any check you ran on this file failed, don’t run it: delete it. Otherwise, if the file came from this site or Petalock’s GitHub releases, or it printed True in step 2, choose More info, then Run anyway, for that screen only.",
+    "These notices mean Windows doesn't know the file yet, not that it found something wrong. A fake copy can show the same notices, so get Petalock only from this site or its GitHub releases.",
     "If Smart App Control is on, Windows may block Petalock with no Run anyway option. This preview can’t run on that PC until Petalock is signed; we don’t suggest turning Smart App Control off for it.",
     "What happens to your vaults",
     "Installing Petalock goes into your own user folder; no administrator needed. It makes no vault until you create one.",
@@ -790,7 +792,7 @@ const WORDS = {
     "Going back Older versions stay on the releases list. Setup lets you install one over a newer version, but going back hasn’t been tested: an older version may not open vaults or settings a newer one has changed, so keep a tested backup before you try. If a release is withdrawn, this page goes back to the last good one and the withdrawn release’s notes say why.",
     "Deleting a vault on purpose Petalock can't delete a vault for you yet. First note the vault's exact folder (in Petalock, choose Show in File Explorer). If you might want the vault back, make sure you have a tested backup you can restore. Then remove it from the list in Petalock, then delete that folder in File Explorer. Step by step in the guide.",
     "What you need Windows 11, 64-bit. Windows 10 (64-bit) should work but hasn't been tested. Setup needs the internet only if your PC lacks Microsoft Edge WebView2, which Windows 11 includes: setup then gets it from Microsoft. Petalock has no online features: it sends nothing about you or your vaults anywhere.",
-    "No code signature (Authenticode or PGP), no package managers and no automatic updates in this preview: the fingerprint above is how you check a file (the guide also shows GitHub’s build record).",
+    "No code signature (Authenticode or PGP), no package managers and no automatic updates in this preview: the optional check in step 2 shows a file matches the one published (the guide also shows GitHub’s build record, which shows the workflow that built it).",
     "Release notes · Older versions · Source code · Security policy",
     "Petalock is free and open source (MIT). Made by Ariel Maningas.",
   ],
@@ -814,7 +816,10 @@ const WORDS = {
     "Petalock is an early preview: it is unsigned and has not been independently audited.",
     "Get Petalock only from petalock.arielmaningas.com or github.com/sumguywhowantstobuild/petalock.",
     "Windows 11, 64-bit is the only tested setup. Windows 10 (64-bit) should work but hasn't been tested.",
-    "Every release lists the file's fingerprint. Paste the PowerShell line from the download page; it prints True when the file is ours.",
+    // amendment 2026-11-28: the install line, and the check's new first paragraph and meaning of True
+    "Get the installer from the download page and open it. Checking its fingerprint first is optional (the next section).",
+    "Optional. If you downloaded the file from petalock.arielmaningas.com or Petalock’s GitHub releases, you can skip this. For a copy from anywhere else, the simplest is to download it again from the download page; to use that copy anyway, check it first: for the version the download page offers, with the lines below; for any other version, against that release’s own fingerprint (Going back, below).",
+    "Every release lists the file's fingerprint. Paste the PowerShell line from the download page; it prints True when the file matches the fingerprint published for that version. GitHub’s build record (below) is the separate check of which workflow built it.",
     // correction 3
     "If you saved the file somewhere other than Downloads, or your browser renamed it, use these two lines instead. Paste both, then type or paste the file’s full path when PowerShell asks, without quotation marks.",
     "If it prints False, stop and delete the file.",
@@ -829,10 +834,10 @@ const WORDS = {
     "Retry and Cancel",
     "it never closes Petalock itself",
     // finding 4, on the guide
-    "They mean Windows doesn't know the file yet, not that it found something wrong",
-    "A matching fingerprint shows the file is the one we published. It does not mean no security product will object to it.",
-    "Your browser may say the file isn't commonly downloaded: choose to keep it, and only for that notice. Then check the saved file (the section above). Windows may show “Windows protected your PC”: only after the check printed True, choose More info, then Run anyway, and only for that screen.",
+    "An unsigned, new file may get warnings from your browser and from Windows. They mean Windows doesn't know the file yet, not that it found something wrong; the exact words may differ on your PC. A matching fingerprint shows the file matches the one we published. It does not mean no security product will object to it.",
+    // the stop rule is second, before the browser notice and Run anyway
     "Stop and delete the file if your browser or a security product says it found malware or a virus, or if Windows asks for administrator permission in any form (a password or a Yes/No prompt): setup never needs it.",
+    "Your browser may say the file isn't commonly downloaded: choose to keep it, and only for that notice. Windows may show “Windows protected your PC”, saying it prevented an unrecognized app from starting. If any check you ran on this file failed, don’t run it: delete it. Otherwise, if the file came from the download page or Petalock’s GitHub releases, or it printed True in the check above, choose More info, then Run anyway, for that screen only.",
     "Smart App Control",
     "This preview can’t run on that PC until Petalock is signed",
     // finding 18
@@ -852,7 +857,7 @@ const WORDS = {
     "Optionally, once the uninstall has finished, you can also remove Petalock’s own records by deleting the folder %LOCALAPPDATA%\\Petalock: it holds the settings, the list of vaults and the restore and output records, never the vaults.",
     "If the deleted folder appears in the Recycle Bin, you can select that entry only and delete it permanently",
     // finding 6
-    "Older versions stay on the releases list. Each release lists its own installer and its own fingerprint (the .sha256 file on its page). Check the exact file you will open against that release's fingerprint, not against this page's",
+    "Older versions stay on the releases list. Each release lists its own installer and its own fingerprint. Checking an older version you downloaded from Petalock’s GitHub releases is optional. A copy from anywhere else must match that release’s own fingerprint (the .sha256 file on its page) before you open it, never a checksum that came with the copy; compare the exact file you will open with it, not with this page's",
     "going back hasn’t been tested",
     "Restart your PC and try again.",
     "icon by the clock",
@@ -898,6 +903,18 @@ const releaseFacts = () => {
   return { version: VERSION, size, date: "8 December 2026", fingerprint: sha256(INSTALLER_BYTES) };
 };
 
+/** What is wrong with the opening's link and the two step ids of a download page: `[]` when the link and both ids are right. */
+function openingProblems(html) {
+  const problems = [];
+  const hrefs = tags(html).filter((t) => t.name === "a").map((t) => t.attrs.href);
+  if (!hrefs.includes("#open")) problems.push("nothing links to step 3");
+  const stepIds = idsOf(html).filter((id) => id === "check" || id === "open");
+  if (JSON.stringify(stepIds) !== JSON.stringify(["check", "open"])) problems.push("step 2 keeps #check and step 3 has #open");
+  const link = /<a href="([^"]*)">([^<]*)<\/a>/.exec(html.split('<p class="made">')[1] ?? "");
+  if (link?.[1] !== "#open" || norm(decode(link?.[2] ?? "")) !== "Which warnings mean stop?") problems.push(`the opening's link is ${String(link?.[1])} "${norm(decode(link?.[2] ?? ""))}"`);
+  return problems;
+}
+
 test("pages_say_what_the_design_says", async () => {
   const { release, soon } = await built();
   const facts = releaseFacts();
@@ -920,7 +937,8 @@ test("pages_say_what_the_design_says", async () => {
     looked += result.looked;
   }
   assert.ok(looked >= 100, `only ${String(looked)} phrases were compared`);
-  // the order of the warnings' instructions is part of the words (finding 4): keep, then check, then Run anyway, then stop
+  // the order of the warnings' instructions is part of the words (amendment 2026-11-28): the stop rule comes before the
+  // browser notice and Run anyway, so it is read before the action it guards
   const inOrder = (html, phrases, where) => {
     const text = visibleText(html);
     let at = -1;
@@ -930,10 +948,10 @@ test("pages_say_what_the_design_says", async () => {
       at = found;
     }
   };
-  const warningOrder = ["Choose to keep it, and only for that notice", "Then check the saved file in step 2", "Only after step 2 printed True, choose More info, then Run anyway", "Stop and delete the file if your browser or a security product"];
+  const warningOrder = ["Because the file is unsigned and new, you may see warnings", "Stop and delete the file if your browser or a security product", "Choose to keep it, and only for that notice", "Windows may show “Windows protected your PC”", "If any check you ran on this file failed, don’t run it: delete it", "Otherwise, if the file came from this site", "choose More info, then Run anyway, for that screen only", "These notices mean Windows doesn't know the file yet", "If Smart App Control is on"];
   inOrder(downloadRelease, warningOrder, "download");
   inOrder(downloadSoon, warningOrder, "download (soon)");
-  const guideOrder = ["Petalock is an early preview", "Get Petalock only from", "Windows 11, 64-bit is the only tested setup", "No administrator password", "choose to keep it, and only for that notice", "only after the check printed True, choose More info, then Run anyway", "Stop and delete the file if your browser or a security product"];
+  const guideOrder = ["Petalock is an early preview", "Get Petalock only from", "Windows 11, 64-bit is the only tested setup", "Get the installer from the download page and open it", "No administrator password", "Optional. If you downloaded the file from", "An unsigned, new file may get warnings", "Stop and delete the file if your browser or a security product", "choose to keep it, and only for that notice", "Windows may show “Windows protected your PC”", "If any check you ran on this file failed, don’t run it: delete it", "Otherwise, if the file came from the download page", "choose More info, then Run anyway, for that screen only", "If Smart App Control is on"];
   inOrder(guide, guideOrder, "guide");
   inOrder(guideSoon, guideOrder, "guide (soon)");
   // correction 1: the vault locations and any restore come first, before the steps that open Settings and uninstall
@@ -962,6 +980,21 @@ test("pages_say_what_the_design_says", async () => {
   assert.deepEqual(ids.filter((id) => sections.includes(id)), sections);
   // the download page's own links to the guide's anchors
   assert.ok(tags(downloadRelease).some((t) => t.name === "a" && t.attrs.href === "/guide/#delete-a-vault"));
+  // the opening's link asks which warnings mean stop and goes to step 3 (`#open`); step 2 keeps `#check`, and the check is still second
+  for (const html of [downloadRelease, downloadSoon]) assert.deepEqual(openingProblems(html), []);
+  // the check fires: a wrong destination, a wrong label and a missing or misplaced step id are each found; a clearly labelled link
+  // to the optional check elsewhere on the page is allowed (a valid navigation change must not fail the build)
+  const wrongTarget = downloadRelease.replace('<a href="#open">Which warnings mean stop?</a>', '<a href="#check">Which warnings mean stop?</a>');
+  assert.notEqual(wrongTarget, downloadRelease);
+  assert.ok(openingProblems(wrongTarget).length >= 1, "the opening's link sent to the check is found");
+  const wrongLabel = downloadRelease.replace("Which warnings mean stop?", "Check the file");
+  assert.notEqual(wrongLabel, downloadRelease);
+  assert.ok(openingProblems(wrongLabel).length >= 1, "a different label is found");
+  assert.equal(openingProblems(downloadRelease.replace('<li id="open">', "<li>")).length >= 1, true, "step 3 without #open is found");
+  assert.equal(openingProblems(downloadRelease.replace('<li id="check">', '<li id="chk">')).length >= 1, true, "step 2 without #check is found");
+  const optionalLink = downloadRelease.replace("<p>If Smart App Control is on", '<p><a href="#check">The optional check, step 2</a></p>\n<p>If Smart App Control is on');
+  assert.notEqual(optionalLink, downloadRelease);
+  assert.deepEqual(openingProblems(optionalLink), [], "a link to the optional check is allowed");
 
   // the check fires on one changed word, and is quiet on no change
   const changed = downloadRelease.replace("Your secrets, in print only you can read.", "Your secrets, in print only you can read!");
@@ -1011,7 +1044,7 @@ test("every_link_resolves", async () => {
   }
   assert.ok(internal >= 30 && external >= 8, `too few links were looked at: ${String(internal)} and ${String(external)}`);
   // finding 21: each named link goes where its name says, wherever it appears (not merely to an allowed address)
-  const byName = (tag) => ({ "Release notes": externalFor(tag).notes, "Older versions": externalFor(tag).releases, "releases list": externalFor(tag).releases, "Source code": externalFor(tag).source, "Security policy": externalFor(tag).security, "download page": "/", "Download": "/", "Guide": "/guide/", "Read the guide": "/guide/", "Go to the download page": "/", "Step by step in the guide": "/guide/#delete-a-vault" });
+  const byName = (tag) => ({ "Release notes": externalFor(tag).notes, "Older versions": externalFor(tag).releases, "releases list": externalFor(tag).releases, "Source code": externalFor(tag).source, "Security policy": externalFor(tag).security, "download page": "/", "Download": "/", "Guide": "/guide/", "Read the guide": "/guide/", "Go to the download page": "/", "Step by step in the guide": "/guide/#delete-a-vault", "Which warnings mean stop?": "#open" });
   let named = 0;
   for (const [name, where, tag] of [["release", release, TAG], ["soon", soon, null]]) {
     const expect = byName(tag ?? TAG);
@@ -1045,6 +1078,179 @@ test("every_link_resolves", async () => {
 test("the_guide_document_points_to_the_page", () => {
   const text = readFileSync(join(ROOT, "docs", "GUIDE.md"), "utf8");
   assert.match(text, /https:\/\/petalock\.arielmaningas\.com\/guide\//);
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The file check is optional (amendment 2026-11-28, docs/design/2026-11-28-optional-file-check-amendment.md): no page and no
+// document may make the fingerprint check a gate before Run anyway, and each keeps the two official places and the stop rules.
+// This reads text only (no browser), so it runs everywhere the other word checks do.
+
+/** Each old gate, as a whole phrase matched case-sensitively (the amendment's "Testing"). */
+const OLD_GATES = [
+  "Only after step 2 printed True",
+  "only after the check printed True",
+  "Only after the fingerprint check",
+  "Check the file before you open it.",
+  "Check the file before you open it, in either",
+  "Before you open it, check",
+  "Then check the saved file",
+  "then check it as above",
+  "which is why the check matters",
+  "which is why checking the fingerprint matters",
+  "which is why the fingerprint check matters",
+  "will warn you",
+  // the fix round (review of 2026-11-28): a fork can be "this repository", the old Install line, the mandatory Going back, the
+  // old SmartScreen order (failed check after Run anyway), and a build record alone allowing Run anyway
+  "this repository's releases",
+  "check its fingerprint (the next section), then open it",
+  "Check the exact file you will open",
+  "If you check an older version",
+  "failed, don't: delete it",
+  "or a check above passed for it",
+];
+const STOP_RULE = "Stop and delete the file if your browser or a security product says it found malware or a virus, or if Windows asks for administrator permission in any form (a password or a Yes/No prompt): setup never needs it.";
+const OFFICIAL_SENTENCE = "Get Petalock only from petalock.arielmaningas.com or github.com/sumguywhowantstobuild/petalock.";
+/** The failed-check instruction comes before the permission to run (review finding 1), and the permission starts "Otherwise". */
+const FAILED_CHECK = "If any check you ran on this file failed, don't run it: delete it.";
+const RUN_ANYWAY_CONDITION = ["Otherwise, if the file came from", FAILED_CHECK, "printed True"];
+const RUN_ANYWAY = "choose More info, then Run anyway, for that screen only.";
+const RELEASES_URL = "https://github.com/sumguywhowantstobuild/petalock/releases";
+/** The only place a copy may be checked against (review finding 4), and the Markdown link that names the official releases (finding 2). */
+const COPY_CHECK = "against the fingerprint on petalock.arielmaningas.com for the version it offers, or the .sha256 file on that version's release page at github.com/sumguywhowantstobuild/petalock/releases for any other version, never a checksum that came with the copy.";
+const RELEASES_LINK = `or [Petalock's releases on GitHub](${RELEASES_URL})`;
+/** The approved optional-check sentences of each Markdown document (review finding 6), by document. */
+const OPTIONAL_SENTENCES = {
+  guide: [
+    "Get the installer from the download page and open it. Checking its fingerprint first is optional (the next section).",
+    "Optional. If you downloaded the file from petalock.arielmaningas.com or Petalock's GitHub releases, you can skip this. For a copy from anywhere else, the simplest is to download it again from the download page; to use that copy anyway, check it first: for the version the download page offers, with the lines below; for any other version, against that release's own fingerprint (Going back, below).",
+    "it prints True when the file matches the fingerprint published for that version.",
+    "Checking an older version you downloaded from Petalock's GitHub releases is optional. A copy from anywhere else must match that release's own fingerprint (the .sha256 file on its page) before you open it, never a checksum that came with the copy; compare the exact file you will open with it, not with",
+  ],
+  readme: [
+    "You can check its fingerprint (SHA-256) before you open it: optional for a file from the download page or Petalock's releases on GitHub. A copy from anywhere else: download a fresh one from either, or check it before you open it,",
+    COPY_CHECK,
+    RELEASES_LINK,
+  ],
+  security: [
+    "You can check the file before you open it, in either or both of two ways. It is optional for a file from the download page or Petalock's releases on GitHub. For a copy from anywhere else, download a fresh one from either place, or check it before you open it,",
+    COPY_CHECK,
+    RELEASES_LINK,
+    "Otherwise, if the file came from the download page or Petalock's releases on GitHub, or its fingerprint printed True against the fingerprint published for its version, choose More info, then Run anyway, for that screen only.",
+  ],
+};
+
+/** Whether `phrase` is in `text` as a whole phrase (not inside a longer word), case-sensitively; both already `norm`ed. */
+function hasPhrase(text, phrase) {
+  for (let at = text.indexOf(phrase); at !== -1; at = text.indexOf(phrase, at + 1)) {
+    const before = text[at - 1] ?? " ";
+    const after = text[at + phrase.length] ?? " ";
+    if (!/[A-Za-z0-9]/.test(before) && !/[A-Za-z0-9]/.test(after)) return true;
+  }
+  return false;
+}
+/** The ways to read one surface: what a visitor reads, and the file as written (for a page, with its tags; for Markdown, with its marks). */
+const markdownViews = (md) => [norm(md.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/[`*]/g, "")), norm(md)];
+const pageViews = (html) => [visibleText(html), norm(html)];
+/** The old gates a surface still carries, by phrase. */
+const gatesIn = (views) => OLD_GATES.filter((gate) => views.some((view) => hasPhrase(view, norm(gate))));
+/**
+ * What a surface lacks of what the amendment requires of it: `required` phrases (read as words), the stop rule in bold and
+ * before any Run anyway; `[]` when it holds all.
+ */
+function lacks(views, required, bold) {
+  const [words, written] = views;
+  const missing = required.filter((phrase) => !views.some((view) => view.includes(norm(phrase)))).map((phrase) => `missing: ${phrase}`);
+  const rule = norm(STOP_RULE);
+  if (!written.includes(`${bold}${rule}${bold === "**" ? "**" : "</strong>"}`)) missing.push("the stop rule is not in bold");
+  const run = words.indexOf("Run anyway");
+  if (run !== -1 && !(words.indexOf(rule) !== -1 && words.indexOf(rule) < run)) missing.push("the stop rule does not come before Run anyway");
+  // the failed-check instruction comes before the permission to run (review finding 1), so a reader who stops at the first
+  // sentence that applies never reaches "Run anyway" for a file that failed a check
+  const permission = words.indexOf(norm(RUN_ANYWAY));
+  const failed = words.indexOf(norm(FAILED_CHECK));
+  if (permission !== -1 && !(failed !== -1 && failed < permission)) missing.push("the failed-check instruction does not come before Run anyway");
+  return missing;
+}
+
+test("the_file_check_is_optional_in_every_place_and_the_stops_stay", async () => {
+  const { release, soon } = await built();
+  const FALSE_PAGE = "If it prints False, stop. Don't open the file: delete it and download it again from this page.";
+  const FALSE_GUIDE = "If it prints False, stop and delete the file.";
+  const FALSE_SECURITY = "If it prints False, don't open the file: delete it.";
+  const pageNeeds = [OFFICIAL_SENTENCE, FALSE_PAGE, STOP_RULE, ...RUN_ANYWAY_CONDITION, RUN_ANYWAY];
+  const guideNeeds = [OFFICIAL_SENTENCE, FALSE_GUIDE, STOP_RULE, ...RUN_ANYWAY_CONDITION, RUN_ANYWAY, ...OPTIONAL_SENTENCES.guide];
+  // each of the five surfaces (download page and hosted guide in both states), then the 404 page, which only carries no old gate
+  const surfaces = [
+    ["download page", pageViews(read(release.outDir, "index.html")), pageNeeds, "<strong>"],
+    ["download page (soon)", pageViews(read(soon.outDir, "index.html")), pageNeeds, "<strong>"],
+    ["hosted guide", pageViews(read(release.outDir, "guide/index.html")), guideNeeds, "<strong>"],
+    ["hosted guide (soon)", pageViews(read(soon.outDir, "guide/index.html")), guideNeeds, "<strong>"],
+    ["docs/GUIDE.md", markdownViews(readFileSync(join(ROOT, "docs", "GUIDE.md"), "utf8")), guideNeeds, "**"],
+    ["README.md", markdownViews(readFileSync(join(ROOT, "README.md"), "utf8")), ["petalock.arielmaningas.com", "github.com/sumguywhowantstobuild/petalock/releases", STOP_RULE, ...OPTIONAL_SENTENCES.readme], "**"],
+    ["SECURITY.md", markdownViews(readFileSync(join(ROOT, "SECURITY.md"), "utf8")), ["Get Petalock only from petalock.arielmaningas.com or Petalock's releases on GitHub", FALSE_SECURITY, STOP_RULE, FAILED_CHECK, ...OPTIONAL_SENTENCES.security], "**"],
+  ];
+  const notFound = pageViews(read(release.outDir, "404.html"));
+  let compared = 0;
+  let required = 0;
+  for (const [name, views, needs, bold] of [...surfaces, ["404 page", notFound, [], "<strong>"]]) {
+    assert.ok(views[0].length > 200, `${name}: only ${String(views[0].length)} characters were read`);
+    assert.deepEqual(gatesIn(views), [], `${name} still makes the check a gate`);
+    compared += OLD_GATES.length;
+    if (name === "404 page") continue;
+    assert.deepEqual(lacks(views, needs, bold), [], `${name} lacks what the amendment requires`);
+    required += needs.length + 2;
+  }
+  assert.ok(compared >= 8 * OLD_GATES.length, `only ${String(compared)} old-gate comparisons were made`);
+  assert.ok(required >= 7 * 5, `only ${String(required)} required phrases were looked for`);
+
+  // the check fires: each old gate planted in a clean surface is found, a changed or lowercase gate is not a gate, and no change is quiet
+  const [, [cleanWords, cleanWritten], pagesNeeds] = surfaces[0];
+  for (const gate of OLD_GATES) {
+    assert.deepEqual(gatesIn([`${cleanWords} ${norm(gate)} more.`, cleanWritten]), [gate], `a planted "${gate}" was not found`);
+    assert.deepEqual(gatesIn([cleanWords, `${cleanWritten} ${norm(gate)}`]), [gate], `a planted "${gate}" was not found in the file as written`);
+  }
+  assert.deepEqual(gatesIn([cleanWords, cleanWritten]), [], "the clean page has no gate");
+  assert.deepEqual(gatesIn([`${cleanWords} unwill warn you`, cleanWritten]), [], "a longer word is not the phrase");
+  assert.deepEqual(gatesIn(["Only After Step 2 Printed True", ""]), [], "matching is case-sensitive, as the amendment says");
+  // each requirement fires too: take it out and the surface lacks it; an empty surface lacks all
+  assert.deepEqual(lacks([cleanWords, cleanWritten], pagesNeeds, "<strong>"), []);
+  for (const phrase of pagesNeeds) {
+    const without = [cleanWords.split(norm(phrase)).join(" "), cleanWritten.split(norm(phrase)).join(" ")];
+    assert.ok(lacks(without, pagesNeeds, "<strong>").length >= 1, `taking out "${phrase}" was not noticed`);
+  }
+  assert.equal(lacks(["", ""], pagesNeeds, "<strong>").length, pagesNeeds.length + 1, "an empty page lacks every requirement and the bold stop rule");
+  const notBold = [cleanWords, cleanWritten.split(`<strong>${norm(STOP_RULE)}</strong>`).join(norm(STOP_RULE))];
+  assert.deepEqual(lacks(notBold, pagesNeeds, "<strong>"), ["the stop rule is not in bold"]);
+  const late = [`Otherwise, if the file came from Run anyway ${cleanWords}`, cleanWritten];
+  assert.deepEqual(lacks(late, pagesNeeds, "<strong>"), ["the stop rule does not come before Run anyway"]);
+  // the failed-check instruction after the permission to run (the order the review found) is named, on the pages and in SECURITY.md
+  const failedLate = norm(FAILED_CHECK);
+  const reordered = cleanWords.replace(failedLate, "").replace(norm(RUN_ANYWAY), `${norm(RUN_ANYWAY)} ${failedLate}`);
+  assert.notEqual(reordered, cleanWords);
+  assert.deepEqual(lacks([reordered, cleanWritten], pagesNeeds, "<strong>"), ["the failed-check instruction does not come before Run anyway"]);
+
+  // Markdown fixtures (review finding 6): the central policy removed, with the stop rule and the official URLs left in place,
+  // is noticed; so are the original Install sentence and a fork's "this repository"
+  const markdown = (file) => readFileSync(join(ROOT, file), "utf8");
+  const needsOf = Object.fromEntries(surfaces.map(([name, , needs]) => [name, needs]));
+  const guideMd = markdown("docs/GUIDE.md");
+  const originalInstall = guideMd.replace(/and open it\. Checking its fingerprint\s+first is optional \(the next\s+section\)\./, ", check its fingerprint (the next section), then open it.");
+  assert.notEqual(originalInstall, guideMd, "the guide's Install sentence was found to put the old one back");
+  const originalViews = markdownViews(originalInstall);
+  assert.deepEqual(gatesIn(originalViews), ["check its fingerprint (the next section), then open it"], "the original Install sentence is a gate");
+  assert.ok(lacks(originalViews, needsOf["docs/GUIDE.md"], "**").some((m) => m.includes("Get the installer from the download page and open it")), "the original guide Install sentence was not noticed");
+  assert.deepEqual(gatesIn(markdownViews(guideMd)), [], "the guide as it is has none");
+  const readme = markdown("README.md");
+  const noReadmePolicy = readme.replace(/You can check its fingerprint[\s\S]*?came with the copy\./, "");
+  assert.notEqual(noReadmePolicy, readme, "the README's optional-check paragraph was found to remove");
+  const readmeViews = markdownViews(noReadmePolicy);
+  assert.ok(readmeViews[0].includes(norm(STOP_RULE)) && readmeViews[1].includes("github.com/sumguywhowantstobuild/petalock/releases") && readmeViews[0].includes("petalock.arielmaningas.com"), "the stop rule and the official URLs are still there, as in the review's example");
+  assert.ok(lacks(readmeViews, needsOf["README.md"], "**").length >= 2, "removing the README's optional-check and third-party-copy sentences was not noticed");
+  const security = markdown("SECURITY.md");
+  const noSecurityPolicy = security.replace(/You can check the file before you open it[\s\S]*?came with the copy\./, "Check the file before you open it, in either or both of two ways.");
+  assert.notEqual(noSecurityPolicy, security, "SECURITY.md's optional-check paragraph was found to remove");
+  assert.ok(lacks(markdownViews(noSecurityPolicy), needsOf["SECURITY.md"], "**").length >= 2, "removing SECURITY.md's optional-check sentences was not noticed");
+  assert.deepEqual(gatesIn(markdownViews(security.replace("Petalock's releases on GitHub", "this repository's releases"))), ["this repository's releases"], "a fork's identity in the exception is found");
 });
 
 test("the_command_builds_and_refuses_as_the_function_does", () => {
@@ -1207,8 +1413,23 @@ describe("in a real browser", { skip: driver ? false : "no Edge WebDriver given 
 
   /** Words of the safety instructions that must be on screen, by page; each found in the smallest paragraph that holds it. */
   const SAFETY = {
-    download: ["If it prints False, stop.", "Your browser may say the file isn't commonly downloaded", "Windows may show", "Stop and delete the file if your browser", "If Smart App Control is on"],
-    guide: ["If it prints False, stop and delete the file", "Your browser may say the file isn't commonly downloaded", "Stop and delete the file if your browser", "If Smart App Control is on", "Petalock is an early preview", "Get Petalock only from", "Windows 11, 64-bit is the only tested setup"],
+    download: ["If it prints False, stop.", "Stop and delete the file if your browser", "Your browser may say the file isn't commonly downloaded", "Windows may show", "If Smart App Control is on"],
+    guide: ["If it prints False, stop and delete the file", "Stop and delete the file if your browser", "Your browser may say the file isn't commonly downloaded", "Windows may show", "If Smart App Control is on", "Petalock is an early preview", "Get Petalock only from", "Windows 11, 64-bit is the only tested setup"],
+  };
+  /**
+   * The warnings read top to bottom as the amendment orders them: the stop rule, then the browser notice, then Windows'
+   * SmartScreen screen. Where two share a paragraph (the guide's), the place of the words in it decides. `""` when in order.
+   */
+  const WARNING_ORDER = ["Stop and delete the file if", "Your browser may say", "Windows may show"];
+  const orderProblem = (tops) => {
+    const found = WARNING_ORDER.map((start) => tops.find(([phrase]) => phrase.startsWith(start)));
+    if (found.includes(undefined)) return "a warning instruction was not looked at";
+    for (let i = 1; i < found.length; i += 1) {
+      const [before, beforeTop, beforeAt] = found[i - 1];
+      const [after, afterTop, afterAt] = found[i];
+      if (!(beforeTop < afterTop || (beforeTop === afterTop && beforeAt < afterAt))) return `"${after}" does not come after "${before}"`;
+    }
+    return "";
   };
   /** What is wrong with the safety instructions on the page now loaded: `[]` when each is on screen, in a box, in order. */
   const safetyProblems = (phrases) =>
@@ -1224,11 +1445,108 @@ describe("in a real browser", { skip: driver ? false : "no Edge WebDriver given 
          if (r.width < 20 || r.height < 8) problems.push('no box: ' + phrase);
          if (getComputedStyle(p).fontSize === '0px') problems.push('no size: ' + phrase);
          if (r.right < 0 || r.left > innerWidth) problems.push('off the screen: ' + phrase);
-         tops.push([phrase, r.top + scrollY]);
+         tops.push([phrase, r.top + scrollY, p.textContent.replace(/\\s+/g, ' ').indexOf(phrase)]);
        }
        return { problems, tops };`,
       phrases,
     );
+
+  /**
+   * The two sentences that tell a reader which files may be run past SmartScreen (review finding 7): the failed-check
+   * instruction and the condition for Run anyway. Each is looked for inside its paragraph, so hiding only one of them is caught
+   * although the paragraph around it stays on screen.
+   */
+  const CLAUSES = {
+    download: ["If any check you ran on this file failed, don't run it: delete it.", "Otherwise, if the file came from this site or Petalock's GitHub releases, or it printed True in step 2, choose More info, then Run anyway, for that screen only."],
+    guide: ["If any check you ran on this file failed, don't run it: delete it.", "Otherwise, if the file came from the download page or Petalock's GitHub releases, or it printed True in the check above, choose More info, then Run anyway, for that screen only."],
+  };
+  /** What is wrong with those sentences on the page now loaded: `[]` when each one's own text is shown, has a box and is readable. */
+  const clauseProblems = (clauses) =>
+    browser.run(
+      `const problems = [];
+       for (const clause of arguments[0]) {
+         const flat = (s) => s.replace(/[‘’]/g, "'").replace(/\\s+/g, ' ');
+         const holder = [...document.querySelectorAll('p')].find((p) => flat(p.textContent).includes(clause));
+         if (!holder) { problems.push('missing: ' + clause); continue; }
+         let text = ''; const owners = [];
+         const walker = document.createTreeWalker(holder, NodeFilter.SHOW_TEXT);
+         for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+           for (const ch of n.data.replace(/[‘’]/g, "'")) {
+             if (/\\s/.test(ch)) { if (text === '' || text.endsWith(' ')) continue; text += ' '; } else text += ch;
+             owners.push(n);
+           }
+         }
+         const at = text.indexOf(clause);
+         if (at === -1) { problems.push('missing: ' + clause); continue; }
+         for (const n of new Set(owners.slice(at, at + clause.length))) {
+           if (n.data.trim() === '') continue;
+           const el = n.parentElement;
+           if (!el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true, contentVisibilityAuto: true })) { problems.push('not shown: ' + clause); continue; }
+           const range = document.createRange(); range.selectNodeContents(n);
+           const rects = [...range.getClientRects()].filter((r) => r.width >= 1 && r.height >= 1);
+           if (rects.length === 0) problems.push('no box: ' + clause);
+           if (rects.length > 0 && rects.every((r) => r.right < 0 || r.left > innerWidth)) problems.push('off the screen: ' + clause);
+           const css = getComputedStyle(el);
+           if (css.fontSize === '0px') problems.push('no size: ' + clause);
+           if (/^(rgba\\(\\d+, \\d+, \\d+, 0\\)|transparent)$/.test(css.color)) problems.push('transparent text: ' + clause);
+         }
+       }
+       return problems;`,
+      clauses,
+    );
+
+  test("the SmartScreen conditions are shown, in both themes and sizes (and a hidden clause is caught)", async () => {
+    let looked = 0;
+    for (const [name, url] of await pageUrls()) {
+      const clauses = CLAUSES[name === "guide" ? "guide" : name === "notfound" ? "" : "download"];
+      if (!clauses) continue;
+      for (const view of VIEWS) {
+        for (const scheme of SCHEMES) {
+          await open(url, { width: view.width, height: view.height, scheme });
+          assert.deepEqual(await clauseProblems(clauses), [], `${name} ${view.name} ${scheme}`);
+          looked += clauses.length;
+        }
+      }
+    }
+    assert.ok(looked >= 16, `only ${String(looked)} sentences were looked at`);
+
+    // negative fixtures: only one clause hidden (the paragraph around it, and "Run anyway" itself where it is the other clause,
+    // stay on screen), by display and by visibility, on both pages
+    const { release } = await built();
+    const hideClause = (dir, file, start, end, css) => {
+      const html = read(dir, file);
+      const clause = new RegExp(`${start}[\\s\\S]*?${end}`).exec(html);
+      assert.ok(clause, `${file}: no clause from "${start}"`);
+      writeFileSync(join(dir, file), html.replace(clause[0], `<span class="gone">${clause[0]}</span>`));
+      appendCss(dir, css);
+    };
+    const fixtures = [
+      ["the qualifying clause, display:none, on the download page", "download", "index.html", "Otherwise, if the file came from", "for that screen only\\.", ".gone{display:none}"],
+      ["the failed-check sentence, visibility:hidden, on the download page", "download", "index.html", "If any check you ran on this file failed", "delete it\\.", ".gone{visibility:hidden}"],
+      ["the qualifying clause, display:none, on the guide", "guide", "guide/index.html", "Otherwise, if the file came from", "for that screen only\\.", ".gone{display:none}"],
+      ["the failed-check sentence, visibility:hidden, on the guide", "guide", "guide/index.html", "If any check you ran on this file failed", "delete it\\.", ".gone{visibility:hidden}"],
+    ];
+    for (const [what, kind, file, start, end, css] of fixtures) {
+      const copy = tempDir();
+      cpSync(release.outDir, copy, { recursive: true });
+      hideClause(copy, file, start, end, css);
+      const fixture = await serve(copy, { headers });
+      servers.push(fixture);
+      await open(`${fixture.origin}${kind === "guide" ? "/guide/" : "/"}`);
+      assert.ok((await clauseProblems(CLAUSES[kind])).length >= 1, `${what} was not caught`);
+      // the paragraph around it is still on screen, so the paragraph test of the safety instructions alone would not notice
+      assert.deepEqual((await safetyProblems(SAFETY[kind])).problems, [], `${what}: the paragraph test passes, which is why the clause test exists`);
+    }
+    // and the same pages without a fault are clean
+    const clean = tempDir();
+    cpSync(release.outDir, clean, { recursive: true });
+    const quiet = await serve(clean, { headers });
+    servers.push(quiet);
+    for (const [path, kind] of [["/", "download"], ["/guide/", "guide"]]) {
+      await open(`${quiet.origin}${path}`);
+      assert.deepEqual(await clauseProblems(CLAUSES[kind]), []);
+    }
+  });
 
   test("the safety instructions are on screen, in order, in both themes and sizes (and a hidden one is caught)", async () => {
     let looked = 0;
@@ -1240,9 +1558,8 @@ describe("in a real browser", { skip: driver ? false : "no Edge WebDriver given 
           await open(url, { width: view.width, height: view.height, scheme });
           const { problems, tops } = await safetyProblems(phrases);
           assert.deepEqual(problems, [], `${name} ${view.name} ${scheme}`);
-          // the warnings' sequence reads top to bottom: the browser notice, then Windows' screen, then the stop line
-          const order = tops.filter(([p]) => /^(Your browser may say|Windows may show|Stop and delete the file if)/.test(p)).map(([, top]) => top);
-          assert.deepEqual([...order].sort((a, b) => a - b), order, `${name} ${view.name} ${scheme}: the warnings are out of order on screen`);
+          // the warnings' sequence reads top to bottom: the stop rule, then the browser notice, then Windows' screen
+          assert.equal(orderProblem(tops), "", `${name} ${view.name} ${scheme}: the warnings are out of order on screen`);
           looked += phrases.length;
         }
       }
@@ -1273,6 +1590,30 @@ describe("in a real browser", { skip: driver ? false : "no Edge WebDriver given 
     servers.push(quiet);
     await open(`${quiet.origin}/`);
     assert.deepEqual((await safetyProblems(SAFETY.download)).problems, []);
+    assert.equal(orderProblem((await safetyProblems(SAFETY.download)).tops), "");
+
+    // negative fixtures for the order: the warnings' stop rule moved to after Run anyway is caught on both pages, and the
+    // same pages unmoved are in order
+    for (const [path, file, safety, before] of [
+      ["/", "index.html", SAFETY.download, '<p class="dim">These notices mean'],
+      ["/guide/", "guide/index.html", SAFETY.guide, "<p>If Smart App Control is on"],
+    ]) {
+      const moved = tempDir();
+      cpSync(release.outDir, moved, { recursive: true });
+      const html = read(moved, file);
+      const stop = [...html.matchAll(/<p class="stop"><strong>Stop and delete the file if your browser[\s\S]*?<\/strong><\/p>\n?/g)].map((m) => m[0]);
+      assert.equal(stop.length, 1, `${file}: one warnings stop rule`);
+      assert.ok(html.includes(before), `${file}: ${before} not found`);
+      writeFileSync(join(moved, file), html.replace(stop[0], "").replace(before, `${stop[0]}${before}`));
+      const fixture = await serve(moved, { headers });
+      servers.push(fixture);
+      await open(`${fixture.origin}${path}`);
+      const { problems, tops } = await safetyProblems(safety);
+      assert.deepEqual(problems, [], "moved, but still shown");
+      assert.notEqual(orderProblem(tops), "", `${file}: the stop rule moved after Run anyway was not caught`);
+      await open(`${quiet.origin}${path}`);
+      assert.equal(orderProblem((await safetyProblems(safety)).tops), "", `${file}: unmoved, it is in order`);
+    }
   });
 
   /** The stop lines: the bold text itself, by its words, and the section each belongs in. */

@@ -17,17 +17,25 @@ Windows 11, 64-bit is the only tested setup. Windows 10 (64-bit) should work but
 
 ## Install
 
-Get the installer from the [download page](https://petalock.arielmaningas.com/), check its fingerprint (the next
-section), then open it. No administrator password is needed: Petalock goes into your own user folder. If Petalock is
-running, setup asks you to quit it from its icon by the clock, with Retry and Cancel; it never closes Petalock itself.
+Get the installer from the [download page](https://petalock.arielmaningas.com/) and open it. Checking its fingerprint
+first is optional (the next section). No administrator password is needed: Petalock goes into your own user folder. If
+Petalock is running, setup asks you to quit it from its icon by the clock, with Retry and Cancel; it never closes
+Petalock itself.
 
 Setup shows what it will do on one screen. Choose Install; to put Petalock in another folder, open Options first. When it
 has finished, you can open Petalock from that screen or from the Start menu.
 
 ## Check the file
 
+Optional. If you downloaded the file from petalock.arielmaningas.com or Petalock's GitHub releases, you can skip this.
+For a copy from anywhere else, the simplest is to download it again from the
+[download page](https://petalock.arielmaningas.com/); to use that copy anyway, check it first: for the version the
+download page offers, with the lines below; for any other version, against that release's own fingerprint (Going back,
+below).
+
 Every release lists the file's fingerprint. Paste the PowerShell line from the download page; it prints True when the file
-is ours. The page fills in the version and the fingerprint; the line looks like this:
+matches the fingerprint published for that version. GitHub's build record (below) is the separate check of which workflow
+built it. The page fills in the version and the fingerprint; the line looks like this:
 
 ```
 (Get-FileHash -LiteralPath "$HOME\Downloads\Petalock_<version>_x64-setup.exe").Hash -eq "<fingerprint>"
@@ -59,16 +67,18 @@ gh attestation verify $f --repo sumguywhowantstobuild/petalock --cert-identity "
 
 ## The warnings
 
-An unsigned, new file gets warnings from your browser and from Windows. They mean Windows doesn't know the file yet, not
-that it found something wrong; the exact words may differ on your PC. A matching fingerprint shows the file is the one we
-published. It does not mean no security product will object to it.
-
-Your browser may say the file isn't commonly downloaded: choose to keep it, and only for that notice. Then check the saved
-file (the section above). Windows may show "Windows protected your PC": only after the check printed True, choose More
-info, then Run anyway, and only for that screen.
+An unsigned, new file may get warnings from your browser and from Windows. They mean Windows doesn't know the file yet,
+not that it found something wrong; the exact words may differ on your PC. A matching fingerprint shows the file matches
+the one we published. It does not mean no security product will object to it.
 
 **Stop and delete the file if your browser or a security product says it found malware or a virus, or if Windows asks for
 administrator permission in any form (a password or a Yes/No prompt): setup never needs it.**
+
+Your browser may say the file isn't commonly downloaded: choose to keep it, and only for that notice. Windows may show
+"Windows protected your PC", saying it prevented an unrecognized app from starting. If any check you ran on this file
+failed, don't run it: delete it. Otherwise, if the file came from the
+[download page](https://petalock.arielmaningas.com/) or Petalock's GitHub releases, or it printed True in the check
+above, choose More info, then Run anyway, for that screen only.
 
 If Smart App Control is on, Windows may block Petalock with no Run anyway option. This preview can't run on that PC until
 Petalock is signed; we don't suggest turning Smart App Control off for it.
@@ -196,8 +206,10 @@ Optionally, once the uninstall has finished, you can also remove Petalock's own 
 ## Going back
 
 Older versions stay on the [releases list](https://github.com/sumguywhowantstobuild/petalock/releases). Each release
-lists its own installer and its own fingerprint (the .sha256 file on its page). Check the exact file you will open against
-that release's fingerprint, not against the download page's: its PowerShell line is for its own version only.
+lists its own installer and its own fingerprint. Checking an older version you downloaded from Petalock's GitHub
+releases is optional. A copy from anywhere else must match that release's own fingerprint (the .sha256 file on its page)
+before you open it, never a checksum that came with the copy; compare the exact file you will open with it, not with the
+download page's: its PowerShell line is for its own version only.
 
 Setup lets you install one over a newer version, but going back hasn't been tested: an older version may not open vaults
 or settings a newer one has changed, so keep a tested backup before you try. If a release is withdrawn, the download page

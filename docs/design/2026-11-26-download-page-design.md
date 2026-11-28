@@ -18,6 +18,9 @@ It also has to tell them what happens to their vaults when they install, update 
 (KeePassXC, VeraCrypt, Espanso, Bitwarden and Microsoft's SmartScreen page) found that none of them explains Windows'
 warning before the visitor meets it, and only VeraCrypt says to stop when the check fails. This page does both.
 
+The maker, that the file is unsigned and the expected warning come before the button (the plan's decision 1). The check
+after download is optional (Ariel, 2026-11-28, option A; [the amendment](2026-11-28-optional-file-check-amendment.md)).
+
 How the look was chosen (steps 1 to 5 on 2026-11-26, 6 to 8 on 2026-11-27):
 
 1. Three page drafts (plain, steps, branded). **Ariel:** "It looks bland actually... Generic feel."
@@ -172,7 +175,7 @@ Between 900 and 1180 px wide the headline scales with the window (`clamp(40px, 4
 3. **The band.**
 4. **"An early preview, said plainly":** two short columns, Unsigned and Not independently audited.
 5. **"Three steps to install":** three numbered cards. 1 Download (version line, where to get it from, when setup needs
-   the internet, a second download button). 2 Check the file is ours (the PowerShell line, what it should print, the stop
+   the internet, a second download button). 2 Check the file matches, optional (the PowerShell line, what it should print, the stop
    line, the fingerprint). 3 Open it (what the browser and Windows will show, and why).
 6. **"What happens to your vaults":** four columns (Installing, Updating, Uninstalling, Going back), then a box,
    "Deleting a vault on purpose", with a link to the guide's steps.
@@ -216,11 +219,11 @@ the tested Windows version before any install instruction, and what each must sa
 |---|---|
 | Install | No administrator password; Petalock goes into your own user folder. If Petalock is running, setup asks you to quit it from its icon by the clock, with Retry and Cancel; it never closes Petalock itself. |
 | Check the file | The words below, the PowerShell line (labelled with its version in the guide), and what to do on False. For people with GitHub's command-line tool, GitHub's build record too, as a quoted path pinned to the release workflow file on `main` by its certificate identity: `gh attestation verify "$HOME\Downloads\Petalock_<version>_x64-setup.exe" --repo sumguywhowantstobuild/petalock --cert-identity "https://github.com/sumguywhowantstobuild/petalock/.github/workflows/release.yml@refs/heads/main" --source-ref refs/heads/main`, which should report the release workflow on `main`; anything else or a failure means stop and delete the file. For a file saved elsewhere or renamed, the two-line alternative (below) takes the path once as data in `$f`, and the guide's `gh attestation verify $f` with the same pins checks the same file. |
-| The warnings | In this order: keep the file only for the "not commonly downloaded" notice; check the saved file; More info then Run anyway only for "Windows protected your PC" and only after it printed True; stop and delete the file on a malware or virus finding or any administrator permission prompt (a password or a Yes/No); Smart App Control, as on the download page (the words are below). |
+| The warnings | In this order: the stop rules (a malware or virus finding, any administrator permission prompt); keep the file only for the "not commonly downloaded" notice; at SmartScreen's unrecognized-app screen, if any check failed, delete the file; otherwise, if it came from an official place or printed True in the check, More info then Run anyway; Smart App Control, as on the download page (the words are below). |
 | Internet and WebView2 | Setup goes online only when WebView2 is missing, to get it from Microsoft. Microsoft installs a shared WebView2 Runtime that other apps use too; Petalock's uninstall leaves it installed. If setup's download fails, install Microsoft's official "Evergreen Standalone" WebView2 Runtime from Microsoft's website, then run setup again. What the WebView2 installer itself changes on the PC is Microsoft's, not Petalock's. |
 | Update | Install over the old version; what stays; no automatic updates (below). |
 | Uninstall | Where to find it in Settings; the program and the copies of opened files go, vaults stay; if the uninstaller says some opened copies are still in use or could not be removed, close whatever holds them, then choose Retry (Cancel leaves Petalock installed, and some copies may already be gone); what the "Delete the application data" box removes and what stays. Before the uninstall steps (Petalock is needed for both): note where your vaults are (new vaults default to `%USERPROFILE%\Petalock Vaults\`, others stay where they were made) and finish any restore in progress. After a successful uninstall, as an optional removal of Petalock's own records (not a promise of "no trace"): delete `%LOCALAPPDATA%\Petalock`, which holds the settings, the vault list and the restore and output records, never the vaults; if the deleted folder appears in the Recycle Bin, select that entry only and delete it permanently (never "empty" the bin). |
-| Going back | Older versions on the releases list, with the caution below; each release lists its own installer and its own fingerprint (its `.sha256` file), so the exact file to be opened is checked against that release's fingerprint, not the page's. |
+| Going back | Older versions on the releases list, with the caution below; each release lists its own installer and its own fingerprint (its `.sha256` file), so checking an older version downloaded from Petalock's GitHub releases is optional, and a copy from anywhere else must match that release's own fingerprint before it is opened, never a checksum that came with the copy, and not the page's (amendment 2026-11-28, review finding 5 and the re-check). |
 | Delete a vault | The words below. |
 | If Petalock won't start | Restart, look for the icon by the clock, check WebView2 is installed; the vaults stay safe in their folders. |
 
@@ -231,6 +234,9 @@ logo unit; **my call**, 2026-11-27), a "404 · Page not found" pill, a heading, 
 download page and the guide. It also tells people where the only real downloads are.
 
 ## The words
+
+Amended 2026-11-28: the file check is optional; where the blocks below and
+[the amendment](2026-11-28-optional-file-check-amendment.md) differ, the amendment wins.
 
 These are final once approved; Task 6's `pages_say_what_the_design_says` checks them word for word. Version, size, date
 and fingerprint are filled from the real release at build; `0.1.0` and the rest are examples.
@@ -250,15 +256,15 @@ may use either.
 - Pill: Early preview · Unsigned and not independently audited.
 - Headline: Your secrets, in print only you can read.
 - Lead: A password manager and file vault for Windows. Your vaults stay on your PC, encrypted.
-- Before the button: Made by Ariel Maningas. It’s unsigned, so your browser and Windows will warn you. Link: Check the
-  file before you open it.
+- Before the button: Made by Ariel Maningas. It’s unsigned, so your browser and Windows may warn you. Link: Which
+  warnings mean stop? (to step 3, anchor `#open`; step 2 keeps `#check`)
 - Button: Download for Windows
 - Version line: Version 0.1.0 · 7.1 MB · 8 December 2026 · Release notes
 - Needs line: Windows 11, 64-bit
 
 **An early preview, said plainly**
 - Unsigned: Petalock has no code-signing certificate yet, so Windows can't tell who made the file. Your browser and
-  Windows will warn you before it runs.
+  Windows may warn you before it runs.
 - Not independently audited: No outside security firm has checked Petalock's code yet. The code is public, so anyone
   can read it.
 
@@ -267,25 +273,29 @@ may use either.
   github.com/sumguywhowantstobuild/petalock. / Setup needs the internet only if your PC lacks Microsoft Edge WebView2,
   which Windows 11 includes: setup then gets it from Microsoft. Petalock has no online features: it sends nothing about
   you or your vaults anywhere. / Button: Download
-- 2 Check the file is ours: Before you open it, check that the file you got is the one we published. Open PowerShell
-  and paste this line (click in the box, press Ctrl+A, then Ctrl+C):
+- 2 Check the file matches (optional): About a minute. If you downloaded it from petalock.arielmaningas.com or
+  Petalock’s GitHub releases, you can skip this. Got it anywhere else? The simplest is to download it again from this
+  page; to use that copy anyway, check it first (for another version, against that release’s fingerprint on GitHub, as
+  the guide shows). Open PowerShell and paste this line (click in the box, press Ctrl+A, then Ctrl+C):
   `(Get-FileHash -LiteralPath "$HOME\Downloads\Petalock_0.1.0_x64-setup.exe").Hash -eq "<FINGERPRINT IN CAPITALS>"`
   / If you saved it somewhere else, or your browser renamed it (for example with “(1)” at the end), use these two lines
   instead. Paste both, then type or paste the file’s full path when PowerShell asks, without quotation marks. / Label:
   PowerShell lines for a file saved elsewhere or renamed, with the two lines in a second read-only box:
   `$f = Read-Host "Full path of the downloaded file"` then
   `(Get-FileHash -LiteralPath $f).Hash -eq "<FINGERPRINT IN CAPITALS>"` (the path is typed at a prompt, so it is data and
-  never parsed as code). / It should print True. / **If it prints False,
+  never parsed as code). / It should print True, which means the file matches the fingerprint published for this
+  version. / **If it prints False,
   stop. Don't open the file: delete it and download it again from this page.** / Folded: See the fingerprint → the
   fingerprint (SHA-256) in groups of eight.
-- 3 Open it: Because the file is unsigned and new, you'll see warnings. The exact words may differ on your PC. / Your
-  browser may say the file isn't commonly downloaded. Choose to keep it, and only for that notice. Then check the saved
-  file in step 2. / Windows may show “Windows protected your PC”. Only after step 2 printed True, choose More info, then
-  Run anyway, and only for that screen. / **Stop and delete the file if your browser or a security product says it found
-  malware or a virus, or if Windows asks for administrator permission in any form (a password or a Yes/No prompt): setup
-  never needs it.** / These warnings mean
-  Windows doesn't know the file yet, not that it found something wrong. A fake copy would bring the same warnings, which
-  is why checking the fingerprint matters. / If Smart App Control is on, Windows may block Petalock with no Run anyway option. This preview can’t run on that PC
+- 3 Open it: Because the file is unsigned and new, you may see warnings. The exact words may differ on your PC. /
+  **Stop and delete the file if your browser or a security product says it found malware or a virus, or if Windows asks
+  for administrator permission in any form (a password or a Yes/No prompt): setup never needs it.** / Your browser may
+  say the file isn't commonly downloaded. Choose to keep it, and only for that notice. / Windows may show “Windows
+  protected your PC”, saying it prevented an unrecognized app from starting. If any check you ran on this file failed,
+  don’t run it: delete it. Otherwise, if the file came from this site or Petalock’s GitHub releases, or it printed True
+  in step 2, choose More info, then Run anyway, for that screen only. / These notices mean Windows doesn't know the file yet, not
+  that it found something wrong. A fake copy can show the same notices, so get Petalock only from this site or its
+  GitHub releases. / If Smart App Control is on, Windows may block Petalock with no Run anyway option. This preview can’t run on that PC
   until Petalock is signed; we don’t suggest turning Smart App Control off for it.
 
 **What happens to your vaults**
@@ -308,14 +318,22 @@ may use either.
 internet only if your PC lacks Microsoft Edge WebView2 (the same line as step 1).
 
 **Not offered yet** (a line at the end of "What you need"): No code signature (Authenticode or PGP), no package
-managers and no automatic updates in this preview: the fingerprint above is how you check a file (the guide also shows
-GitHub’s build record).
+managers and no automatic updates in this preview: the optional check in step 2 shows a file matches the one published
+(the guide also shows GitHub’s build record, which shows the workflow that built it).
 
 **Footer:** Release notes · Older versions · Source code · Security policy / Petalock is free and open source (MIT).
 Made by Ariel Maningas.
 
-**Guide: Check the file:** Every release lists the file's fingerprint. Paste the PowerShell line from the download page;
-it prints True when the file is ours. / If you saved the file somewhere other than Downloads, or your browser renamed it,
+**Guide: Install:** Get the installer from the download page and open it. Checking its fingerprint first is optional (the
+next section). (Then the words about the administrator password, quitting a running Petalock and the setup screen, as in
+the table.)
+
+**Guide: Check the file:** Optional. If you downloaded the file from petalock.arielmaningas.com or Petalock’s GitHub
+releases, you can skip this. For a copy from anywhere else, the simplest is to download it again from the download page;
+to use that copy anyway, check it first: for the version the download page offers, with the lines below; for any other
+version, against that release’s own fingerprint (Going back, below). / Every release lists the file's fingerprint. Paste
+the PowerShell line from the download page; it prints True when the file matches the fingerprint published for that
+version. GitHub’s build record (below) is the separate check of which workflow built it. / If you saved the file somewhere other than Downloads, or your browser renamed it,
 use these two lines instead. Paste both, then type or paste the file’s full path when PowerShell asks, without quotation
 marks. (The two lines as on the download page; in the guide, each box is labelled with its version, "for version
 0.1.0" or "for the first release".) / **If it prints False, stop and delete the file.** / For people with GitHub's
@@ -346,15 +364,15 @@ never "emptied", which would delete unrelated files.)
 audited. / Get Petalock only from petalock.arielmaningas.com or github.com/sumguywhowantstobuild/petalock. / Windows 11,
 64-bit is the only tested setup. Windows 10 (64-bit) should work but hasn't been tested.
 
-**Guide: The warnings:** An unsigned, new file gets warnings from your browser and from Windows. They mean Windows
+**Guide: The warnings:** An unsigned, new file may get warnings from your browser and from Windows. They mean Windows
 doesn't know the file yet, not that it found something wrong; the exact words may differ on your PC. A matching
-fingerprint shows the file is the one we published. It does not mean no security product will object to it. / Your
-browser may say the file isn't commonly downloaded: choose to keep it, and only for that notice. Then check the saved
-file (the section above). Windows may show “Windows protected your PC”: only after the check printed True, choose More
-info, then Run anyway, and only for that screen. / **Stop and delete the file if your browser or a security product says
-it found malware or a virus, or if Windows asks for administrator permission in any form (a password or a Yes/No
-prompt): setup never needs it.** / Smart App
-Control, as on the download page.
+fingerprint shows the file matches the one we published. It does not mean no security product will object to it. /
+**Stop and delete the file if your browser or a security product says it found malware or a virus, or if Windows asks
+for administrator permission in any form (a password or a Yes/No prompt): setup never needs it.** / Your browser may say
+the file isn't commonly downloaded: choose to keep it, and only for that notice. Windows may show “Windows protected
+your PC”, saying it prevented an unrecognized app from starting. If any check you ran on this file failed, don’t run it:
+delete it. Otherwise, if the file came from the download page or Petalock’s GitHub releases, or it printed True in the
+check above, choose More info, then Run anyway, for that screen only. / Smart App Control, as on the download page.
 
 **Not-found page:** 404 · Page not found / This page isn't here. / The address may be mistyped, or the page has moved.
 Download Petalock only from this site or its GitHub releases. / Buttons: Go to the download page · Read the guide
@@ -365,6 +383,10 @@ repository; Security policy → `SECURITY.md` on GitHub. Task 6's `every_link_re
 ## Changes from the drawings
 
 The drawings carried draft words and a few gaps; this document changes them as follows.
+
+- **The file check is optional** (amendment 2026-11-28, option A): the opening's link, step 2's title and first line,
+  step 3's order and conditions and the guide's warnings follow
+  [the amendment](2026-11-28-optional-file-check-amendment.md), which wins over the drawings and the original word list.
 
 - **The picture on the guide and not-found pages:** Ariel approved the engraved picture on the download page; the guide
   header and the not-found page take the same picture, placed and weighted as described above, drawn in `final.mjs`

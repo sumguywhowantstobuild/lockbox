@@ -8,7 +8,7 @@ documented and honest about its limits.
 > **Status: early preview. Unsigned. Not independently audited. Don't store real passwords in it yet.**
 >
 > No independent security expert has audited Petalock's code or its encryption, and none is planned.
-> The installer has no code signature, so your browser and Windows will warn you before it runs.
+> The installer has no code signature, so your browser and Windows may warn you before it runs.
 > The first preview isn't out yet (see [Download](#download)).
 
 ![A vault with keys from a project's .env, logins and a note](docs/images/vault.png)
@@ -20,8 +20,8 @@ documented and honest about its limits.
 
 ## Download
 
-Get Petalock from its download page, **https://petalock.arielmaningas.com**, or from this repository's
-[releases](https://github.com/sumguywhowantstobuild/petalock/releases). Nowhere else is official. Until the first
+Get Petalock from its download page, **https://petalock.arielmaningas.com**, or from
+[Petalock's releases on GitHub](https://github.com/sumguywhowantstobuild/petalock/releases). Nowhere else is official. Until the first
 preview is published, the releases list is empty and the download page offers no file ("Coming soon").
 
 Each release's installer has a fixed address on GitHub, the one the download page links to:
@@ -30,9 +30,14 @@ Each release's installer has a fixed address on GitHub, the one the download pag
 https://github.com/sumguywhowantstobuild/petalock/releases/download/v<version>/Petalock_<version>_x64-setup.exe
 ```
 
-Before you open it, check its fingerprint (SHA-256). The download page gives a PowerShell line that prints `True` when
-the file is the one GitHub built; each release also lists the fingerprint in its `.sha256` file. If you have GitHub's
-command-line tool, you can also check GitHub's build record for the file. Both checks are in the
+You can check its fingerprint (SHA-256) before you open it: optional for a file from the download page or
+[Petalock's releases on GitHub](https://github.com/sumguywhowantstobuild/petalock/releases). A copy from anywhere else:
+download a fresh one from either, or check it before you open it, against the fingerprint on petalock.arielmaningas.com
+for the version it offers, or the `.sha256` file on that version's release page at
+github.com/sumguywhowantstobuild/petalock/releases for any other version, never a checksum that came with the copy. The
+download page gives a PowerShell line that prints `True` when the file matches the fingerprint published for that
+version; each release also lists the fingerprint in its `.sha256` file. If you have GitHub's command-line tool, you can
+also check GitHub's build record, which shows the workflow that built the file. Both checks are in the
 [guide](https://petalock.arielmaningas.com/guide/#check-the-file) and in [SECURITY.md](SECURITY.md#verifying-a-download).
 If a check fails, don't open the file: delete it.
 
@@ -47,9 +52,12 @@ If a check fails, don't open the file: delete it.
 **What the preview is, said plainly:**
 
 - **Unsigned.** Petalock has no code-signing certificate yet, so Windows can't tell who made the file. Your browser may say
-  the file isn't commonly downloaded, and Windows may show "Windows protected your PC". A fake copy would bring the same
-  warnings, which is why the fingerprint check matters. The [guide](https://petalock.arielmaningas.com/guide/#the-warnings)
-  says what to do at each one, and when to stop.
+  the file isn't commonly downloaded, and Windows may show "Windows protected your PC". A fake copy can show the same
+  warnings, so get it only from the download page or
+  [Petalock's releases on GitHub](https://github.com/sumguywhowantstobuild/petalock/releases). **Stop and delete the file
+  if your browser or a security product says it found malware or a virus, or if Windows asks for administrator permission
+  in any form (a password or a Yes/No prompt): setup never needs it.** The
+  [guide](https://petalock.arielmaningas.com/guide/#the-warnings) says what to do at each one, and when to stop.
 - **Not independently audited.** No outside security firm has checked the code. The code is public, so anyone can read it.
 - **No automatic updates.** Petalock doesn't update itself or tell you about new versions. Install the new version over
   the old one; your vaults, settings and "start with Windows" stay as they are.

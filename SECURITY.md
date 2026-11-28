@@ -72,9 +72,15 @@ Petalock keeps everything on your own PC, in one folder per vault. It is built s
 
 ### Verifying a download
 
-Get Petalock only from `petalock.arielmaningas.com` or this repository's releases on GitHub. Each release has one
+Get Petalock only from `petalock.arielmaningas.com` or
+[Petalock's releases on GitHub](https://github.com/sumguywhowantstobuild/petalock/releases). Each release has one
 installer, `Petalock_<version>_x64-setup.exe`, built by GitHub from a protected tag on `main` after every CI job passed
-on that commit ([RELEASING.md](RELEASING.md)). Check the file before you open it, in either or both of two ways.
+on that commit ([RELEASING.md](RELEASING.md)). You can check the file before you open it, in either or both of two
+ways. It is optional for a file from the download page or
+[Petalock's releases on GitHub](https://github.com/sumguywhowantstobuild/petalock/releases). For a copy from anywhere
+else, download a fresh one from either place, or check it before you open it, against the fingerprint on
+`petalock.arielmaningas.com` for the version it offers, or the `.sha256` file on that version's release page at
+`github.com/sumguywhowantstobuild/petalock/releases` for any other version, never a checksum that came with the copy.
 
 **The fingerprint (SHA-256).** The download page shows it, and each release lists it in the file
 `Petalock_<version>_x64-setup.exe.sha256`. The page's value is not typed by anyone: the page is built from the release's
@@ -86,7 +92,10 @@ The page gives a PowerShell line that prints `True` when the file matches:
 ```
 
 If it prints `False`, don't open the file: delete it. A matching fingerprint shows the file is the one published; on its
-own it can't show who published it, because the page and the release are both run by the same owner.
+own it can't show who published it, because the page and the release are both run by the same owner. For a file from
+the download page or Petalock's releases on GitHub, a match adds little: it catches a file whose bytes changed after the
+page was built while the page's fingerprint stayed right (a replaced or damaged download), and it can't catch a
+compromised build or a change to both the file and the fingerprint.
 
 **GitHub's build record (artifact attestation).** When the release workflow builds an installer, GitHub signs a record of
 it: which repository, which workflow file on which branch, and the file's digest. With GitHub's command-line tool:
@@ -95,8 +104,9 @@ it: which repository, which workflow file on which branch, and the file's digest
 gh attestation verify "$HOME\Downloads\Petalock_<version>_x64-setup.exe" --repo sumguywhowantstobuild/petalock --cert-identity "https://github.com/sumguywhowantstobuild/petalock/.github/workflows/release.yml@refs/heads/main" --source-ref refs/heads/main
 ```
 
-It should report the release workflow on `main`. If it reports anything else or fails, delete the file. The workflow also
-signs a second statement that binds the release's tag, the commit it was built from and the installer's digest together.
+It should report the release workflow on `main`. If it reports anything else or fails, delete the file. It shows which
+workflow built the file, not which version the file is, so it is a separate check: on its own it does not clear a file
+for the SmartScreen step in the next section. The workflow also signs a second statement that binds the release's tag, the commit it was built from and the installer's digest together.
 To read it, add `--predicate-type https://github.com/sumguywhowantstobuild/petalock/release-binding/v1 --format json` to
 the same line: the statement's `tag`, `sourceCommit` and `installer.sha256` should be the release's. Both bundles are also
 attached to each release (`.provenance.sigstore.json` and `.release-binding.sigstore.json`) for a check with `--bundle`.
@@ -106,18 +116,27 @@ written in that release's record ([docs/releases/](docs/releases/)).
 ### The unsigned preview and SmartScreen
 
 The installer has no code signature (Authenticode), and the project publishes no PGP signature. So Windows can't tell
-who made the file, and a new file has no download history. Expect two warnings, worded differently on some PCs:
+who made the file, and a new file has no download history. Expect up to two warnings, worded differently on some PCs.
+First, when to stop:
+
+**Stop and delete the file if your browser or a security product says it found malware or a virus, or if Windows asks
+for administrator permission in any form (a password or a Yes/No prompt): setup never needs it.**
+
+The two warnings:
 
 - **Your browser** may say the file isn't commonly downloaded. That is a reputation notice, not a finding. Keep the file
-  for that notice only, then check it as above.
-- **Microsoft Defender SmartScreen** may show "Windows protected your PC" when you open it. Only after the fingerprint
-  check printed `True`, choose More info, then Run anyway, for that screen only.
+  for that notice only.
+- **Microsoft Defender SmartScreen** may show "Windows protected your PC" when you open it, saying it prevented an
+  unrecognized app from starting. If any check you ran on this file failed, don't run it: delete it. Otherwise, if the
+  file came from the download page or
+  [Petalock's releases on GitHub](https://github.com/sumguywhowantstobuild/petalock/releases), or its fingerprint
+  printed `True` against the fingerprint published for its version, choose More info, then Run anyway, for that screen
+  only.
 
-A fake copy would bring the same two warnings, which is why the check matters. Stop and delete the file if your browser
-or a security product says it found malware or a virus, or if Windows asks for administrator permission in any form (a
-password or a Yes/No prompt): setup never needs it. With Smart App Control on, Windows may block Petalock with no Run
-anyway option; this preview can't run on that PC until Petalock is signed, and we don't suggest turning Smart App
-Control off for it. Code signing and automatic updates are planned for Phase 2 ([PRD](docs/PRD.md#phases)).
+A fake copy can show the same two warnings, so get Petalock only from those two places. With Smart App Control on,
+Windows may block Petalock with no Run anyway option; this preview can't run on that PC until Petalock is signed, and we
+don't suggest turning Smart App Control off for it. Code signing and automatic updates are planned for Phase 2
+([PRD](docs/PRD.md#phases)).
 
 ### What install and uninstall touch
 
