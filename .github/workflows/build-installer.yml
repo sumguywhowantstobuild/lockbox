@@ -133,7 +133,14 @@ jobs:
           $plugins = Join-Path $tools 'NSIS\Plugins\x86-unicode\additional'
           New-Item -ItemType Directory -Force $plugins | Out-Null
           Get-Verified $env:UTILS_URL $env:UTILS_SHA256 (Join-Path $plugins 'nsis_tauri_utils.dll')
-          Get-Verified $env:WEBVIEW2_URL $env:WEBVIEW2_SHA256 (Join-Path $tools 'MicrosoftEdgeWebview2Setup.exe')
+          # TRIAL ONLY: Microsoft's signature instead of the stale pin.
+          $wv = Join-Path $tools 'MicrosoftEdgeWebview2Setup.exe'
+          Invoke-WebRequest $env:WEBVIEW2_URL -OutFile $wv
+          $sig = Get-AuthenticodeSignature -LiteralPath $wv
+          if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch '^CN=Microsoft Corporation,') { throw "WebView2 bootstrapper signature: $($sig.Status) $($sig.SignerCertificate.Subject)" }
+          $wvHash = (Get-FileHash $wv -Algorithm SHA256).Hash
+          "WebView2 bootstrapper SHA-256 $wvHash signed by $($sig.SignerCertificate.Subject)"
+          "WEBVIEW2_SHA256=$wvHash" >> $env:GITHUB_ENV
           Get-ChildItem $tools | Select-Object Name | Format-Table -HideTableHeaders
       # The open-source licence texts the installer ships. The tool is the pinned release binary, its archive checked against
       # the SHA-256 above before it is opened.
@@ -272,7 +279,7 @@ jobs:
         env:
           SMOKE_LOG: ${{ runner.temp }}\installer-smoke\upgrade.log
         run: |
-          "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%GITHUB_WORKSPACE%\scripts\installer-smoke.ps1" -Installer "%EARLIER%" -Upgrade "%LATER%" -Only upgrade_keeps_vaults_list_settings_and_state,candidate_versions_upgrade_in_order,downgrade_behaviour_is_the_specified_one,uninstall_after_upgrade_is_clean,interactive_upgrade_keeps_start_with_windows,upgrade_page_defaults_to_install_over -LogPath "%SMOKE_LOG%"
+          "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%GITHUB_WORKSPACE%\scripts\installer-smoke.ps1" -Installer "%EARLIER%" -Upgrade "%LATER%" -Only upgrade_keeps_vaults_list_settings_and_state,candidate_versions_upgrade_in_order,downgrade_behaviour_is_the_specified_one,uninstall_after_upgrade_is_clean,interactive_upgrade_keeps_start_with_windows,upgrade_page_defaults_to_install_over,remove_first_with_an_added_file_leaves_the_install_intact,keyboard_tab_order_and_default_buttons_on_the_real_dialog -LogPath "%SMOKE_LOG%"
       # A run that did not pass leaves the smoke log (and a picture of the screen where a dialog was driven) to read why:
       # made-up test state only.
       - name: Keep the smoke log

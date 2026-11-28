@@ -1165,6 +1165,7 @@ fn security_config_is_pinned() {
             "active": true,
             "targets": ["nsis"],
             "publisher": "Petalock",
+            "licenseFile": "../../LICENSE",
             "icon": ["icons/icon.ico", "icons/icon.png"],
             "useLocalToolsDir": true,
             "windows": {
@@ -1174,6 +1175,7 @@ fn security_config_is_pinned() {
                     "languages": ["English"],
                     "installerIcon": "icons/icon.ico",
                     "uninstallerIcon": "icons/icon.ico",
+                    "headerImage": "windows/band.bmp",
                     "template": "windows/installer.nsi",
                     "installerHooks": "windows/hooks.nsh"
                 }
