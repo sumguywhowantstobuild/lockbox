@@ -59,6 +59,11 @@ Var PetalockDetail      ; the failure's details (shown, and copied by Copy detai
 Var PetalockLocked
 Var PetalockRolledBack  ; 1 when a fresh attempt's files were taken out again after Windows refused its entry (installer.nsi)
 Var PetalockOutcome     ; a finished step's words, kept apart from $PetalockA, which the repaint reuses for window handles
+Var PetalockTW          ; a row's words' width, and its state word's column (SW) and left edge (TX), in design pixels (PETALOCK_PAINT)
+Var PetalockSW
+Var PetalockTX
+Var PetalockRY2         ; row 2's top and WebView2's second line's top in the layout being painted (PetalockPaintRows)
+Var PetalockRYD
 
 ; The three lines: text, state (next | now | done | failed | ns | ""), the state's word, and the labels' handles
 Var PetalockT1
@@ -110,7 +115,6 @@ Var PetalockHBmp
 !define PL_SUB "A local password manager and encrypted file vault."
 !define PL_PLAN_WV "Check for Microsoft WebView2"
 !define PL_PLAN_WV_D "If it’s missing, Setup downloads it from Microsoft and needs internet."
-!define PL_PLAN_WV_L2 "Check for Microsoft WebView2 (downloaded if missing; needs internet)"
 !define PL_KEEP "Setup leaves your vault files in place."
 !define PL_NOTHING "Nothing was changed."
 
@@ -118,6 +122,23 @@ Var PetalockHBmp
 !define PL_ROW1 142
 !define PL_ROW2 180
 !define PL_ROW3 202
+; WebView2's second line sits under row 1 (at 160) in a normal run. In remove-first row 1 is the removal and WebView2 is row 2, so the
+; rows are 20 apart with nothing empty between them: the removal at 142, WebView2 at 162, its second line at 182, the install at 202.
+!define PL_DETAIL 160
+!define PL_L2_ROW2 162
+!define PL_L2_DETAIL 182
+; A row's words run from x 44 to 476 (432 wide) and the state word sits at the right in a column of its own: the words get what the
+; column and the gap leave, so a long row (a bold one, or one beside "Not started") is never cut with dots, and the words and the state
+; never share a rectangle. Each column is its word measured at every scale (scripts/installer-render.test.mjs) and a few pixels over.
+; Row 3 has two lines (its box is 34 high, down to where the slot below it starts, 236), because the words of its Failed state are the
+; longest the window says.
+!define PL_GAP 10
+!define PL_SW_DONE 34
+!define PL_SW_NOW 38
+!define PL_SW_NEXT 34
+!define PL_SW_FAILED 44
+!define PL_SW_REMOVED 58
+!define PL_SW_NOTSTARTED 66
 ; The status line's control id (set after it is made), so the smoke check on the runner can read what it says
 !define PL_ID_STATUS 1950
 
@@ -125,6 +146,24 @@ Var PetalockHBmp
 !macro PETALOCK_PX OUT IN
   IntOp ${OUT} ${IN} * $PetalockDpi
   IntOp ${OUT} ${OUT} / 96
+!macroend
+
+; The same, rounded up (a box's height: two lines of text fit the box at every scale, where rounding down cut a pixel at 175 %)
+!macro PETALOCK_PXU OUT IN
+  IntOp ${OUT} ${IN} * $PetalockDpi
+  IntOp ${OUT} ${OUT} + 95
+  IntOp ${OUT} ${OUT} / 96
+!macroend
+
+; A font, made once: SIZE is the em height in pixels at 100 % and WEIGHT 400 or 600. The size is scaled here, by PETALOCK_PX, and the
+; font is made from that pixel height (negative: an em, not a cell) by CreateFontW itself. NSIS's own CreateFont is not used: it takes
+; points and scales them by the screen's resolution again (exec.c, EW_CREATEFONT: lfHeight = -MulDiv(size, LOGPIXELSY, 72)), so handing
+; it a size already scaled made the text grow by the scale squared above 100 % (Task 9e's pictures at 125 to 175 %).
+!macro PETALOCK_FONT OUT SIZE WEIGHT
+  !insertmacro PETALOCK_PX $R6 ${SIZE}
+  IntOp $R6 0 - $R6
+  System::Call 'gdi32::CreateFontW(i r16, i 0, i 0, i 0, i ${WEIGHT}, i 0, i 0, i 0, i 1, i 0, i 0, i 0, i 0, w "Segoe UI") p .s'
+  Pop ${OUT}
 !macroend
 
 ; A plain label on the parent window. The handle is left in OUT. FLAGS: 0x54000080 left, 0x54000082 right (a child that
@@ -146,6 +185,15 @@ Var PetalockHBmp
   !insertmacro PETALOCK_PX $R7 ${Y}
   !insertmacro PETALOCK_PX $R8 ${W}
   !insertmacro PETALOCK_PX $R9 ${H}
+  System::Call 'user32::SetWindowPos(p ${HWND}, p 0, i r16, i r17, i r18, i r19, i 0x14)'
+!macroend
+
+; The same, with the height rounded up (PETALOCK_PXU): a row's words' box.
+!macro PETALOCK_MOVEU HWND X Y W H
+  !insertmacro PETALOCK_PX $R6 ${X}
+  !insertmacro PETALOCK_PX $R7 ${Y}
+  !insertmacro PETALOCK_PX $R8 ${W}
+  !insertmacro PETALOCK_PXU $R9 ${H}
   System::Call 'user32::SetWindowPos(p ${HWND}, p 0, i r16, i r17, i r18, i r19, i 0x14)'
 !macroend
 
@@ -419,8 +467,9 @@ FunctionEnd
 ; The three lines: one table (which row a step is on, in each layout) and the words
 ; ---------------------------------------------------------------------------------------------------------------------
 Function PetalockRowOf
-  ; In: $PetalockStep. Out: $0, the row (1 to 3) that step is on. Remove-first (layout 2) runs the old uninstaller, then
-  ; WebView2, then the files and the entries, which share the last row.
+  ; In: $PetalockStep. Out: $0, the row (1 to 3) that step is on, in the order the steps run (D-amendments, "Settled in the build": state
+  ; 14's rows follow it, so Now and Next never run backwards). Remove-first (layout 2) runs the old uninstaller, then WebView2, then the
+  ; files and the entries, which share the last row. WebView2's second line sits under its own row (PetalockPaintRows).
   StrCpy $0 3
   ${If} $PetalockLayout = 2
     ${If} $PetalockStep == "remove_old"
@@ -459,14 +508,16 @@ Function PetalockPlanRows
     StrCpy $PetalockLayout 1
   ${EndIf}
   Call PetalockOldName
+  ; WebView2's second line is in every layout. Remove-first puts the removal on row 1, WebView2 (with its second line under it, in the
+  ; place the removal left empty) on row 2 and the install on row 3, the order they run in.
+  StrCpy $PetalockD1 "${PL_PLAN_WV_D}"
   ${If} $PetalockLayout = 2
     StrCpy $PetalockT1 "Remove $PetalockA first, with its temporary copies of opened files"
-    StrCpy $PetalockT2 "${PL_PLAN_WV_L2}"
+    StrCpy $PetalockT2 "${PL_PLAN_WV}"
     StrCpy $PetalockT3 "Install ${VERSION} in the same folder; keep its Start menu shortcut"
     Return
   ${EndIf}
   StrCpy $PetalockT1 "${PL_PLAN_WV}"
-  StrCpy $PetalockD1 "${PL_PLAN_WV_D}"
   ${If} $PetalockCase == "new"
     StrCpy $PetalockT2 "Install Petalock for this Windows account"
     StrCpy $PetalockT3 "Add it to the Start menu and to Installed apps"
@@ -572,42 +623,54 @@ Function PetalockStepText
   Pop $0
 FunctionEnd
 
-; Paints one row (N = 1, 2, 3) from $PetalockT<N>, $PetalockS<N>: the words, the state's word, the fonts and colours.
-!macro PETALOCK_PAINT N Y
+; Paints one row (N = 1, 2, 3; its top Y and its box's height H in design pixels) from $PetalockT<N>, $PetalockS<N>: the words, the
+; state's word, the fonts and colours.
+!macro PETALOCK_PAINT N Y H
   ${If} $PetalockHT${N} != ""
     StrCpy $PetalockW${N} ""
     StrCpy $PetalockB "ink"
+    StrCpy $PetalockSW 0
     ${If} $PetalockS${N} == "done"
       StrCpy $PetalockW${N} "Done"
       StrCpy $PetalockB "green"
+      StrCpy $PetalockSW ${PL_SW_DONE}
     ${ElseIf} $PetalockS${N} == "now"
       StrCpy $PetalockW${N} "Now"
+      StrCpy $PetalockSW ${PL_SW_NOW}
     ${ElseIf} $PetalockS${N} == "next"
       StrCpy $PetalockW${N} "Next"
       StrCpy $PetalockB "dim"
+      StrCpy $PetalockSW ${PL_SW_NEXT}
     ${ElseIf} $PetalockS${N} == "failed"
       StrCpy $PetalockW${N} "Failed"
       StrCpy $PetalockB "red"
+      StrCpy $PetalockSW ${PL_SW_FAILED}
     ${ElseIf} $PetalockS${N} == "undone"
       StrCpy $PetalockW${N} "Removed"
+      StrCpy $PetalockSW ${PL_SW_REMOVED}
     ${ElseIf} $PetalockS${N} == "ns"
       StrCpy $PetalockW${N} "Not started"
       StrCpy $PetalockB "dim"
+      StrCpy $PetalockSW ${PL_SW_NOTSTARTED}
     ${EndIf}
     SendMessage $PetalockHT${N} ${WM_SETTEXT} 0 "STR:$PetalockT${N}"
     SendMessage $PetalockHS${N} ${WM_SETTEXT} 0 "STR:$PetalockW${N}"
-    ; the state's word sits at the right; with none (the plan), the words may run the whole width
-    ; (review fix round, finding 17: the words and the state never share a rectangle: 330 wide beside the state's column)
+    ; The state's word sits at the right in a column of its own width; the row's words get the rest of the 432 less the gap, so the
+    ; words and the state never share a rectangle and the words are not cut (with none, the plan, they run the whole width).
     Push $R6
     Push $R7
     Push $R8
     Push $R9
     ${If} $PetalockW${N} == ""
       ShowWindow $PetalockHS${N} ${SW_HIDE}
-      !insertmacro PETALOCK_MOVE $PetalockHT${N} 44 ${Y} 432 20
+      !insertmacro PETALOCK_MOVEU $PetalockHT${N} 44 ${Y} 432 ${H}
     ${Else}
       ShowWindow $PetalockHS${N} ${SW_SHOW}
-      !insertmacro PETALOCK_MOVE $PetalockHT${N} 44 ${Y} 330 20
+      IntOp $PetalockTW 432 - $PetalockSW
+      IntOp $PetalockTW $PetalockTW - ${PL_GAP}
+      IntOp $PetalockTX 476 - $PetalockSW
+      !insertmacro PETALOCK_MOVEU $PetalockHT${N} 44 ${Y} $PetalockTW ${H}
+      !insertmacro PETALOCK_MOVE $PetalockHS${N} $PetalockTX ${Y} $PetalockSW 20
     ${EndIf}
     Pop $R9
     Pop $R8
@@ -636,9 +699,32 @@ FunctionEnd
 !macroend
 
 Function PetalockPaintRows
-  !insertmacro PETALOCK_PAINT 1 ${PL_ROW1}
-  !insertmacro PETALOCK_PAINT 2 ${PL_ROW2}
-  !insertmacro PETALOCK_PAINT 3 ${PL_ROW3}
+  ; Row 2 and WebView2's second line move with the layout: a normal run has WebView2 on row 1 with its line under it and row 2 at 180;
+  ; remove-first has the removal on row 1 and WebView2 on row 2, rows 20 apart, its line under it and the install at 202.
+  ${If} $PetalockLayout = 2
+    StrCpy $PetalockRY2 ${PL_L2_ROW2}
+    StrCpy $PetalockRYD ${PL_L2_DETAIL}
+  ${Else}
+    StrCpy $PetalockRY2 ${PL_ROW2}
+    StrCpy $PetalockRYD ${PL_DETAIL}
+  ${EndIf}
+  Push $R6
+  Push $R7
+  Push $R8
+  Push $R9
+  ${If} $PetalockHN2 != ""
+    !insertmacro PETALOCK_MOVE $PetalockHN2 24 $PetalockRY2 14 20
+  ${EndIf}
+  ${If} $PetalockHD1 != ""
+    !insertmacro PETALOCK_MOVE $PetalockHD1 44 $PetalockRYD 446 20
+  ${EndIf}
+  Pop $R9
+  Pop $R8
+  Pop $R7
+  Pop $R6
+  !insertmacro PETALOCK_PAINT 1 ${PL_ROW1} 20
+  !insertmacro PETALOCK_PAINT 2 $PetalockRY2 20
+  !insertmacro PETALOCK_PAINT 3 ${PL_ROW3} 34
   ${If} $PetalockHD1 != ""
     SendMessage $PetalockHD1 ${WM_SETTEXT} 0 "STR:$PetalockD1"
   ${EndIf}
@@ -649,13 +735,14 @@ Function PetalockBuildRows
   !insertmacro PETALOCK_LABEL $PetalockHN1 $PetalockInner 24 ${PL_ROW1} 14 20 0x54000080 $PetalockFBold "1"
   !insertmacro PETALOCK_LABEL $PetalockHN2 $PetalockInner 24 ${PL_ROW2} 14 20 0x54000080 $PetalockFBold "2"
   !insertmacro PETALOCK_LABEL $PetalockHN3 $PetalockInner 24 ${PL_ROW3} 14 20 0x54000080 $PetalockFBold "3"
-  !insertmacro PETALOCK_LABEL $PetalockHT1 $PetalockInner 44 ${PL_ROW1} 432 20 0x54004080 $PetalockFBody ""
-  !insertmacro PETALOCK_LABEL $PetalockHT2 $PetalockInner 44 ${PL_ROW2} 432 20 0x54004080 $PetalockFBody ""
-  !insertmacro PETALOCK_LABEL $PetalockHT3 $PetalockInner 44 ${PL_ROW3} 432 20 0x54004080 $PetalockFBody ""
+  ; Words that do not fit wrap (row 3 has two lines) and are never cut with dots (the old 0x4000, SS_ENDELLIPSIS, ended a long row in "...").
+  !insertmacro PETALOCK_LABEL $PetalockHT1 $PetalockInner 44 ${PL_ROW1} 432 20 0x54000080 $PetalockFBody ""
+  !insertmacro PETALOCK_LABEL $PetalockHT2 $PetalockInner 44 ${PL_ROW2} 432 20 0x54000080 $PetalockFBody ""
+  !insertmacro PETALOCK_LABEL $PetalockHT3 $PetalockInner 44 ${PL_ROW3} 432 34 0x54000080 $PetalockFBody ""
   !insertmacro PETALOCK_LABEL $PetalockHS1 $PetalockInner 380 ${PL_ROW1} 96 20 0x54000082 $PetalockFBody ""
   !insertmacro PETALOCK_LABEL $PetalockHS2 $PetalockInner 380 ${PL_ROW2} 96 20 0x54000082 $PetalockFBody ""
   !insertmacro PETALOCK_LABEL $PetalockHS3 $PetalockInner 380 ${PL_ROW3} 96 20 0x54000082 $PetalockFBody ""
-  !insertmacro PETALOCK_LABEL $PetalockHD1 $PetalockInner 44 160 446 20 0x54004080 $PetalockFBody ""
+  !insertmacro PETALOCK_LABEL $PetalockHD1 $PetalockInner 44 160 446 20 0x54000080 $PetalockFBody ""
   StrCpy $PetalockA $PetalockHD1
   StrCpy $PetalockB "dim"
   StrCpy $PetalockR "white"
@@ -670,7 +757,6 @@ Function PetalockStepBegin
   Call PetalockStepText
   ${If} $0 = 1
     StrCpy $PetalockT1 $PetalockA
-    StrCpy $PetalockD1 $PetalockR
     StrCpy $PetalockS1 "now"
   ${ElseIf} $0 = 2
     StrCpy $PetalockT2 $PetalockA
@@ -678,6 +764,10 @@ Function PetalockStepBegin
   ${Else}
     StrCpy $PetalockT3 $PetalockA
     StrCpy $PetalockS3 "now"
+  ${EndIf}
+  ; only WebView2 has a second line (under its own row, whichever row that is)
+  ${If} $PetalockStep == "webview2"
+    StrCpy $PetalockD1 $PetalockR
   ${EndIf}
   Call PetalockPaintRows
   ; Copying the files shows a percentage: the bar stops moving without one (the checks, the old uninstaller and WebView2 had no).
@@ -736,7 +826,6 @@ Function PetalockStepDone
   Call PetalockStepText
   ${If} $0 = 1
     StrCpy $PetalockT1 $PetalockA
-    StrCpy $PetalockD1 $PetalockR
     StrCpy $PetalockS1 "done"
   ${ElseIf} $0 = 2
     StrCpy $PetalockT2 $PetalockA
@@ -748,6 +837,10 @@ Function PetalockStepDone
     ${Else}
       StrCpy $PetalockS3 "done"
     ${EndIf}
+  ${EndIf}
+  ; only WebView2 has a second line (under its own row, whichever row that is)
+  ${If} $PetalockStep == "webview2"
+    StrCpy $PetalockD1 $PetalockR
   ${EndIf}
   ; The words are kept in a variable of their own: the repaint puts window handles in $PetalockA (second fix round, re-check
   ; finding 6: the status line and the announcement showed a number).
@@ -792,78 +885,71 @@ FunctionEnd
   Call PetalockFailed
 !macroend
 
+Function PetalockRowAs
+  ; In: $PetalockStep and $PetalockB (done or failed). Puts that step's words, in that state, on the row the table gives it, and
+  ; WebView2's second line (only it has one) with them.
+  Push $0
+  Call PetalockRowOf
+  Call PetalockStepText
+  ${If} $0 = 1
+    StrCpy $PetalockT1 $PetalockA
+    StrCpy $PetalockS1 $PetalockB
+  ${ElseIf} $0 = 2
+    StrCpy $PetalockT2 $PetalockA
+    StrCpy $PetalockS2 $PetalockB
+  ${Else}
+    StrCpy $PetalockT3 $PetalockA
+    StrCpy $PetalockS3 $PetalockB
+  ${EndIf}
+  ${If} $PetalockStep == "webview2"
+    StrCpy $PetalockD1 $PetalockR
+  ${EndIf}
+  Pop $0
+FunctionEnd
+
 Function PetalockReceiptRows
-  ; The receipt, from what happened: every row Done (a shortcut that could not be made is Failed beside a good entry).
-  StrCpy $PetalockD1 ""
+  ; The receipt, from what happened: every row Done (a shortcut that could not be made is Failed beside a good entry). Each step is on
+  ; its row by the table (PetalockRowOf), WebView2's result on its second line, under its own row, in both layouts.
+  StrCpy $PetalockB "done"
+  StrCpy $PetalockStep "webview2"
+  Call PetalockRowAs
   ${If} $PetalockLayout = 2
     StrCpy $PetalockStep "remove_old"
-    StrCpy $PetalockB "done"
-    Call PetalockStepText
-    StrCpy $PetalockT1 $PetalockA
-    StrCpy $PetalockS1 "done"
-    StrCpy $PetalockStep "webview2"
-    StrCpy $PetalockB "done"
-    Call PetalockStepText
-    StrCpy $PetalockT2 "$PetalockA: $PetalockR"
-    StrCpy $PetalockS2 "done"
   ${Else}
-    StrCpy $PetalockStep "webview2"
-    StrCpy $PetalockB "done"
-    Call PetalockStepText
-    StrCpy $PetalockT1 $PetalockA
-    StrCpy $PetalockD1 $PetalockR
-    StrCpy $PetalockS1 "done"
     StrCpy $PetalockStep "files"
-    StrCpy $PetalockB "done"
-    Call PetalockStepText
-    StrCpy $PetalockT2 $PetalockA
-    StrCpy $PetalockS2 "done"
   ${EndIf}
+  Call PetalockRowAs
   StrCpy $PetalockStep "entries"
-  StrCpy $PetalockB "done"
-  Call PetalockStepText
-  StrCpy $PetalockT3 $PetalockA
+  Call PetalockRowAs
   ${If} $PetalockSc == "failed"
     StrCpy $PetalockS3 "failed"
-  ${Else}
-    StrCpy $PetalockS3 "done"
   ${EndIf}
 FunctionEnd
 
 Function PetalockFailRows
-  ; Where Setup stopped: the failed step Failed, the ones before it Done (in the words of what happened), the ones after it
-  ; Not started. Out: the rows' words and states (painted by the caller).
+  ; Where Setup stopped: the failed step Failed, the ones that ran before it Done (in the words of what happened), the ones after it
+  ; Not started. The steps run in this order: the old uninstaller (remove-first only), WebView2, the files, the entries; each is put on
+  ; its own row by the table, so a step before the failed one is Done wherever its row is. Out: the rows' words and states (painted by
+  ; the caller).
   Push $0
-  Push $1
   Call PetalockPlanRows
   StrCpy $PetalockS1 "ns"
   StrCpy $PetalockS2 "ns"
   StrCpy $PetalockS3 "ns"
-  StrCpy $PetalockStep $PetalockFailStep
-  Call PetalockRowOf
-  StrCpy $1 $0
-  ${If} $1 >= 2
-    ${If} $PetalockLayout = 2
-      StrCpy $PetalockStep "remove_old"
-    ${Else}
-      StrCpy $PetalockStep "webview2"
-    ${EndIf}
-    StrCpy $PetalockB "done"
-    Call PetalockStepText
-    StrCpy $PetalockT1 $PetalockA
-    StrCpy $PetalockD1 $PetalockR
-    StrCpy $PetalockS1 "done"
+  StrCpy $PetalockB "done"
+  ${If} $PetalockLayout = 2
+  ${AndIf} $PetalockFailStep != "remove_old"
+    StrCpy $PetalockStep "remove_old"
+    Call PetalockRowAs
   ${EndIf}
-  ${If} $1 >= 3
-    ${If} $PetalockLayout = 2
-      StrCpy $PetalockStep "webview2"
-    ${Else}
-      StrCpy $PetalockStep "files"
-    ${EndIf}
-    StrCpy $PetalockB "done"
-    Call PetalockStepText
-    StrCpy $PetalockT2 $PetalockA
-    StrCpy $PetalockS2 "done"
+  ${If} $PetalockFailStep == "files"
+  ${OrIf} $PetalockFailStep == "entries"
+    StrCpy $PetalockStep "webview2"
+    Call PetalockRowAs
+  ${EndIf}
+  ${If} $PetalockFailStep == "entries"
+    StrCpy $PetalockStep "files"
+    Call PetalockRowAs
     ; the files were copied and then taken out again (a fresh attempt whose entry Windows refused): the row does not say they are there
     ${If} $PetalockRolledBack = 1
     ${AndIf} $PetalockLayout = 1
@@ -873,19 +959,7 @@ Function PetalockFailRows
   ${EndIf}
   StrCpy $PetalockStep $PetalockFailStep
   StrCpy $PetalockB "failed"
-  Call PetalockStepText
-  ${If} $1 = 1
-    StrCpy $PetalockT1 $PetalockA
-    StrCpy $PetalockD1 $PetalockR
-    StrCpy $PetalockS1 "failed"
-  ${ElseIf} $1 = 2
-    StrCpy $PetalockT2 $PetalockA
-    StrCpy $PetalockS2 "failed"
-  ${Else}
-    StrCpy $PetalockT3 $PetalockA
-    StrCpy $PetalockS3 "failed"
-  ${EndIf}
-  Pop $1
+  Call PetalockRowAs
   Pop $0
 FunctionEnd
 
@@ -957,23 +1031,16 @@ Function PetalockProbeHC
 FunctionEnd
 
 Function PetalockMakeFonts
-  Push $0
-  !insertmacro PETALOCK_PX $0 12
-  IntOp $0 0 - $0
-  CreateFont $PetalockFBody "Segoe UI" $0 400
-  CreateFont $PetalockFBold "Segoe UI" $0 600
-  !insertmacro PETALOCK_PX $0 15
-  IntOp $0 0 - $0
-  CreateFont $PetalockFSent "Segoe UI" $0 400
-  CreateFont $PetalockFSentB "Segoe UI" $0 600
-  !insertmacro PETALOCK_PX $0 20
-  IntOp $0 0 - $0
-  CreateFont $PetalockFHead "Segoe UI" $0 600
+  ; Every font is made once, from its pixel height at 100 % (PETALOCK_FONT scales it by the window's scale and makes it).
+  Push $R6
+  !insertmacro PETALOCK_FONT $PetalockFBody 12 400
+  !insertmacro PETALOCK_FONT $PetalockFBold 12 600
+  !insertmacro PETALOCK_FONT $PetalockFSent 15 400
+  !insertmacro PETALOCK_FONT $PetalockFSentB 15 600
+  !insertmacro PETALOCK_FONT $PetalockFHead 20 600
   ; the name beside the mark: Segoe UI Semibold a little under the design's 21 px Geist (Segoe UI's letters are wider)
-  !insertmacro PETALOCK_PX $0 19
-  IntOp $0 0 - $0
-  CreateFont $PetalockFName "Segoe UI" $0 600
-  Pop $0
+  !insertmacro PETALOCK_FONT $PetalockFName 19 600
+  Pop $R6
 FunctionEnd
 
 Function PetalockSizeWindow
@@ -1334,16 +1401,18 @@ Function PetalockRender
     ShowWindow $PetalockHSlot1 ${SW_SHOW}
     ShowWindow $PetalockHSlot2 ${SW_SHOW}
   ${ElseIf} $PetalockProblem == "running"
-    ; The words run to three lines and, with a word a line cannot break, four (a real machine measured 45 px of 48): the first words
-    ; get four (236 to 300) and the second line, which has no room left above the band, is not shown (nothing runs: the sentence
+    ; The bold words run to four lines (Windows measured 60 px at 100 %, 80 at 125 %, 100 at 150 %, 120 at 175 % and 128 at 200 %,
+    ; a line being 15, 20, 25, 30 and 32 px): the first words get 70 design pixels (236 to 306, where the band starts), which holds
+    ; four lines at every scale, and the second line, which has no room left above the band, is not shown (nothing runs: the sentence
     ; above says Petalock must be closed first).
-    !insertmacro PETALOCK_MOVE $PetalockHSlot1 24 236 452 64
+    !insertmacro PETALOCK_MOVE $PetalockHSlot1 24 236 452 70
     SendMessage $PetalockHSlot1 ${WM_SETTEXT} 0 "STR:Petalock is open. Quit it from its icon near the clock (right-click it, then Quit), then choose Retry. Setup never closes it for you. From the keyboard: press Windows+B, move to Petalock’s icon, press the Menu key, then choose Quit."
     ShowWindow $PetalockHSlot1 ${SW_SHOW}
   ${ElseIf} $PetalockProblem == "added"
-    ; The refusal has its own room: the explanation is two lines (236 to 268) and the box follows below it, so neither "Other choices"
-    ; nor the second line is shown (the explanation already says nothing was changed, and unticking the box is the way out).
-    !insertmacro PETALOCK_MOVE $PetalockHSlot1 24 236 452 32
+    ; The refusal has its own room: the explanation is two lines (236 to 272: two bold lines are 30, 40, 50, 60 and 64 px at the five
+    ; scales, and 36 design pixels hold them) and the box follows below it, so neither "Other choices" nor the second line is shown (the
+    ; explanation already says nothing was changed, and unticking the box is the way out).
+    !insertmacro PETALOCK_MOVE $PetalockHSlot1 24 236 452 36
     !insertmacro PETALOCK_MOVE $PetalockHCheck 24 272 452 20
     SendMessage $PetalockHSlot1 ${WM_SETTEXT} 0 "STR:Petalock’s folder holds files Setup didn’t install. Untick the box below to update in place instead; nothing was changed."
     SendMessage $PetalockHCheck ${WM_SETTEXT} 0 "STR:Remove $PetalockName before installing ${VERSION}"
@@ -1352,7 +1421,8 @@ Function PetalockRender
     ShowWindow $PetalockHCheck ${SW_SHOW}
   ${ElseIf} $PetalockProblem != ""
   ${AndIf} $PetalockCase != "new"
-    !insertmacro PETALOCK_MOVE $PetalockHSlot1 24 236 452 32
+    ; two bold lines (60 px at 175 %): 38 design pixels, down to the folder field at 275
+    !insertmacro PETALOCK_MOVE $PetalockHSlot1 24 236 452 38
     SendMessage $PetalockHSlot1 ${WM_SETTEXT} 0 "STR:$PetalockName is installed here. Make sure Setup has write access to this folder, then choose Retry. ${PL_NOTHING}"
     SendMessage $PetalockHField ${WM_SETTEXT} 0 "STR:$INSTDIR"
     ShowWindow $PetalockHSlot1 ${SW_SHOW}
@@ -1416,7 +1486,9 @@ Function PetalockMainShow
   !insertmacro PETALOCK_INK $PetalockHSlot1
   !insertmacro PETALOCK_LABEL $PetalockHSlot2 $PetalockInner 24 288 452 18 0x54000080 $PetalockFBody ""
   !insertmacro PETALOCK_DIM $PetalockHSlot2
-  !insertmacro PETALOCK_LABEL $PetalockHFLab $PetalockInner 24 258 452 16 0x54000080 $PetalockFBody "Install folder"
+  ; 257 to 275, where the folder field starts: a line of this font is 15, 20, 25, 30 and 32 px at the five scales and 18 design pixels hold
+  ; it at all of them (16 cut a pixel at 150 and 175 %)
+  !insertmacro PETALOCK_LABEL $PetalockHFLab $PetalockInner 24 257 452 18 0x54000080 $PetalockFBody "Install folder"
   !insertmacro PETALOCK_DIM $PetalockHFLab
   ; The controls a person can reach, created in tab order: Options, the folder field, Browse, Other choices (or Uninstall
   ; instead), its box, then Licence; the wizard's own Install and Cancel come after them.
@@ -1460,16 +1532,18 @@ Function PetalockMainShow
   SendMessage $PetalockHCheck ${WM_SETFONT} $PetalockFBody 1
   !insertmacro PETALOCK_INK $PetalockHCheck
   ${NSD_OnClick} $PetalockHCheck PetalockOnCheck
-  ; the Licence link and the build's version sit on the band, in front of its label
+  ; The Licence link and the build's version sit on the band, in front of its label, each in a rectangle of its own: the link from x 24
+  ; (80 wide, its words are 72 at 100 %), the version from x 112 to 310, short of the Install button, which starts at 318 (its words
+  ; are 176 at 100 % with a seven-character version; scripts/installer-render.test.mjs measures both at every scale).
   !insertmacro PETALOCK_PX $R6 24
   !insertmacro PETALOCK_PX $R7 324
-  !insertmacro PETALOCK_PX $R8 100
+  !insertmacro PETALOCK_PX $R8 80
   !insertmacro PETALOCK_PX $R9 20
   ${NSD_CreateLink} $R6 $R7 $R8 $R9 "Licence (MIT)"
   Pop $PetalockHLicence
   SendMessage $PetalockHLicence ${WM_SETFONT} $PetalockFBody 1
   ${NSD_OnClick} $PetalockHLicence PetalockOnLicence
-  !insertmacro PETALOCK_LABEL $PetalockHVer $PetalockInner 112 324 330 20 0x54000080 $PetalockFBody "Version ${VERSION} · Public preview"
+  !insertmacro PETALOCK_LABEL $PetalockHVer $PetalockInner 112 324 198 20 0x54000080 $PetalockFBody "Version ${VERSION} · Public preview"
   StrCpy $PetalockA $PetalockHVer
   StrCpy $PetalockB "dim"
   StrCpy $PetalockR "band"
@@ -1634,9 +1708,24 @@ FunctionEnd
 ; ---------------------------------------------------------------------------------------------------------------------
 ; The progress page (the stock page, restyled): the three lines become Done / Now / Next
 ; ---------------------------------------------------------------------------------------------------------------------
+Function PetalockFillClient
+  ; In: $PetalockInner, the page's own dialog. A stock page is only placed by NSIS, never sized (Ui.c, where it makes a page: SetWindowPos
+  ; with SWP_NOSIZE), so it keeps its template's size in dialog units; the pages made with nsDialogs::Create 1018 are sized to the
+  ; placeholder, which PetalockSizeWindow made the whole client area. This gives a stock page the same area (500 x 358 at 100 %), at the
+  ; origin, so the band, the rows, the bar and the status line are laid out in the same rectangle as on the other pages.
+  Push $R5
+  Push $R6
+  !insertmacro PETALOCK_PX $R5 500
+  !insertmacro PETALOCK_PX $R6 358
+  System::Call 'user32::SetWindowPos(p $PetalockInner, p 0, i 0, i 0, i r15, i r16, i 0x14)'
+  Pop $R6
+  Pop $R5
+FunctionEnd
+
 Function PetalockProgressShow
   Call PetalockFrame
   FindWindow $PetalockInner "#32770" "" $HWNDPARENT
+  Call PetalockFillClient
   ; The stock details list, the status line and the "show details" button are not part of this design: all hidden but the bar.
   System::Call 'user32::GetWindow(p $PetalockInner, i 5) p .r1'
   prog_next:
@@ -1714,23 +1803,23 @@ Function PetalockEndShow
     Call PetalockBuildRows
     Call PetalockPaintRows
     ${If} $PetalockFailStep == "webview2"
-      !insertmacro PETALOCK_LABEL $PetalockHSlot1 $PetalockInner 24 236 452 32 0x54000080 $PetalockFBody "Connect to the internet, then run Setup again. Petalock needs WebView2 to show its screens. Nothing of Petalock was installed."
+      !insertmacro PETALOCK_LABEL $PetalockHSlot1 $PetalockInner 24 236 452 38 0x54000080 $PetalockFBody "Connect to the internet, then run Setup again. Petalock needs WebView2 to show its screens. Nothing of Petalock was installed."
     ${ElseIf} $PetalockFailStep == "remove_old"
-      !insertmacro PETALOCK_LABEL $PetalockHSlot1 $PetalockInner 24 236 452 32 0x54000080 $PetalockFBody "The earlier version could not be removed, so Setup stopped before installing. Run Setup again once nothing is using it."
+      !insertmacro PETALOCK_LABEL $PetalockHSlot1 $PetalockInner 24 236 452 38 0x54000080 $PetalockFBody "The earlier version could not be removed, so Setup stopped before installing. Run Setup again once nothing is using it."
     ${ElseIf} $PetalockFailStep == "entries"
       ; Not a file failure: the files are copied, but Windows would not take the entry. Nothing here ever tells anyone to delete a
       ; folder (the state folder is also named Petalock, and an update's folder holds the person's own files). A fresh attempt took
       ; its own files out again (installer.nsi), so running Setup again is not refused; when one could not be taken out, another
       ; folder is the way; an update changed nothing but the files it replaced, its folder and earlier entry stay, and it can be run again.
       ${If} $PetalockRolledBack = 1
-        !insertmacro PETALOCK_LABEL $PetalockHSlot1 $PetalockInner 24 236 452 36 0x54000080 $PetalockFBody "Windows would not take Petalock’s entry in Installed apps, so Setup removed the files it had just copied. Run Setup again to try once more."
+        !insertmacro PETALOCK_LABEL $PetalockHSlot1 $PetalockInner 24 236 452 38 0x54000080 $PetalockFBody "Windows would not take Petalock’s entry in Installed apps, so Setup removed the files it had just copied. Run Setup again to try once more."
       ${ElseIf} $PetalockMode == "fresh"
-        !insertmacro PETALOCK_LABEL $PetalockHSlot1 $PetalockInner 24 236 452 36 0x54000080 $PetalockFBody "Windows refused Petalock’s entry in Installed apps, and Setup could not remove every file it copied. Run Setup again and choose another folder under Options."
+        !insertmacro PETALOCK_LABEL $PetalockHSlot1 $PetalockInner 24 236 452 38 0x54000080 $PetalockFBody "Windows refused Petalock’s entry in Installed apps, and Setup could not remove every file it copied. Run Setup again and choose another folder under Options."
       ${Else}
-        !insertmacro PETALOCK_LABEL $PetalockHSlot1 $PetalockInner 24 236 452 36 0x54000080 $PetalockFBody "Petalock’s files were updated, but Windows would not take the new entry in Installed apps. Setup removed nothing. Run Setup again to try once more."
+        !insertmacro PETALOCK_LABEL $PetalockHSlot1 $PetalockInner 24 236 452 38 0x54000080 $PetalockFBody "Petalock’s files were updated, but Windows would not take the new entry in Installed apps. Setup removed nothing. Run Setup again to try once more."
       ${EndIf}
     ${Else}
-      !insertmacro PETALOCK_LABEL $PetalockHSlot1 $PetalockInner 24 236 452 32 0x54000080 $PetalockFBody "Setup couldn’t write one of Petalock’s files. Some files were already copied to its folder; running Setup again replaces them."
+      !insertmacro PETALOCK_LABEL $PetalockHSlot1 $PetalockInner 24 236 452 38 0x54000080 $PetalockFBody "Setup couldn’t write one of Petalock’s files. Some files were already copied to its folder; running Setup again replaces them."
     ${EndIf}
     !insertmacro PETALOCK_INK $PetalockHSlot1
     ; the details: selectable, so they can be read and copied

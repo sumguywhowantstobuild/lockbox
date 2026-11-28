@@ -1176,6 +1176,7 @@ fn security_config_is_pinned() {
                     "installerIcon": "icons/icon.ico",
                     "uninstallerIcon": "icons/icon.ico",
                     "headerImage": "windows/band.bmp",
+                    "sidebarImage": "windows/sidebar.bmp",
                     "template": "windows/installer.nsi",
                     "installerHooks": "windows/hooks.nsh"
                 }

@@ -603,6 +603,24 @@ public static class SmokeDlg {
   public static IntPtr Foreground() { return GetForegroundWindow(); }
   // The window that owns h (GW_OWNER, 4): a dialog a program opens over its own window is owned by it.
   public static IntPtr Owner(IntPtr h) { return GetWindow(h, 4); }
+  [StructLayout(LayoutKind.Sequential)] public struct Rc { public int l, t, r, b; }
+  [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out Rc r);
+  [DllImport("user32.dll")] static extern bool GetClientRect(IntPtr h, out Rc r);
+  // Plan 5, Task 9h: the first visible page dialog (class #32770) inside the wizard window against the wizard's client area:
+  // { page width, page height, client width, client height } in pixels, or null when there is no page. The stock progress page was
+  // left at its template's size, so the white page, the bar and the grey band were cut off.
+  public static int[] InnerAgainstClient(IntPtr outer) {
+    Rc client;
+    if (!GetClientRect(outer, out client)) return null;
+    foreach (IntPtr k in Kids(outer)) {
+      if (Cls(k) == "#32770" && IsWindowVisible(k)) {
+        Rc page;
+        if (!GetWindowRect(k, out page)) return null;
+        return new int[] { page.r - page.l, page.b - page.t, client.r - client.l, client.b - client.t };
+      }
+    }
+    return null;
+  }
   // The text of the visible control with this id anywhere inside dlg; null when there is none (a page that has gone, or not yet made).
   public static string StatusText(IntPtr dlg, int id) {
     foreach (IntPtr k in Kids(dlg)) {
@@ -2341,6 +2359,8 @@ $Checks["a_completed_step_puts_words_in_the_status_line"] = {
   $d = Wait-PageText $p '*What Setup will do*'
   Start-Sleep -Seconds 1
   $statuses = New-Object System.Collections.ArrayList
+  # Plan 5, Task 9h: with each new status text the progress page's own dialog is read against the wizard's client area.
+  $fills = New-Object System.Collections.ArrayList
   [void][SmokeDlg]::Press($d.Handle, [SmokeDlg]::Item($d.Handle, 1))
   $deadline = (Get-Date).AddSeconds(120)
   $last = $null
@@ -2349,7 +2369,11 @@ $Checks["a_completed_step_puts_words_in_the_status_line"] = {
     $t = [SmokeDlg]::StatusText($d.Handle, 1950)
     if ($null -ne $t) {
       $gone = $null
-      if ($t -ne $last) { [void]$statuses.Add($t); $last = $t }
+      if ($t -ne $last) {
+        [void]$statuses.Add($t); $last = $t
+        $fill = [SmokeDlg]::InnerAgainstClient($d.Handle)
+        if ($null -ne $fill) { [void]$fills.Add($fill) }
+      }
     } elseif ($statuses.Count -gt 0) {
       # The progress page is over (the receipt is next): a second and a half of no status line ends the reading.
       if ($null -eq $gone) { $gone = Get-Date } elseif (((Get-Date) - $gone).TotalMilliseconds -gt 1500) { break }
@@ -2360,6 +2384,14 @@ $Checks["a_completed_step_puts_words_in_the_status_line"] = {
   $exit = Get-ExitCode $p
   Write-Log "  status line texts seen: $(@($statuses) -join ' | ')"
   if ($statuses.Count -eq 0) { Save-Screen 'no-status'; throw 'the status line was never read' }
+  if ($fills.Count -eq 0) { Save-Screen 'no-inner-dialog'; throw "the progress page's inner dialog was never read" }
+  foreach ($fill in $fills) {
+    if ([math]::Abs($fill[0] - $fill[2]) -gt 2 -or [math]::Abs($fill[1] - $fill[3]) -gt 2) {
+      Save-Screen 'inner-dialog'
+      throw "the progress page's inner dialog is not the whole client area ($($fill[0]) x $($fill[1]) in $($fill[2]) x $($fill[3]))"
+    }
+  }
+  Write-Log "  the progress page filled the client area ($(@($fills).Count) readings)"
   $outcomes = @('Microsoft WebView2: Already installed', 'Microsoft WebView2: Installed by Setup', 'Microsoft WebView2: Not found: an update does not get it, so Petalock may not open', 'Petalock is installed for this Windows account', 'Added to the Start menu and to Installed apps')
   $problems = @(Get-StatusProblems @($statuses) $outcomes)
   if ($problems.Count -gt 0) { Save-Screen 'status-line'; throw ($problems -join '; ') }
