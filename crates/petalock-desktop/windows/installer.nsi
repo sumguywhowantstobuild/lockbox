@@ -41,7 +41,8 @@
 ;  13. The additional plugin folder is added before hooks.nsh is included (setup-ui.nsh calls nsis_tauri_utils), and the
 ;      installer's band picture is the build's header image (bundle.windows.nsis.headerImage), unpacked to $PLUGINSDIR; the
 ;      Licence link opens bundle.licenseFile from there.
-;  14. When Windows refuses the Installed apps entry after the files were written, a FRESH attempt (the folder was provably empty
+;  14. When a file can't be written (handled, or ended by NSIS's own Abort: .onInstFailed), or Windows refuses the Installed apps
+;      entry after the files were written, a FRESH attempt (the folder was provably empty
 ;      at its start) removes exactly the files it wrote, by name and never a folder (PetalockRollBackFreshFiles), so running
 ;      Setup again is not refused for a folder that holds files and no entry; an update removes nothing. The page's advice never
 ;      says to delete a folder.
@@ -660,8 +661,11 @@ Section Install
   ; Create uninstaller
   WriteUninstaller "$INSTDIR\uninstall.exe"
   ; Petalock: a denied write, a full volume or a locked file left the error flag set: the row says Failed, with the words of a
-  ; file failure, and no receipt follows.
+  ; file failure, and no receipt follows. A fresh attempt first takes out the files it wrote (as when Windows refuses the entry,
+  ; below), so running Setup again is not refused for a folder that holds them and no entry (Greptile on #12); an update
+  ; removes nothing, and running Setup again replaces its files.
   ${If} ${Errors}
+    Call PetalockRollBackFreshFiles
     !insertmacro PETALOCK_FAILED files "Setup could not write one of Petalock’s files."
     Return
   ${EndIf}
@@ -737,7 +741,8 @@ Section Install
   SetAutoClose true
 SectionEnd
 
-; Petalock (second fix round, re-check finding 1): Windows refused the Installed apps entry after the files were written. On a FRESH
+; Petalock (second fix round, re-check finding 1; and a file failure part-way, Greptile on #12): Windows refused the Installed apps
+; entry after the files were written, or one of the files could not be written after others were. On a FRESH
 ; attempt ($PetalockMode, set by PetalockPreflight at the start of Section Install: the folder was provably empty then, so
 ; everything the attempt wrote is Setup's own) exactly the files this attempt wrote are removed, one by one by the names the
 ; uninstaller uses: the program, the bundler's resources and binaries, the uninstaller, and the empty folders made for the
@@ -760,10 +765,32 @@ Function PetalockRollBackFreshFiles
   {{#each resources_ancestors}}
     RMDir "$INSTDIR\\{{this}}"
   {{/each}}
-  ${IfNot} ${FileExists} "$INSTDIR\${MAINBINARYNAME}.exe"
-  ${AndIfNot} ${FileExists} "$INSTDIR\uninstall.exe"
-    StrCpy $PetalockRolledBack 1
+  ; Rolled back only when every file the attempt could have written is gone (one left behind would make the next attempt refuse
+  ; the folder as not empty, and the page must not then say to run Setup again; review of Task 13c, finding 2).
+  StrCpy $PetalockRolledBack 1
+  ${If} ${FileExists} "$INSTDIR\${MAINBINARYNAME}.exe"
+    StrCpy $PetalockRolledBack 0
   ${EndIf}
+  {{#each resources}}
+  ${If} ${FileExists} "$INSTDIR\\{{this.[1]}}"
+    StrCpy $PetalockRolledBack 0
+  ${EndIf}
+  {{/each}}
+  {{#each binaries}}
+  ${If} ${FileExists} "$INSTDIR\\{{this}}"
+    StrCpy $PetalockRolledBack 0
+  ${EndIf}
+  {{/each}}
+  ${If} ${FileExists} "$INSTDIR\uninstall.exe"
+    StrCpy $PetalockRolledBack 0
+  ${EndIf}
+FunctionEnd
+
+; Petalock (review of Task 13c, finding 1): NSIS's own "can't write this file" box offers Abort, Retry and Ignore; Abort ends the
+; install section at once, before its own failure handling. A FRESH attempt takes out what it wrote here too, so the folder isn't
+; left holding files with no entry; an update removes nothing (the rollback checks the mode itself).
+Function .onInstFailed
+  Call PetalockRollBackFreshFiles
 FunctionEnd
 
 Function .onInstSuccess

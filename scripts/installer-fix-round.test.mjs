@@ -57,8 +57,9 @@ test("fix_5_the_files_row_is_done_only_after_the_files_and_the_uninstaller_were_
   assert.ok(clear > 0 || /ClearErrors\n\s*SetOutPath/.test(install), "errors are cleared before the first write");
   const uninstaller = install.indexOf("WriteUninstaller");
   const done = install.indexOf("!insertmacro PETALOCK_DONE files");
-  const guard = install.indexOf('${If} ${Errors}\n    !insertmacro PETALOCK_FAILED files');
-  assert.ok(guard > uninstaller && guard < done, "a file-stage error is routed to the failure handler before the row is Done");
+  // A fresh attempt takes out the files it wrote before the failure page (Greptile on #12), as the refused entry does below.
+  const guard = install.indexOf('${If} ${Errors}\n    Call PetalockRollBackFreshFiles\n    !insertmacro PETALOCK_FAILED files');
+  assert.ok(guard > uninstaller && guard < done, "a file-stage error is routed to the rollback and the failure handler before the row is Done");
   assert.match(check("a_write_that_is_denied_is_a_failure_not_a_receipt"), /Set-Deny/);
 });
 
@@ -280,7 +281,18 @@ test("fix2_2_the_registration_advice_deletes_nothing_and_a_fresh_attempt_removes
   assert.ok(!/RMDir\s+\/r\b/i.test(text), "no recursive removal");
   // The words, for each case the failure can happen in: the files were taken out again; they could not all be; an update.
   const end = fn(ui(), "PetalockEndShow");
-  const branch = end.slice(end.indexOf('$PetalockFailStep == "entries"'), end.indexOf("${Else}\n      !insertmacro PETALOCK_LABEL $PetalockHSlot1"));
+  // The entries branch ends at the ${Else} after its last sentence's ${EndIf}; the file failure's branch runs from there.
+  const updated = end.indexOf("Petalock’s files were updated, but Windows");
+  const fileStart = end.indexOf("${Else}", end.indexOf("${EndIf}", updated));
+  assert.ok(updated > 0 && fileStart > updated, "the entries branch and the file failure's branch are found");
+  const branch = end.slice(end.indexOf('$PetalockFailStep == "entries"'), fileStart);
+  // The file failure's own three cases (Greptile on #12): the same rollback, so the same three answers.
+  const files = end.slice(fileStart, end.indexOf("!insertmacro PETALOCK_INK $PetalockHSlot1", fileStart));
+  assert.match(files, /\$\{If\} \$PetalockRolledBack = 1\n[^\n]*"Setup couldn’t write one of Petalock’s files, so it removed the files it had just copied\. Run Setup again to try once more\."/);
+  assert.match(files, /\$\{ElseIf\} \$PetalockMode == "fresh"\n[^\n]*"Setup couldn’t write one of Petalock’s files, and could not remove every file it copied\. Run Setup again and choose another folder under Options\."/);
+  assert.match(files, /\$\{Else\}\n[^\n]*"Setup couldn’t write one of Petalock’s files\. Some files were already copied to its folder; running Setup again replaces them\."/);
+  assert.ok(!/\bdelet/i.test(files), "no word of deleting in the file failure's advice");
+  for (const sentence of files.match(/"[^"]{60,}"/g) ?? []) assert.ok(sentence.length <= 160, `short enough for two lines: ${sentence}`);
   assert.match(branch, /\$\{If\} \$PetalockRolledBack = 1/);
   assert.match(branch, /so Setup removed the files it had just copied\. Run Setup again to try once more\./);
   assert.match(branch, /\$\{ElseIf\} \$PetalockMode == "fresh"/);
@@ -305,10 +317,20 @@ test("fix2_2_the_registration_advice_deletes_nothing_and_a_fresh_attempt_removes
   assert.deepEqual(removals.filter((line) => !allowed.some((re) => re.test(line))), [], "only the payload, by name");
   assert.ok(removals.includes('Delete "$INSTDIR\\${MAINBINARYNAME}.exe"') && removals.includes('Delete "$INSTDIR\\uninstall.exe"'));
   assert.ok(!removals.some((line) => /^RMDir "\$INSTDIR"$/.test(line)), "the program folder itself is never removed");
-  assert.match(roll, /\$\{IfNot\} \$\{FileExists\} "\$INSTDIR\\\$\{MAINBINARYNAME\}\.exe"\n\s*\$\{AndIfNot\} \$\{FileExists\} "\$INSTDIR\\uninstall\.exe"\n\s*StrCpy \$PetalockRolledBack 1/);
-  // Called once, before the failure is recorded (a quiet run quits there), in the install section after its own check.
+  // Rolled back only when every file the attempt could have written is gone (review of Task 13c, finding 2): set, then cleared by
+  // any one still there: the program, each resource, each binary, the uninstaller.
+  const proved = roll.slice(roll.lastIndexOf("StrCpy $PetalockRolledBack 1"));
+  assert.ok(roll.lastIndexOf("StrCpy $PetalockRolledBack 1") > roll.lastIndexOf("RMDir"), "the proof comes after every removal");
+  for (const file of ['"$INSTDIR\\${MAINBINARYNAME}.exe"', '"$INSTDIR\\\\{{this.[1]}}"', '"$INSTDIR\\\\{{this}}"', '"$INSTDIR\\uninstall.exe"']) {
+    assert.ok(proved.includes(`\${If} \${FileExists} ${file}\n    StrCpy $PetalockRolledBack 0`), `a file left behind clears the claim: ${file}`);
+  }
+  // NSIS's own Abort ends the section before its failure handling: the rollback runs there too, and nothing else does.
+  assert.match(code(template()).join("\n"), /Function \.onInstFailed\n\s*Call PetalockRollBackFreshFiles\nFunctionEnd/);
+  // Called three times: twice in the install section, each before its failure is recorded (a quiet run quits there), after its own check: a
+  // file failure (Greptile on #12) and a refused entry; and in .onInstFailed, for NSIS's own Abort (checked below).
   const install = section("Install");
-  assert.equal([...code(template()).join("\n").matchAll(/Call PetalockRollBackFreshFiles/g)].length, 1);
+  assert.equal([...code(template()).join("\n").matchAll(/Call PetalockRollBackFreshFiles/g)].length, 3);
+  assert.match(install, /\$\{If\} \$\{Errors\}\n\s*Call PetalockRollBackFreshFiles\n\s*!insertmacro PETALOCK_FAILED files/);
   assert.match(install, /\$\{If\} \$\{Errors\}\n\s*Call PetalockRollBackFreshFiles\n\s*!insertmacro PETALOCK_FAILED entries/);
   assert.ok(install.indexOf("Call PetalockPreflight") < install.indexOf("Call PetalockRollBackFreshFiles"));
   assert.ok(!/StrCpy \$PetalockMode/.test(install), "the mode the check found is the one the rollback reads");
@@ -584,7 +606,8 @@ test("end_1_a_program_that_cannot_be_deleted_stops_the_uninstall_before_its_unin
     "no default answer for a window nobody answers": mutate(text, " /SD IDCANCEL IDRETRY program_again", " IDRETRY program_again"),
     "Retry goes nowhere": mutate(text, "IDRETRY program_again", "IDRETRY program_gone"),
     "a passive run is asked": mutate(text, "${OrIf} $PassiveMode = 1\n      !insertmacro PETALOCK_CONSOLE \"The program is still", "${OrIf} 0 = 1\n      !insertmacro PETALOCK_CONSOLE \"The program is still"),
-    "the check names another file": mutate(text, PROGRAM_THERE, '${If} ${FileExists} "$INSTDIR\\uninstall.exe"'),
+    // In Section Uninstall itself: the same line also opens the install's rollback check, earlier in the file.
+    "the check names another file": text.slice(0, text.indexOf("\nSection Uninstall\n")) + mutate(text.slice(text.indexOf("\nSection Uninstall\n")), PROGRAM_THERE, '${If} ${FileExists} "$INSTDIR\\uninstall.exe"'),
     "the uninstaller goes first": mutate(text, `program_again:\n  ${PROGRAM}`, `Delete "$INSTDIR\\uninstall.exe"\n  program_again:\n  ${PROGRAM}`),
     "the program is deleted after the entry": mutate(mutate(text, `program_again:\n  ${PROGRAM}`, "program_again:\n  ClearErrors"), '  ; Delete uninstaller\n  Delete "$INSTDIR\\uninstall.exe"', `  ${PROGRAM}\n  ; Delete uninstaller\n  Delete "$INSTDIR\\uninstall.exe"`),
     "open\\ is cleaned after the program": mutate(mutate(text, "  Call un.PetalockCleanOpen\n", ""), "  ; Delete resources\n", "  Call un.PetalockCleanOpen\n  ; Delete resources\n"),

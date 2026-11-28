@@ -57,7 +57,7 @@ Var PetalockSc          ; added | kept | skipped | failed
 Var PetalockFailStep    ; "" or the step that failed
 Var PetalockDetail      ; the failure's details (shown, and copied by Copy details)
 Var PetalockLocked
-Var PetalockRolledBack  ; 1 when a fresh attempt's files were taken out again after Windows refused its entry (installer.nsi)
+Var PetalockRolledBack  ; 1 when a fresh attempt's files were taken out again after a file failure or a refused entry (installer.nsi)
 Var PetalockOutcome     ; a finished step's words, kept apart from $PetalockA, which the repaint reuses for window handles
 Var PetalockTW          ; a row's words' width, and its state word's column (SW) and left edge (TX), in design pixels (PETALOCK_PAINT)
 Var PetalockSW
@@ -1827,7 +1827,16 @@ Function PetalockEndShow
         !insertmacro PETALOCK_LABEL $PetalockHSlot1 $PetalockInner 24 236 452 38 0x54000080 $PetalockFBody "Petalock’s files were updated, but Windows would not take the new entry in Installed apps. Setup removed nothing. Run Setup again to try once more."
       ${EndIf}
     ${Else}
-      !insertmacro PETALOCK_LABEL $PetalockHSlot1 $PetalockInner 24 236 452 38 0x54000080 $PetalockFBody "Setup couldn’t write one of Petalock’s files. Some files were already copied to its folder; running Setup again replaces them."
+      ; A file failure: a fresh attempt took out the files it had written (installer.nsi), so running Setup again is not refused;
+      ; when one could not be taken out, another folder is the way; an update's folder is the recorded installation, and running
+      ; Setup again replaces its files.
+      ${If} $PetalockRolledBack = 1
+        !insertmacro PETALOCK_LABEL $PetalockHSlot1 $PetalockInner 24 236 452 38 0x54000080 $PetalockFBody "Setup couldn’t write one of Petalock’s files, so it removed the files it had just copied. Run Setup again to try once more."
+      ${ElseIf} $PetalockMode == "fresh"
+        !insertmacro PETALOCK_LABEL $PetalockHSlot1 $PetalockInner 24 236 452 38 0x54000080 $PetalockFBody "Setup couldn’t write one of Petalock’s files, and could not remove every file it copied. Run Setup again and choose another folder under Options."
+      ${Else}
+        !insertmacro PETALOCK_LABEL $PetalockHSlot1 $PetalockInner 24 236 452 38 0x54000080 $PetalockFBody "Setup couldn’t write one of Petalock’s files. Some files were already copied to its folder; running Setup again replaces them."
+      ${EndIf}
     ${EndIf}
     !insertmacro PETALOCK_INK $PetalockHSlot1
     ; the details: selectable, so they can be read and copied

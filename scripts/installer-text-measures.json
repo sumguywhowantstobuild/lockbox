@@ -2266,5 +2266,59 @@
                       30,
                       32
                   ]
+    },
+    {
+        "text":  "Setup couldn’t write one of Petalock’s files, so it removed the files it had just copied. Run Setup again to try once more.",
+        "weight":  400,
+        "em":  12,
+        "width":  452,
+        "w":  [
+                  625,
+                  784,
+                  942,
+                  1103,
+                  1276
+              ],
+        "h":  [
+                  30,
+                  40,
+                  50,
+                  60,
+                  64
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Setup couldn’t write one of Petalock’s files, and could not remove every file it copied. Run Setup again and choose another folder under Options.",
+        "weight":  400,
+        "em":  12,
+        "width":  452,
+        "w":  [
+                  761,
+                  954,
+                  1146,
+                  1341,
+                  1552
+              ],
+        "h":  [
+                  30,
+                  40,
+                  50,
+                  60,
+                  64
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
     }
 ]
