@@ -714,3 +714,33 @@ test("end_6_the_comments_say_what_the_code_does", () => {
   assert.ok(!/only after\s+# its default button is pressed|says so only after/.test(running), "the helper's comment does not say the page shows it only after a press");
   assert.match(running, /as soon as it says/);
 });
+
+/**
+ * After the end-of-plan review (CI on #12): the last step's "Done" words stay on screen a moment before the window moves on to
+ * the receipt, so a person sees the install finish, a screen reader can read it out before the page changes, and the smoke
+ * check's reading of the status line is not a race. Only when there is a window (never in a silent install), and briefly.
+ */
+export function finalHoldProblems(text) {
+  const lines = code(text).join("\n");
+  const end = lines.match(/!insertmacro PETALOCK_DONE entries\n([\s\S]*?)\n\s*SetAutoClose true\nSectionEnd/)?.[1];
+  if (end === undefined) return ["the install section does not end with the entries Done and then SetAutoClose"];
+  const hold = end.match(/^\s*\$\{IfNot\} \$\{Silent\}\n\s*Sleep (\d+)\n\s*\$\{EndIf\}$/);
+  if (hold === null) return ["between the last Done and SetAutoClose there is no hold of the window, only when not silent"];
+  const ms = Number(hold[1]);
+  if (ms < 800 || ms > 1500) return [`the hold is ${ms} ms, not between 800 and 1500`];
+  return [];
+}
+
+test("end_hold_the_last_done_stays_on_screen_before_the_receipt", () => {
+  const text = template();
+  assert.deepEqual(finalHoldProblems(text), []);
+  const mutants = {
+    "no hold": mutate(text, "  ${IfNot} ${Silent}\n    Sleep 1000\n  ${EndIf}\n  SetAutoClose true", "  SetAutoClose true"),
+    "a hold in a silent install too": mutate(text, "  ${IfNot} ${Silent}\n    Sleep 1000\n  ${EndIf}\n", "  Sleep 1000\n"),
+    "a hold too long": mutate(text, "    Sleep 1000\n  ${EndIf}\n  SetAutoClose true", "    Sleep 5000\n  ${EndIf}\n  SetAutoClose true"),
+    "a hold too short to see": mutate(text, "    Sleep 1000\n  ${EndIf}\n  SetAutoClose true", "    Sleep 100\n  ${EndIf}\n  SetAutoClose true"),
+    "the hold before the Done": mutate(text, "  !insertmacro PETALOCK_DONE entries\n  ${IfNot} ${Silent}\n    Sleep 1000\n  ${EndIf}\n", "  ${IfNot} ${Silent}\n    Sleep 1000\n  ${EndIf}\n  !insertmacro PETALOCK_DONE entries\n"),
+  };
+  for (const [what, mutant] of Object.entries(mutants)) assert.ok(finalHoldProblems(mutant).length >= 1, `must be refused: ${what}`);
+  assert.ok(finalHoldProblems("").length >= 1, "an empty file is refused, not passed");
+});

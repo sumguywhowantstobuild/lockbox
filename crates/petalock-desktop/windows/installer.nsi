@@ -726,9 +726,14 @@ Section Install
     !insertmacro NSIS_HOOK_POSTINSTALL
   !endif
 
-  ; Petalock: every step has finished: the entries are Done, and the window goes straight on to the receipt (a passive run
-  ; closes: it has no last page).
+  ; Petalock: every step has finished: the entries are Done, and the window goes on to the receipt (a passive run closes: it has
+  ; no last page). With a window, the last Done stays on screen for a second first, so the person sees the install finish and a
+  ; screen reader can read the status line out before the page changes (the section runs on its own thread: the window stays
+  ; responsive meanwhile). A silent install has no window and doesn't wait.
   !insertmacro PETALOCK_DONE entries
+  ${IfNot} ${Silent}
+    Sleep 1000
+  ${EndIf}
   SetAutoClose true
 SectionEnd
 
