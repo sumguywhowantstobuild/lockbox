@@ -75,7 +75,7 @@ export const LOCATION_KEYS = ["state", "appLocal", "appRoaming", "vaults"];
 
 const IDENTIFIER = "io.github.sumguywhowantstobuild.petalock";
 const SHOWN_THROUGH_LINE = "appLocal: a web-view folder outside the app's private copy shows through (cache only)";
-const SENTINEL = ".lockbox-test-swap.json";
+const SENTINEL = ".petalock-test-swap.json";
 const RUN_NAME = /^[a-z0-9-]{1,40}$/;
 const MAX_SMALL_FILE = 10_000;
 const USAGE = "usage: node e2e/lib/state.mjs status | recover | in <run> | back <run>   (a run is 1-40 of a-z, 0-9, -)";
@@ -272,7 +272,7 @@ function readSmallJson(path) {
 /** True when `dir` holds this tool's sentinel naming this run and this location. */
 function ownsSentinel(dir, run, key) {
   const found = readSmallJson(join(dir, SENTINEL));
-  return found !== null && found.lockboxTestSwap === 1 && found.run === run && found.key === key;
+  return found !== null && found.petalockTestSwap === 1 && found.run === run && found.key === key;
 }
 
 function removeSentinel(dir, run, key) {
@@ -369,7 +369,7 @@ function readJournal(ctx) {
   const digits = (value) => typeof value === "string" && /^[0-9]{1,40}$/.test(value);
   const valid =
     found !== null &&
-    found.lockboxTestSwapJournal === 3 &&
+    found.petalockTestSwapJournal === 3 &&
     typeof found.run === "string" &&
     RUN_NAME.test(found.run) &&
     Array.isArray(found.locations) &&
@@ -415,7 +415,7 @@ function readJournal(ctx) {
 /** Writes the journal through a temp file made for this call alone (exclusive, uniquely named) and renamed into place. */
 function writeJournal(ctx, run, entries) {
   const data = {
-    lockboxTestSwapJournal: 3,
+    petalockTestSwapJournal: 3,
     run,
     locations: entries.map(({ key, path, original, identity, redirect, shownThrough }) => ({
       key,
@@ -450,7 +450,7 @@ function processIsAlive(pid) {
 /** Runs `fn` holding the lock beside the journal. A lock left by a process that is gone is taken over and said so. */
 function withLock(ctx, fn) {
   const lockPath = `${ctx.journal}.lock`;
-  const mine = `${JSON.stringify({ lockboxTestSwapLock: 1, pid: process.pid, started: new Date().toISOString() })}\n`;
+  const mine = `${JSON.stringify({ petalockTestSwapLock: 1, pid: process.pid, started: new Date().toISOString() })}\n`;
   let tookOver = false;
   let held = false;
   for (let attempt = 0; attempt < 2 && !held; attempt += 1) {
@@ -460,7 +460,7 @@ function withLock(ctx, fn) {
     } catch (error) {
       if (error.code !== "EEXIST") throw error;
       const other = readSmallJson(lockPath);
-      const pid = other !== null && other.lockboxTestSwapLock === 1 && Number.isInteger(other.pid) && other.pid > 0 ? other.pid : null;
+      const pid = other !== null && other.petalockTestSwapLock === 1 && Number.isInteger(other.pid) && other.pid > 0 ? other.pid : null;
       if (pid === null) refuse("a lock file beside the journal is not readable; nothing was changed, delete it by hand if no swap command is running");
       if (processIsAlive(pid)) refuse(`another swap command is running (process ${pid}); nothing was changed`);
       unlinkSync(lockPath);
@@ -546,7 +546,7 @@ export function swapIn(run, options = {}) {
       const { key, path, original, hasKept, redirect } = entry;
       refuseWhileRunning(ctx, true);
       if (original === "present") {
-        writeFileSync(join(path, SENTINEL), `${JSON.stringify({ lockboxTestSwap: 1, run, key })}\n`, { flag: "wx" });
+        writeFileSync(join(path, SENTINEL), `${JSON.stringify({ petalockTestSwap: 1, run, key })}\n`, { flag: "wx" });
         ctx.step(`${key}: marked`);
         ctx.rename(path, asidePath(path, run));
         ctx.step(`${key}: original set aside`);

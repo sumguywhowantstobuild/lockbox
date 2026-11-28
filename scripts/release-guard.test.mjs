@@ -488,6 +488,8 @@ test("release_refuses_unless_every_ci_job_passed", async () => {
   await attempt((f, w) => world(f, [w.r()], { 9001: [] }), /no job|missing/i);
   // A job name twice.
   await attempt((f, w) => world(f, [w.r()], { 9001: [...w.greens(), w.j(CI_JOBS[0])] }), /twice|more than once|duplicate/i);
+  // After "Re-run failed jobs" the jobs not re-run stay on an earlier attempt: refused, and the refusal names the way back.
+  await attempt((f, w) => world(f, [w.r({ run_attempt: 2 })], { 9001: w.greens() }), /attempt 1, the run's latest is 2 \(stale\).*Re-run all jobs/);
   // The run itself did not conclude as success, whatever its jobs say.
   await attempt((f, w) => world(f, [w.r({ conclusion: "failure" })], { 9001: w.greens() }), /run|success/i);
   await attempt((f, w) => world(f, [w.r({ status: "in_progress", conclusion: null })], { 9001: w.greens() }), /in progress|still running|not finished/i);

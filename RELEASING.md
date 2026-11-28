@@ -28,7 +28,9 @@ The rules behind it:
 Each of these is set by the owner in GitHub's or Cloudflare's settings, and read back into the first record (template
 section 5):
 
-- The tag ruleset: `refs/tags/v*`; creation, update and deletion restricted; only the repository admin role bypasses it.
+- Two tag rulesets on `refs/tags/v*`, because a ruleset's bypass applies to every rule in it: "release tags" restricts
+  creation, and only the repository admin role bypasses it (so only the owner can make a release tag); "release tags
+  fixed" restricts update and deletion with no bypass at all, so nobody, the owner included, can move or delete one.
 - The environment `release`: the owner as required reviewer; deployment branches: `main` only.
 - The environment `site`: deployment branches `main` only; the Cloudflare token as its only secret; the repository
   variable `SITE_DEPLOY` set to `on` only once the site is ready to go live (`.github/workflows/site.yml`).
@@ -44,7 +46,9 @@ Change `version` under `[workspace.package]` in `Cargo.toml` to the candidate's 
 - **Pass mark:** the pull request is merged to `main`, and CI's push run on `main` for the merge commit passed every job:
   both Rust legs, UI, the security scan, end-to-end and the installer.
 - **Way back:** a failing job is fixed in another reviewed pull request, which becomes the new version commit. Nothing
-  outside the repository has changed yet.
+  outside the repository has changed yet. A job that failed for a flaky reason is re-run with **"Re-run all jobs"**,
+  never "Re-run failed jobs": the release checks every job on the run's latest attempt, and a partial re-run leaves the
+  others on an earlier one, which it refuses.
 
 ### 2. The record
 
@@ -64,13 +68,20 @@ test. Section 6's hands-on rows wait for step 7.
 
 ### 3. First release only: a branch can't sign
 
-On a throwaway branch, push a copy of `release.yml` whose `authorize` job only passes (its tag, `main` and CI checks
-removed; `build`, `inspect`, `attest` and `draft` kept as they are), dispatch it from that branch with a made-up
-name outside `v*` for the `tag` input (for example `trial-branch-check`; no tag needs to exist, and none is made, since
-a `v*` tag could never be deleted), and check that GitHub refuses the `release` environment. Write the run and
-GitHub's answer in the record (`a_branch_dispatch_cannot_attest_or_draft`), then delete the branch.
+GitHub checks an environment's branch rule only when a job that names the environment is about to start, so the trial
+must reach that moment: a job that is skipped because an earlier one failed proves nothing. On a throwaway branch, push
+a copy of `release.yml` in which `attest` and `draft` need no other job (their `needs:` removed) and each has, in place
+of its steps, one step that only prints a line; `authorize`, `build` and `inspect` are deleted from the copy, and
+nothing in it checks out code, signs or uploads. Keep both jobs' `environment: release` exactly as in the real file.
+Dispatch it from that branch (`gh workflow run release.yml --ref <branch> -f tag=trial-branch-check`; a name outside
+`v*`, since a `v*` tag could never be deleted, and no tag needs to exist), and read the run. Write the run and GitHub's
+answer in the record (`a_branch_dispatch_cannot_attest_or_draft`), then delete the branch.
 
-- **Pass mark:** the `attest` and `draft` jobs never start; GitHub names the environment's branch rule.
+This is the attacker's case at its simplest: whatever a branch's copy of the workflow says, it can't enter `release`.
+
+- **Pass mark:** both jobs fail before any step runs, and the run's own error for each names the branch rule (GitHub's
+  words: the branch "is not allowed to deploy to release due to environment protection rules"). A job shown as
+  skipped, waiting for approval, or with any step run is a **fail** of this step, not a pass.
 - **Way back:** if GitHub lets it in, stop: the environment's deployment-branch rule is wrong. Delete any draft the run
   made, write any attestation it made in the record (an attestation can't be deleted), fix the rule, read it back into
   the record, and run this step again. No release is made until it refuses.
@@ -78,12 +89,15 @@ GitHub's answer in the record (`a_branch_dispatch_cannot_attest_or_draft`), then
 ### 4. The tag
 
 The owner creates the tag `v<version>` on the version commit (on GitHub's release page, or `git tag v<version>
-<commit>` and `git push origin v<version>`).
+<commit>` and `git push origin v<version>`). The version commit must still be `main`'s newest commit when the tag is
+made and when step 5 starts: the release runs `main`'s newest build workflow on the tag's own scripts, and only at
+`main`'s head are those the files CI ran together. If anything merged after the version commit, go back to step 1 with
+the next version.
 
-- **Pass mark:** `git rev-parse "v<version>^{commit}"` prints the version commit, and that commit is on `main`. Write
-  the tag line in the record's section 1.
-- **Way back:** a tag can't be moved or deleted (the ruleset). A tag on the wrong commit is never released: leave it, and
-  go back to step 1 with the next version.
+- **Pass mark:** `git rev-parse "v<version>^{commit}"` prints the version commit, and that commit is `main`'s newest
+  (`git rev-parse origin/main` after a fetch). Write the tag line in the record's section 1.
+- **Way back:** a tag can't be moved or deleted (the second ruleset). A tag on the wrong commit is never released: leave
+  it, and go back to step 1 with the next version.
 
 ### 5. The release workflow
 
@@ -138,8 +152,9 @@ The owner opens the draft on GitHub and publishes it as a **pre-release**.
 
 ### 9. Point the download page at it
 
-A reviewed pull request changes `site/release.json` to `{"tag": "v<version>"}` and adds the record,
-`docs/releases/v<version>.md`, filled to this point. The record goes to `main` only now, after the tag: it records the
+A reviewed pull request changes `site/release.json` to `{"tag": "v<version>"}`, adds the record,
+`docs/releases/v<version>.md`, filled to this point, and updates README.md's status lines so they name this candidate as
+the current preview (a pre-release, not yet reviewed as a release) with a link to its record. The record goes to `main` only now, after the tag: it records the
 tagged commit and is never part of it, so the tag never has to move. When the pull request merges, the Site workflow
 downloads that release's installer, verifies its attestation, builds the page from the real file (its size, date and
 fingerprint) and deploys it. The build refuses a draft, a missing or extra file, a malformed `.sha256`, or bytes that

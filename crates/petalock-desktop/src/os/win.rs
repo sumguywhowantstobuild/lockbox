@@ -1075,10 +1075,10 @@ const PERSONALIZE_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Themes
 
 /// Whether Windows shows a light taskbar: its "Choose your default Windows mode" setting (`SystemUsesLightTheme`,
 /// 1 light, 0 dark), which colours the taskbar and the clock's corner, not the apps' own (`AppsUseLightTheme`).
-/// `false` when the value is not there, Windows 11's dark default.
-pub fn taskbar_is_light() -> io::Result<bool> {
+/// `None` when the value is not there or is not a DWORD: Windows hasn't said, and the caller falls back.
+pub fn taskbar_is_light() -> io::Result<Option<bool>> {
     let Some(key) = open_registry_key(PERSONALIZE_KEY, KEY_QUERY_VALUE)? else {
-        return Ok(false);
+        return Ok(None);
     };
     let name = registry_text("SystemUsesLightTheme");
     let mut data = 0u32;
@@ -1097,8 +1097,8 @@ pub fn taskbar_is_light() -> io::Result<bool> {
         )
     };
     match code {
-        ERROR_SUCCESS if kind == REG_DWORD && size == 4 => Ok(data != 0),
-        ERROR_SUCCESS | ERROR_FILE_NOT_FOUND | ERROR_MORE_DATA => Ok(false),
+        ERROR_SUCCESS if kind == REG_DWORD && size == 4 => Ok(Some(data != 0)),
+        ERROR_SUCCESS | ERROR_FILE_NOT_FOUND | ERROR_MORE_DATA => Ok(None),
         other => Err(registry_error(other)),
     }
 }

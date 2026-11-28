@@ -66,6 +66,7 @@ jobs:
           path: site-deploy
           retention-days: 7
           if-no-files-found: error
+          overwrite: true
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: ui/.node-version
@@ -96,6 +97,7 @@ jobs:
           path: target/site
           retention-days: 7
           if-no-files-found: error
+          overwrite: true
 
   deploy:
     name: Upload the site to Cloudflare Pages

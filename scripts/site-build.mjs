@@ -10,7 +10,7 @@
 // `site/release.json` is read strictly. Only when it is exactly `{"tag": null}` is the page built in its "Coming soon" state,
 // with no question to GitHub. With `{"tag": "v<major>.<minor>.<patch>"}` the build asks GitHub for that PUBLISHED release of
 // the fixed repository, requires exactly one installer named `Petalock_<version>_x64-setup.exe` and its `.sha256`, strictly
-// parses the sidecar (64 lowercase hex digits, two spaces, the exact file name), downloads the installer, hashes it, and fills
+// parses the sidecar (64 hex digits in either case, read as lower case, two spaces, the exact file name), downloads the installer, hashes it, and fills
 // the size, date and fingerprint from that result only; the links are built from the tag and the file name, never taken from
 // the answer. The two files are fetched from the same public address the page's button uses
 // (`https://github.com/<repository>/releases/download/<tag>/<file>`), without credentials, and the redirect from there is

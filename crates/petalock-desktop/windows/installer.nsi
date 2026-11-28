@@ -7,16 +7,20 @@
 ; started before any hook, the default folder is fixed here, and CheckIfAppIsRunning offers to kill the program and
 ; kills it without asking when silent.
 ;   1. The default folder is %LOCALAPPDATA%\Programs\Petalock (Tauri's own, %LOCALAPPDATA%\Petalock, is the state folder).
-;   2. The folder in force (folder page, /D, remembered location, upgrade) is checked before each operation: .onInit, the
-;      folder page, the old uninstaller an upgrade runs, the first lines of both install sections, un.onInit, and
-;      Section Uninstall. Nothing is written first: the check is the first thing each of them does.
+;   2. The folder in force (/D, remembered location, the one page's Options, upgrade) is checked before each operation:
+;      .onInit, the page when it is left, the old uninstaller an upgrade runs, the first lines of the three sections (the
+;      old uninstaller, WebView2 and Install), un.onInit, and Section Uninstall. Nothing is written first: the check is
+;      the first thing each of them does.
 ;   3. CheckIfAppIsRunning (which ends the program) is not used; PetalockEnsureNotRunning never ends it.
-;   4. The uninstaller first cleans open\ (un.PetalockCleanOpen), stops before removing anything if a copy is left, and
-;      removes the two identifier folders (when the box is ticked) with un.PetalockRemoveTree, which never follows a
-;      junction (NSIS's RMDir /r does).
+;   4. The uninstaller first cleans open\ (un.PetalockCleanOpen), stops before removing anything if a copy is left, then
+;      deletes the program and stops if it is still there (before its uninstaller, its entry or any other file goes, so the
+;      uninstall can be run again from Installed apps), and removes the two identifier folders (when the box is ticked)
+;      with un.PetalockRemoveTree, which never follows a junction (NSIS's RMDir /r does).
 ;   5. Tauri's second registry key (HKCU\Software\<publisher>\<product>: remembered location, installer language) is not
 ;      written, read or deleted; the remembered location is the uninstall key's InstallLocation.
-;   6. The uninstaller has a finish page that says where vaults stay.
+;   6. The uninstaller has a finish page that says where vaults stay. It and the confirm page are skipped in a passive run and
+;      under /UPDATE (the old uninstaller an update runs: the person already chose to remove first, and Setup shows its own
+;      receipt).
 ;   7. hooks.nsh is included after the variables and defines it uses.
 ;   8. WiX (MSI) discovery and its machine-wide uninstall branch are removed; the old uninstaller an upgrade runs is the one
 ;      in the recorded install folder, run by a command built from that folder (not read from the registry).
@@ -292,14 +296,15 @@ Function un.ConfirmLeave
   ${EndIf}
   SendMessage $DeleteAppDataCheckbox ${BM_GETCHECK} 0 0 $DeleteAppDataCheckboxState
 FunctionEnd
-!define MUI_PAGE_CUSTOMFUNCTION_PRE un.SkipIfPassive
+!define MUI_PAGE_CUSTOMFUNCTION_PRE un.SkipIfPassiveOrUpdate
 !insertmacro MUI_UNPAGE_CONFIRM
 
 ; 2. Uninstalling Page
 !insertmacro MUI_UNPAGE_INSTFILES
 
-; 3. Petalock: a finish page that says where the vaults stay (a vault is never removed by the uninstall).
-!define MUI_PAGE_CUSTOMFUNCTION_PRE un.SkipIfPassive
+; 3. Petalock: a finish page that says where the vaults stay (a vault is never removed by the uninstall). Not under /UPDATE: Setup
+; (which ran the old uninstaller) shows its own receipt, and "Petalock was uninstalled" would wait for a click in the middle of it.
+!define MUI_PAGE_CUSTOMFUNCTION_PRE un.SkipIfPassiveOrUpdate
 !define MUI_FINISHPAGE_TITLE "Petalock was uninstalled"
 !define MUI_FINISHPAGE_TEXT "Your vaults stay where they are. Petalock keeps them in the folders you chose, by default Petalock Vaults in your user folder."
 !insertmacro MUI_UNPAGE_FINISH
@@ -803,8 +808,23 @@ Section Uninstall
   !endif
 
   ; Delete the app directory and its content from disk
-  ; Copy main executable
+  ; Petalock: the program goes first, and one that is still there (held open by a scanner or a backup, or denied) stops the
+  ; uninstall before its uninstaller, its entry in Installed apps or any other file goes: with those kept, "run it again from
+  ; Installed apps" works, and a later Setup sees the recorded installation, not a folder that holds a program and no entry.
+  ; Silent and passive runs stop with an error (and /UPDATE, the old uninstaller an update runs, exits non-zero, which Setup
+  ; reports as "The earlier version was not removed."); a window offers Retry and Cancel, and Cancel is the answer when nobody is
+  ; there to give one (/SD). The words name no file.
+  program_again:
   Delete "$INSTDIR\${MAINBINARYNAME}.exe"
+  ${If} ${FileExists} "$INSTDIR\${MAINBINARYNAME}.exe"
+    ${If} ${Silent}
+    ${OrIf} $PassiveMode = 1
+      !insertmacro PETALOCK_CONSOLE "The program is still in use, or could not be removed. Petalock was not uninstalled. Close whatever holds it and run the uninstall again."
+      Abort
+    ${EndIf}
+    MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "Petalock’s program is still in use, or could not be removed.$\r$\n$\r$\nClose whatever holds it, then choose Retry. Cancel stops here and leaves Petalock installed." /SD IDCANCEL IDRETRY program_again
+    Abort
+  ${EndIf}
 
   ; Delete resources
   {{#each resources}}
@@ -930,8 +950,11 @@ Function Skip
   Abort
 FunctionEnd
 
-Function un.SkipIfPassive
-  ${IfThen} $PassiveMode = 1  ${|} Abort ${|}
+Function un.SkipIfPassiveOrUpdate
+  ${If} $PassiveMode = 1
+  ${OrIf} $UpdateMode = 1
+    Abort
+  ${EndIf}
 FunctionEnd
 
 Function CreateOrUpdateStartMenuShortcut

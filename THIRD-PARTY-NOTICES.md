@@ -41,12 +41,40 @@ Used by the passphrase generator (`crates/petalock-core/src/generator.rs`). The 
 Used by the recovery key (`crates/petalock-core/src/recovery.rs`): its 24 words are written from this list. The list is
 used as published; Petalock does not modify it.
 
+## nsis_tauri_utils (inside the installer)
+
+- File: `nsis_tauri_utils.dll` 0.5.3, an installer plugin built into Setup itself (unpacked to a temporary folder while
+  Setup runs; not installed). The installer's build tool (`tauri-cli` 2.12.5, through `tauri-bundler` 2.10.5) fetches
+  that exact release and checks its digest.
+- Source: https://github.com/tauri-apps/nsis-tauri-utils (tag `nsis_tauri_utils-v0.5.3`)
+- Licence: MIT or Apache-2.0, at the user's choice; Petalock uses it under MIT. The notice that must stay with it:
+
+> MIT License
+>
+> Copyright (c) 2019 - 2022 Tauri Programme within The Commons Conservancy
+>
+> Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
+> documentation files (the "Software"), to deal in the Software without restriction, including without limitation the
+> rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit
+> persons to whom the Software is furnished to do so, subject to the following conditions:
+>
+> The above copyright notice and this permission notice shall be included in all copies or substantial portions of the
+> Software.
+>
+> THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE
+> WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+> COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+> OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+Setup itself is made with NSIS (Nullsoft Scriptable Install System, zlib/libpng licence, which asks for no notice in a
+program built with it).
+
 ## Libraries the desktop app uses directly
 
 Exact versions are pinned in `Cargo.lock` and `ui/package-lock.json`. The full licence texts of these libraries and of
 what they depend on ship with the installer, as `THIRD-PARTY-NOTICES.txt` in the install folder: the installer's build
 makes it from the two lock files (`scripts/licences.mjs`, with `about.toml`) and it is never committed. It also carries the
-two word lists' notices above.
+two word lists' notices and the installer plugin's notice above.
 
 | Library | Version | Licence | Used for |
 |---|---|---|---|

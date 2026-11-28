@@ -1478,7 +1478,8 @@ Function PetalockMainShow
   ; the frame after the page exists: the page covers the whole client area, so the wizard's buttons are raised above it
   Call PetalockFrame
   Call PetalockChrome
-  ; what the person sees first: the checks have not run, so no problem
+  ; what the person sees first: the answer of the checks .onInit ran (PetalockCheckAll), kept in $PetalockProblem: the plan's rows when
+  ; it found none, and the blocked state (PetalockRender, below) when it found one
   ${If} $PetalockProblem == ""
     Call PetalockPlanRows
   ${EndIf}
@@ -1648,8 +1649,9 @@ FunctionEnd
 
 Function PetalockOnUninstallInstead
   ; The same version is installed: this opens the existing uninstaller (a full uninstall, never the update's /UPDATE one) and,
-  ; when it has finished, ends Setup, but only after the program and the entry are proved gone (the child's zero exit is not
-  ; proof: its denied delete of the program is not checked). Cancelled or failed, the window stays as it was.
+  ; when it has finished, ends Setup, but only after the program and the entry are proved gone (the child's zero exit is not taken
+  ; as proof either: the uninstaller stops, with the entry kept, when it cannot delete the program, but what Setup ends on is what
+  ; is really there). Cancelled or failed, the window stays as it was.
   ${If} $UpdateMode = 1
     Return
   ${EndIf}

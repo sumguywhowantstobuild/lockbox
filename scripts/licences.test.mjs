@@ -251,6 +251,10 @@ test("notices_carry_the_fonts_licences: the word lists' notices ride along from 
   assert.match(data, /EFF Large Wordlist/);
   assert.match(data, /Creative Commons Attribution 3\.0/);
   assert.match(data, /Copyright \(c\) 2013-2016 Pavol Rusnak/);
+  // The plugin built into Setup itself (tauri-bundler 2.10.5 fetches nsis_tauri_utils 0.5.3), whose MIT notice must
+  // travel with every copy of the installer.
+  assert.match(data, /nsis_tauri_utils\.dll` 0\.5\.3/);
+  assert.match(data, /Copyright \(c\) 2019 - 2022 Tauri Programme within The Commons Conservancy/);
   assert.ok(!data.includes("## Libraries the desktop app uses directly"), "the library table is not part of it");
   assert.throws(() => dataSection("# Third-party notices\n\nnothing here\n"), /heading/);
   assert.throws(() => dataSection(md.replace("EFF Large Wordlist", "A list")), /EFF/);

@@ -525,3 +525,192 @@ test("fix2_5_the_webview2_completion_carries_its_result_in_the_status_line_and_t
   assert.match(compare, /the product name alone/);
   for (const s of sentences) assert.ok(compare.includes(`'${s}'`), `the comparison knows the whole sentence: ${s}`);
 });
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Plan 5 end-of-plan review (installer findings 1, 3 and 6). Each rule is a function that returns the problems it finds, run on
+// the real file (must find none) and on mutants of it (each must find at least one), so a rule that matched nothing would fail.
+// ---------------------------------------------------------------------------------------------------------------------
+
+const PROGRAM = 'Delete "$INSTDIR\\${MAINBINARYNAME}.exe"';
+const PROGRAM_THERE = '${If} ${FileExists} "$INSTDIR\\${MAINBINARYNAME}.exe"';
+
+/** Finding 1: the program goes first and, still there, stops the uninstall before its uninstaller, its entry or anything else goes. */
+export function programFirstProblems(text) {
+  const problems = [];
+  const body = code(text).join("\n").match(/Section Uninstall\n([\s\S]*?)\nSectionEnd/)?.[1];
+  if (!body) return ["no Section Uninstall"];
+  const lines = body.split("\n").map((line) => line.trim());
+  const removal = (line) => /^(Delete|DeleteReg\w*|RMDir)\b/.test(line);
+  const del = lines.indexOf(PROGRAM);
+  if (del < 0) return ["the program is not deleted by name"];
+  if (lines.findIndex(removal) !== del) problems.push("something is removed before the program");
+  const clean = lines.indexOf("Call un.PetalockCleanOpen");
+  if (clean < 0 || clean > del) problems.push("open\\ is not cleaned before the program is deleted");
+  if (lines[del - 1] !== "program_again:") problems.push("Retry has no label to go back to, right before the delete");
+  if (lines[del + 1] !== PROGRAM_THERE) problems.push("the program is not looked for right after its delete");
+  // The block of that check, with its nested ifs.
+  let depth = 0;
+  let end = -1;
+  for (let i = del + 1; i < lines.length; i++) {
+    if (/^\$\{If\}/.test(lines[i])) depth++;
+    else if (lines[i] === "${EndIf}" && --depth === 0) { end = i; break; }
+  }
+  if (end < 0) return [...problems, "the check of the program is not a closed block"];
+  const block = lines.slice(del + 1, end + 1).join("\n");
+  if (!/^\$\{If\} \$\{Silent\}\n\$\{OrIf\} \$PassiveMode = 1\n!insertmacro PETALOCK_CONSOLE "[^"]+"\nAbort\n\$\{EndIf\}\n/m.test(block.split("\n").slice(1).join("\n"))) problems.push("a silent or passive run does not say so and stop");
+  if (!/\nMessageBox MB_RETRYCANCEL\|MB_ICONEXCLAMATION "[^"]+" \/SD IDCANCEL IDRETRY program_again\nAbort\n\$\{EndIf\}$/.test(block)) problems.push("a window does not offer Retry and Cancel (Cancel by default when nobody answers) and stop");
+  for (const later of ['Delete "$INSTDIR\\uninstall.exe"', 'DeleteRegKey HKCU "${UNINSTKEY}"']) {
+    const at = lines.indexOf(later);
+    if (at < 0) problems.push(`${later} is gone`);
+    else if (at < end) problems.push(`${later} comes before the check of the program`);
+  }
+  for (const line of lines.slice(0, del)) if (removal(line)) problems.push(`removed before the program: ${line}`);
+  return problems;
+}
+
+function mutate(text, from, to) {
+  assert.ok(text.includes(from), `the mutant's anchor is in the file: ${from}`);
+  return text.replace(from, to);
+}
+
+test("end_1_a_program_that_cannot_be_deleted_stops_the_uninstall_before_its_uninstaller_and_entry", () => {
+  const text = template();
+  assert.deepEqual(programFirstProblems(text), []);
+  const block = text.slice(text.indexOf("program_again:"), text.indexOf("  ; Delete resources"));
+  assert.ok(block.includes("${If} ${FileExists}") && block.includes("IDRETRY program_again"), "the block that was cut out is the check");
+  const mutants = {
+    "no check at all": mutate(text, block, `program_again:\n  ${PROGRAM}\n\n`),
+    "the check does not stop": mutate(text, "IDRETRY program_again\n    Abort\n  ${EndIf}", "IDRETRY program_again\n  ${EndIf}"),
+    "no default answer for a window nobody answers": mutate(text, " /SD IDCANCEL IDRETRY program_again", " IDRETRY program_again"),
+    "Retry goes nowhere": mutate(text, "IDRETRY program_again", "IDRETRY program_gone"),
+    "a passive run is asked": mutate(text, "${OrIf} $PassiveMode = 1\n      !insertmacro PETALOCK_CONSOLE \"The program is still", "${OrIf} 0 = 1\n      !insertmacro PETALOCK_CONSOLE \"The program is still"),
+    "the check names another file": mutate(text, PROGRAM_THERE, '${If} ${FileExists} "$INSTDIR\\uninstall.exe"'),
+    "the uninstaller goes first": mutate(text, `program_again:\n  ${PROGRAM}`, `Delete "$INSTDIR\\uninstall.exe"\n  program_again:\n  ${PROGRAM}`),
+    "the program is deleted after the entry": mutate(mutate(text, `program_again:\n  ${PROGRAM}`, "program_again:\n  ClearErrors"), '  ; Delete uninstaller\n  Delete "$INSTDIR\\uninstall.exe"', `  ${PROGRAM}\n  ; Delete uninstaller\n  Delete "$INSTDIR\\uninstall.exe"`),
+    "open\\ is cleaned after the program": mutate(mutate(text, "  Call un.PetalockCleanOpen\n", ""), "  ; Delete resources\n", "  Call un.PetalockCleanOpen\n  ; Delete resources\n"),
+  };
+  for (const [what, mutant] of Object.entries(mutants)) {
+    assert.notEqual(mutant, text, what);
+    assert.ok(programFirstProblems(mutant).length >= 1, `must be refused: ${what}`);
+  }
+  assert.deepEqual(programFirstProblems(""), ["no Section Uninstall"]);
+});
+
+test("end_1_the_words_of_the_stop_name_no_file_and_the_smoke_check_looks_for_them", () => {
+  const text = template();
+  const shown = text.slice(text.indexOf("program_again:"), text.indexOf("  ; Delete resources")).split("\n").filter((line) => /MessageBox|PETALOCK_CONSOLE/.test(line));
+  assert.equal(shown.length, 2, "a console line and a box");
+  for (const line of shown) {
+    const words = line.match(/"([^"]*)"/)[1].replace(/\$\\[rn]/g, "");
+    assert.ok(!/\$/.test(words), `no variable in the words: ${line.trim()}`);
+    assert.match(words, /program/);
+  }
+  assert.match(shown[1], /Retry/);
+  assert.match(shown[1], /Cancel stops here and leaves Petalock installed/);
+  assert.match(shown[1], /still in use/);
+  // The smoke check waits for the box by those words.
+  assert.match(check("a_program_that_cannot_be_removed_stops_the_uninstall_with_its_entry_kept"), /-like '\*program is still in use\*'/);
+});
+
+test("end_1_the_old_uninstaller_that_stops_is_reported_as_the_earlier_version_not_removed", () => {
+  const remove = section("PetalockRemoveOld");
+  // Setup reads the child's exit code (a stop is non-zero: Abort) and, if it cannot be read, a failure; and it looks for the program too.
+  assert.match(remove, /ExecWait '\$R1' \$0\n\s*BringToFront\n\s*\$\{IfThen\} \$\{Errors\} \$\{\|\} StrCpy \$0 2 \$\{\|\}\n\s*\$\{If\} \$0 <> 0\n\s*\$\{OrIf\} \$\{FileExists\} "\$INSTDIR\\\$\{MAINBINARYNAME\}\.exe"\n\s*!insertmacro PETALOCK_FAILED remove_old "The earlier version was not removed\."\n\s*Return\n\s*\$\{EndIf\}/);
+  // The failure page's advice is now true: the entry and the uninstaller are still there to run again.
+  assert.match(fn(ui(), "PetalockEndShow"), /\$\{ElseIf\} \$PetalockFailStep == "remove_old"\n\s*!insertmacro PETALOCK_LABEL \$PetalockHSlot1 \$PetalockInner 24 236 452 38 0x54000080 \$PetalockFBody "The earlier version could not be removed, so Setup stopped before installing\. Run Setup again once nothing is using it\."/);
+  // The same-version link still proves the program and the entry gone before it ends Setup.
+  assert.match(fn(ui(), "PetalockOnUninstallInstead"), /Its uninstaller was left in place, so you can run it again from Installed apps\./);
+});
+
+test("end_1_the_smoke_check_refuses_the_program_its_delete_and_proves_nothing_went_then_everything_does", () => {
+  const body = check("a_program_that_cannot_be_removed_stops_the_uninstall_with_its_entry_kept");
+  assert.ok(body.length > 500, "the check is there");
+  // The delete is refused (access denied on the file and on its folder's right to delete a child), not the file held open: a file held
+  // open at all makes Setup's own running check (which asks for write access with no sharing, and counts a sharing violation as a
+  // running Petalock) refuse first, and the new stop would never be reached.
+  assert.match(body, /Set-Deny \$program 'DE'/);
+  assert.match(body, /Set-Deny \$DefaultDir 'DC'/);
+  assert.match(body, /\} finally \{\n\s*Clear-Deny \$program\n\s*Clear-Deny \$DefaultDir\n\s*\}/, "the denial is always taken away again");
+  assert.ok(!/\[System\.IO\.File\]::Open\(/.test(body), "no handle is held");
+  assert.match(body, /\$uninstaller = Join-Path \$DefaultDir 'uninstall\.exe'/);
+  assert.match(body, /\$p = Start-Tracked \$uninstaller @\('\/S', "_\?=\$DefaultDir"\)/);
+  assert.match(body, /@\('\/S', '\/UPDATE', "_\?=\$DefaultDir"\)/);
+  assert.equal((body.match(/if \(\$\w*[cC]ode -eq 0\) \{ throw/g) ?? []).length >= 2, true, "both silent runs must exit non-zero");
+  assert.match(body, /Assert-Unchanged \$installed \(Get-InstallState \$DefaultDir\)/);
+  assert.match(body, /\[System\.IO\.File\]::Exists\(\$program\)/);
+  assert.match(body, /\[System\.IO\.File\]::Exists\(\$uninstaller\)/);
+  assert.match(body, /Get-UninstallValue 'DisplayName'/);
+  assert.match(body, /if \(\$said\.Length -eq 0\) \{ throw/, "the output check fails on nothing");
+  assert.match(body, /Assert-NamesNothing \$said @\(\$DefaultDir, 'petalock\.exe', 'uninstall\.exe'\)/);
+  assert.match(body, /Uninstall-Interactive \$DefaultDir \$false 'Cancel'/);
+  // Released, the same uninstall removes the program, its uninstaller, the folder and the entry.
+  const release = body.indexOf("Clear-Deny $program");
+  const again = body.indexOf("Uninstall-AsWindowsDoes $DefaultDir");
+  assert.ok(release > 0 && again > release, "the denial is taken away, then the uninstall runs again");
+  const after = body.slice(again);
+  assert.match(after, /Exists\(\$program\)/);
+  assert.match(after, /Exists\(\$DefaultDir\)|Directory\]::Exists\(\$DefaultDir\)/);
+  assert.match(after, /Get-UninstallValue 'DisplayName'/);
+  // It is one of the named checks, in the order the script runs them.
+  assert.match(smoke(), /"a_refused_registration_keeps_everything_but_the_files_this_attempt_wrote",\n\s*# Plan 5 end-of-plan review\.\n\s*"a_program_that_cannot_be_removed_stops_the_uninstall_with_its_entry_kept"\n\)/);
+});
+
+/** Finding 3: the old uninstaller an update runs shows no confirm page and no finish page (Setup shows its own receipt). */
+export function updateUninstallerPagesProblems(text) {
+  const problems = [];
+  const lines = code(text).join("\n");
+  const skip = lines.match(/Function un\.SkipIfPassiveOrUpdate\n([\s\S]*?)\nFunctionEnd/)?.[1] ?? "";
+  if (!/^\s*\$\{If\} \$PassiveMode = 1\n\s*\$\{OrIf\} \$UpdateMode = 1\n\s*Abort\n\s*\$\{EndIf\}$/.test(skip)) problems.push("the skip does not leave out the page for a passive run and for /UPDATE");
+  if (!/!define MUI_PAGE_CUSTOMFUNCTION_PRE un\.SkipIfPassiveOrUpdate\n!insertmacro MUI_UNPAGE_CONFIRM/.test(lines)) problems.push("the confirm page is not skipped by it");
+  if (!/!define MUI_PAGE_CUSTOMFUNCTION_PRE un\.SkipIfPassiveOrUpdate\n!define MUI_FINISHPAGE_TITLE [^\n]*\n!define MUI_FINISHPAGE_TEXT [^\n]*\n!insertmacro MUI_UNPAGE_FINISH/.test(lines)) problems.push("the finish page is not skipped by it");
+  if (/un\.SkipIfPassive\b/.test(lines)) problems.push("a page still uses the skip that ignores /UPDATE");
+  return problems;
+}
+
+test("end_3_the_old_uninstaller_an_update_runs_shows_neither_its_confirm_page_nor_its_finish_page", () => {
+  const text = template();
+  assert.deepEqual(updateUninstallerPagesProblems(text), []);
+  const mutants = {
+    "the finish page is shown under /UPDATE": mutate(text, "!define MUI_PAGE_CUSTOMFUNCTION_PRE un.SkipIfPassiveOrUpdate\n!define MUI_FINISHPAGE_TITLE", "!define MUI_PAGE_CUSTOMFUNCTION_PRE un.SkipIfPassive\n!define MUI_FINISHPAGE_TITLE"),
+    "the confirm page is shown under /UPDATE": mutate(text, "!define MUI_PAGE_CUSTOMFUNCTION_PRE un.SkipIfPassiveOrUpdate\n!insertmacro MUI_UNPAGE_CONFIRM", "!define MUI_PAGE_CUSTOMFUNCTION_PRE un.SkipIfPassive\n!insertmacro MUI_UNPAGE_CONFIRM"),
+    "the skip forgets /UPDATE": mutate(text, "${OrIf} $UpdateMode = 1\n    Abort", "${OrIf} 0 = 1\n    Abort"),
+    "the skip forgets a passive run": mutate(text, "${If} $PassiveMode = 1\n  ${OrIf} $UpdateMode = 1\n    Abort", "${If} 0 = 1\n  ${OrIf} $UpdateMode = 1\n    Abort"),
+    "the skip is never defined": mutate(text, "Function un.SkipIfPassiveOrUpdate", "Function un.SkipSomething"),
+  };
+  for (const [what, mutant] of Object.entries(mutants)) assert.ok(updateUninstallerPagesProblems(mutant).length >= 1, `must be refused: ${what}`);
+  assert.ok(updateUninstallerPagesProblems("").length >= 3, "an empty file is refused, not passed");
+  // A full uninstall (no /UPDATE, not passive) is untouched: its box and its finish page stay (the guards inside them are unchanged).
+  assert.match(text, /!define MUI_FINISHPAGE_TITLE "Petalock was uninstalled"/);
+  assert.match(text, /un\.ConfirmShow/);
+});
+
+test("end_3_the_smoke_check_sees_no_page_of_the_old_uninstaller_under_update_and_both_pages_in_a_full_uninstall", () => {
+  const body = check("interactive_upgrade_keeps_start_with_windows");
+  assert.equal((body.match(/\$ConfirmPage = @\{ Seen = 0; Box = 0; Finish = 0 \}/g) ?? []).length, 3, "every run starts its counts at zero");
+  assert.match(body, /if \(\$uninstallFirst\) \{ Assert-NoUninstallerPages \$ConfirmPage \$what \}/);
+  assert.match(body, /Assert-NoUninstallerPages \$ConfirmPage \$what\n/);
+  assert.match(body, /Assert-ConfirmPageBox \$ConfirmPage \$true "the same-version 'Uninstall Petalock instead'"/);
+  const none = func("Assert-NoUninstallerPages");
+  assert.match(none, /\$Seen\.Seen -ne 0\) \{ throw/);
+  assert.match(none, /\$Seen\.Finish -ne 0\) \{ throw/);
+  // The control: a full uninstall must show the page the reader looks for (a reader that finds nothing would pass the rest).
+  assert.match(func("Assert-ConfirmPageBox"), /\$WithBox -and \$Seen\.Finish -ne 1\) \{ throw/);
+  const reader = func("New-ConfirmPageReader");
+  assert.match(reader, /\$ConfirmPage\.Finish\+\+/);
+  assert.match(reader, /\*Petalock was uninstalled\*/);
+  // Its words are the page's own title.
+  assert.ok(template().includes('!define MUI_FINISHPAGE_TITLE "Petalock was uninstalled"'));
+});
+
+test("end_6_the_comments_say_what_the_code_does", () => {
+  const head = template().split("\n").slice(0, 45).join("\n");
+  assert.ok(!/folder page|both install sections/.test(head), "the template's list names no page and no section that is gone");
+  assert.match(head, /the three sections/);
+  assert.ok(!/from the folder page/.test(hooks()), "the preflight's comment names no page that is gone");
+  assert.ok(!/the checks have not run/.test(ui()), "the first page's comment does not say the checks have not run");
+  assert.match(ui(), /what the person sees first: the answer of the checks \.onInit ran/);
+  const running = smoke().match(/# Plan 5, Task 9e: the window of an installer this run started \(\$Process\), with Petalock running\.[\s\S]*?\nfunction Wait-RunningPage/)?.[0] ?? "";
+  assert.ok(running.length > 100, "the helper's comment is found");
+  assert.ok(!/only after\s+# its default button is pressed|says so only after/.test(running), "the helper's comment does not say the page shows it only after a press");
+  assert.match(running, /as soon as it says/);
+});

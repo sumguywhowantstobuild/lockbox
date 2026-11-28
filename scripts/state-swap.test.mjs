@@ -29,7 +29,7 @@ import * as state from "../e2e/lib/state.mjs";
 
 const MODULE = fileURLToPath(new URL("../e2e/lib/state.mjs", import.meta.url));
 const KEYS = state.LOCATION_KEYS;
-const SENTINEL = ".lockbox-test-swap.json";
+const SENTINEL = ".petalock-test-swap.json";
 const RUN = "t1";
 
 // ---- disposable worlds --------------------------------------------------------------------------------------------
@@ -369,7 +369,7 @@ test("swap_in_sets_aside_with_a_sentinel", () =>
       }
       assert.ok(!existsSync(world.locations[key]), `${key}: the place is empty, the app starts fresh`);
       const sentinel = JSON.parse(readFileSync(join(world.aside(key), SENTINEL), "utf8"));
-      assert.deepEqual(sentinel, { lockboxTestSwap: 1, run: RUN, key });
+      assert.deepEqual(sentinel, { petalockTestSwap: 1, run: RUN, key });
       const aside = snapshot(world.aside(key));
       assert.ok(aside.delete(SENTINEL));
       compared += assertSame(originals[key], aside, `${key} set aside`);
@@ -672,7 +672,7 @@ test("recover_never_deletes_what_it_did_not_create", () => {
       if (testStateInPlace) simulateTestRun(world);
       const sentinelFile = join(world.aside("state"), SENTINEL);
       if (tamper === "removed") unlinkSync(sentinelFile);
-      else writeFileSync(sentinelFile, `${JSON.stringify({ lockboxTestSwap: 1, run: "other", key: "state" })}\n`);
+      else writeFileSync(sentinelFile, `${JSON.stringify({ petalockTestSwap: 1, run: "other", key: "state" })}\n`);
       const asideBefore = snapshot(world.aside("state"));
 
       assert.throws(
@@ -696,7 +696,7 @@ test("recover_never_deletes_what_it_did_not_create", () => {
       for (const key of KEYS.filter((k) => k !== "state")) assertSame(originals[key], snapshot(world.locations[key]), `${key} was put back`);
 
       // once a person restores the sentinel, recovery finishes
-      writeFileSync(sentinelFile, `${JSON.stringify({ lockboxTestSwap: 1, run: RUN, key: "state" })}\n`);
+      writeFileSync(sentinelFile, `${JSON.stringify({ petalockTestSwap: 1, run: RUN, key: "state" })}\n`);
       world.recover();
       assertSame(originals.state, snapshot(world.locations.state), "state after the sentinel was restored");
       assert.ok(!existsSync(world.journal));
@@ -727,7 +727,7 @@ test("recover refuses a journal it cannot trust, renaming nothing", () => {
     ["another key order", (j) => JSON.stringify({ ...j, locations: [...j.locations].reverse() })],
     ["a missing identity", (j) => JSON.stringify({ ...j, locations: j.locations.map(({ identity, ...rest }) => rest) })],
     ["an identity of another shape", (j) => JSON.stringify({ ...j, locations: j.locations.map((l) => (l.identity ? { ...l, identity: { dev: "x", ino: 1 } } : l)) })],
-    ["the previous journal version", (j) => JSON.stringify({ ...j, lockboxTestSwapJournal: 2 })],
+    ["the previous journal version", (j) => JSON.stringify({ ...j, petalockTestSwapJournal: 2 })],
     ["a redirect on the vaults", (j) => JSON.stringify({ ...j, locations: j.locations.map((l) => (l.key === "vaults" ? { ...l, redirect: FAMILY } : l)) })],
     ["a redirect with a path in it", (j) => JSON.stringify({ ...j, locations: j.locations.map((l) => (l.key === "state" ? { ...l, redirect: "..\\x" } : l)) })],
     ["a shown-through folder on an absent original", (j) => JSON.stringify({ ...j, locations: j.locations.map((l) => (l.key === "state" ? { key: l.key, path: l.path, original: "absent", shownThrough: { dev: "1", ino: "2" } } : l)) })],
@@ -809,7 +809,7 @@ test("an unrelated file at the old temp name of the journal is never overwritten
 // ---- one command at a time ---------------------------------------------------------------------------------------
 
 const lockFile = (world) => `${world.journal}.lock`;
-const writeLock = (world, pid) => writeFileSync(lockFile(world), `${JSON.stringify({ lockboxTestSwapLock: 1, pid })}\n`);
+const writeLock = (world, pid) => writeFileSync(lockFile(world), `${JSON.stringify({ petalockTestSwapLock: 1, pid })}\n`);
 
 test("a lock held by a live process refuses swap in, swap back and recover, renaming nothing", () =>
   withWorld({}, (world) => {
@@ -854,7 +854,7 @@ test("a lock whose process is gone is taken over, and the result says so", () =>
 
 test("a lock that can't be read is never deleted, and the command refuses", () =>
   withWorld({}, (world) => {
-    for (const text of ["not json", JSON.stringify({ lockboxTestSwapLock: 1, pid: "12" }), JSON.stringify({ lockboxTestSwapLock: 1, pid: -3 }), "{}"]) {
+    for (const text of ["not json", JSON.stringify({ petalockTestSwapLock: 1, pid: "12" }), JSON.stringify({ petalockTestSwapLock: 1, pid: -3 }), "{}"]) {
       writeFileSync(lockFile(world), text);
       const before = snapshot(world.root);
       refusedWith(() => world.swapIn(), /lock file beside the journal is not readable/);
@@ -1010,14 +1010,14 @@ test("a_private_copy_seen_through_a_link_is_accepted_and_round_trips_byte_for_by
 
     const entered = world.swapIn();
     const journal = journalOf(world);
-    assert.equal(journal.lockboxTestSwapJournal, 3);
+    assert.equal(journal.petalockTestSwapJournal, 3);
     assert.deepEqual(
       journal.locations.map((l) => [l.key, l.redirect]),
       [["state", FAMILY], ["appLocal", FAMILY], ["appRoaming", FAMILY], ["vaults", undefined]],
     );
     for (const key of ["state", "appLocal", "appRoaming"]) {
       assert.ok(entered.lines.some((line) => line.startsWith(`${key}: the ${FAMILY} app's private copy`)), `${key} named in swap in`);
-      assert.deepEqual(JSON.parse(readFileSync(join(world.aside(key), SENTINEL), "utf8")), { lockboxTestSwap: 1, run: RUN, key });
+      assert.deepEqual(JSON.parse(readFileSync(join(world.aside(key), SENTINEL), "utf8")), { petalockTestSwap: 1, run: RUN, key });
       assert.ok(!existsSync(world.locations[key]), `${key}: the place is empty`);
     }
     assert.ok(!entered.lines.find((line) => line.startsWith("vaults:")).includes("private copy"));

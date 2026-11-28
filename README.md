@@ -148,6 +148,7 @@ npm --prefix ui run build    # before the UI tests: some of them read the built 
 npm --prefix ui test
 cargo test -p petalock-desktop --locked --features custom-protocol --test ipc   # after the UI build, which it embeds
 node --test "scripts/*.test.mjs"   # the scripts' own tests
+node scripts/shipped-page-check.mjs   # the shipped page holds no code from the build tools whose advisories the scan accepts
 node scripts/scan.mjs        # security scan; needs gitleaks, semgrep and osv-scanner, see docs/SETUP.md
 ```
 

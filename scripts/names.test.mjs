@@ -34,11 +34,9 @@ export const WORDS = [
   [/lockbox (?:header mac v1|backup manifest v1|recovery key v1)/g, "format label"],
   // The key-derivation timing run's fixed input, never stored; kept as it was with the labels.
   [/lockbox calibration/g, "timing run's fixed input"],
-  // Backups made before the rename end in .lockbox-backup, and the app still opens them.
+  // Backups made before the rename end in .lockbox-backup. No picker offers that ending (no migration ships: nobody outside
+  // this PC ever ran the app); such a backup opens once renamed to .petalock-backup, since the engine reads by content.
   [/lockbox-backup/gi, "the old backup extension"],
-  // A test-state swap's marker file and journal keys: a swap left mid-way under the old names must still be found and undone.
-  [/\.lockbox-test-swap\.json/g, "test-state swap marker"],
-  [/lockboxTestSwap(?:Journal|Lock)?/g, "test-state swap marker"],
   // The dated design spec keeps its file name and headings (history), so links to it keep them too.
   [/2026-10-07-lockbox-design/g, "dated design spec's file name"],
   [/what-reviewed-means-for-lockbox/g, "a heading of the dated design spec"],

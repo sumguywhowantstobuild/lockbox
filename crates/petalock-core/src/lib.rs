@@ -266,6 +266,16 @@ mod surface {
 mod tests {
     #[test]
     fn version_matches_cargo() {
-        assert_eq!(super::version(), "0.1.0");
+        // The workspace's `[workspace.package]` version, read from its file, so a candidate's version change (0.1.1,
+        // 0.1.2 and so on) is checked rather than refused by a fixed string.
+        let workspace = include_str!("../../../Cargo.toml");
+        let version = workspace
+            .lines()
+            .skip_while(|line| line.trim() != "[workspace.package]")
+            .find_map(|line| line.trim().strip_prefix("version = "))
+            .expect("the workspace Cargo.toml names a version under [workspace.package]")
+            .trim_matches('"');
+        assert!(!version.is_empty());
+        assert_eq!(super::version(), version);
     }
 }

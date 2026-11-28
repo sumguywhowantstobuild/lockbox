@@ -58,7 +58,9 @@ $AllTests = @(
   "interactive_update_mode_offers_no_uninstall_choice",
   # The second fix round.
   "a_completed_step_puts_words_in_the_status_line",
-  "a_refused_registration_keeps_everything_but_the_files_this_attempt_wrote"
+  "a_refused_registration_keeps_everything_but_the_files_this_attempt_wrote",
+  # Plan 5 end-of-plan review.
+  "a_program_that_cannot_be_removed_stops_the_uninstall_with_its_entry_kept"
 )
 
 # Plan 5, Task 4: the checks that need two versions of the same code, -Installer the earlier and -Upgrade the later.
@@ -750,9 +752,10 @@ function Wait-PageText($Process, [string]$Like, [int]$Seconds = 90) {
   throw "the installer window never showed words like: $Like"
 }
 
-# Plan 5, Task 9e: the window of an installer this run started ($Process), with Petalock running. The page says so only after
-# its default button is pressed (the checks run then), so the first page is waited for, its default button pressed once, and
-# the window that then says "Close Petalock, then try again." is returned (its default button is Retry, its other one Cancel).
+# Plan 5, Task 9e: the window of an installer this run started ($Process), with Petalock running. It is returned
+# as soon as it says "Close Petalock, then try again." (its default button is Retry, its other one Cancel). It can say so at once
+# (.onInit's checks have already run, and the first page shows their answer) or after the checks run again when the first page is
+# left, so while the first page still shows "What Setup will do", its default button is pressed once (after a second, so it is ready).
 function Wait-RunningPage($Process, [int]$Seconds = 90) {
   $deadline = (Get-Date).AddSeconds($Seconds)
   $pressed = $false
@@ -1197,13 +1200,15 @@ function Assert-ReinstallPage($Page) {
 }
 
 # Plan 5, Task 4b fix round (review finding 3). A page reader for Drive-Wizard's -OnPage that notes the uninstaller's confirm page
-# (the page whose own Next button reads 'Uninstall') and whether it offers the "Delete the application data" box. It fills the
-# hashtable $ConfirmPage the caller made (found by name through the caller's scope, as Read-ReinstallPage's reader does).
+# (the page whose own Next button reads 'Uninstall') and whether it offers the "Delete the application data" box, and (end-of-plan
+# review finding 3) its finish page, the one titled "Petalock was uninstalled". It fills the hashtable $ConfirmPage the caller made
+# (found by name through the caller's scope, as Read-ReinstallPage's reader does).
 function New-ConfirmPageReader {
   return {
     param($d)
     $next = [SmokeDlg]::Item($d.Handle, 1)
     if ($next -eq [IntPtr]::Zero) { return }
+    if ((Get-DialogText $d) -like '*Petalock was uninstalled*') { $ConfirmPage.Finish++ }
     if (([SmokeDlg]::Text($next) -replace '&', '') -ne 'Uninstall') { return }
     $ConfirmPage.Seen++
     if (@($d.Kids | Where-Object { $_.Class -eq 'Button' -and $_.Text -like 'Delete the application data*' }).Count -gt 0) { $ConfirmPage.Box++ }
@@ -1216,6 +1221,16 @@ function Assert-ConfirmPageBox($Seen, [bool]$WithBox, [string]$What) {
   if ($Seen.Seen -ne 1) { throw "$What : the uninstaller's confirm page was seen $($Seen.Seen) times, not once" }
   if ($WithBox -and $Seen.Box -ne 1) { throw "$What : the full uninstall's confirm page does not offer 'Delete the application data'" }
   if (-not $WithBox -and $Seen.Box -ne 0) { throw "$What : the uninstaller run with /UPDATE offers 'Delete the application data', which it would ignore" }
+  # The control for the reader's other page: a full uninstall ends on its finish page, so a reader that cannot see it fails here.
+  if ($WithBox -and $Seen.Finish -ne 1) { throw "$What : the full uninstall's finish page ('Petalock was uninstalled') was seen $($Seen.Finish) times, not once" }
+}
+
+# The old uninstaller an update runs (/UPDATE, the person already chose to remove first, and Setup shows its own receipt) shows
+# neither its confirm page nor its finish page: "Petalock was uninstalled" would wait for a click in the middle of the update.
+# Its work is proved by the caller (open\ is gone); the control that the reader sees both pages is Assert-ConfirmPageBox's.
+function Assert-NoUninstallerPages($Seen, [string]$What) {
+  if ($Seen.Seen -ne 0) { throw "$What : the old uninstaller's confirm page was shown $($Seen.Seen) times under /UPDATE" }
+  if ($Seen.Finish -ne 0) { throw "$What : the old uninstaller's 'Petalock was uninstalled' page was shown $($Seen.Finish) times under /UPDATE" }
 }
 
 # Plan 5, Task 4b. -First installed silently (the caller has reset the world), with the made-up state, made-up files in the
@@ -2088,33 +2103,35 @@ $Checks["uninstall_after_upgrade_is_clean"] = {
 # the same version, whose 'Uninstall Petalock' is the person asking for a full uninstall: the Run value goes.
 $Checks["interactive_upgrade_keeps_start_with_windows"] = {
   Assert-VersionPair
-  # The confirm page of the old uninstaller is read on each uninstall-first run (review finding 3): under /UPDATE it must not offer
-  # 'Delete the application data' (it would ignore the box), and the planted app-data folders survive; the same-version full
-  # uninstall is the control that does offer it (a reader that finds no box where one is must fail).
+  # The pages of the old uninstaller are read on each uninstall-first run (review finding 3, and the end-of-plan review's finding 3):
+  # under /UPDATE it shows neither its confirm page (so no 'Delete the application data' box, which it would ignore) nor its
+  # "Petalock was uninstalled" page (which would wait for a click in the middle of the update), and the planted app-data folders
+  # survive; the same-version full uninstall is the control that does show both (a reader that finds nothing where there is
+  # something must fail).
   $confirmReader = New-ConfirmPageReader
   foreach ($uninstallFirst in @($false, $true)) {
     $what = if ($uninstallFirst) { "the upgrade from $FromVersion to $ToVersion that uninstalls first" } else { "the upgrade from $FromVersion to $ToVersion with the page's default choice" }
     Reset-World
-    $ConfirmPage = @{ Seen = 0; Box = 0 }
+    $ConfirmPage = @{ Seen = 0; Box = 0; Finish = 0 }
     $r = Invoke-WindowOver $Installer $Upgrade $uninstallFirst $confirmReader
     Assert-OneInstallation $DefaultDir $ToVersion
     if ((Get-RegValue $RunKey 'Petalock') -ne $r.Run) { throw "$what changed or removed the Run\Petalock value" }
     Assert-WindowKept $r $uninstallFirst $what
-    if ($uninstallFirst) { Assert-ConfirmPageBox $ConfirmPage $false $what }
-    elseif ($ConfirmPage.Seen -ne 0) { throw "$what : an uninstaller's confirm page was shown, so something uninstalled" }
+    if ($uninstallFirst) { Assert-NoUninstallerPages $ConfirmPage $what }
+    elseif ($ConfirmPage.Seen -ne 0 -or $ConfirmPage.Finish -ne 0) { throw "$what : an uninstaller's page was shown, so something uninstalled" }
     Write-Log "  ${what}: the Run value, state and app data kept"
   }
   Reset-World
-  $ConfirmPage = @{ Seen = 0; Box = 0 }
+  $ConfirmPage = @{ Seen = 0; Box = 0; Finish = 0 }
   $r = Invoke-WindowOver $Upgrade $Installer $true $confirmReader
   Assert-OneInstallation $DefaultDir $FromVersion
   $what = "the downgrade from $ToVersion to $FromVersion that uninstalls first"
   if ((Get-RegValue $RunKey 'Petalock') -ne $r.Run) { throw "$what changed or removed the Run\Petalock value" }
   Assert-WindowKept $r $true $what
-  Assert-ConfirmPageBox $ConfirmPage $false $what
-  Write-Log "  ${what}: the Run value, state and app data kept, no app-data box offered"
+  Assert-NoUninstallerPages $ConfirmPage $what
+  Write-Log "  ${what}: the Run value, state and app data kept, none of the old uninstaller's pages shown"
   Reset-World
-  $ConfirmPage = @{ Seen = 0; Box = 0 }
+  $ConfirmPage = @{ Seen = 0; Box = 0; Finish = 0 }
   $r = Invoke-WindowOver $Installer $Installer $true $confirmReader
   # Plan 5, Task 9e: the same version's link "Uninstall Petalock instead" opens the existing uninstaller and Setup ends when it has
   # finished: nothing is installed afterwards (the earlier page uninstalled and then went on to install again).
@@ -2454,6 +2471,71 @@ $Checks["a_refused_registration_keeps_everything_but_the_files_this_attempt_wrot
   Assert-OneInstallation $DefaultDir $want
   if (-not [System.IO.File]::Exists($added)) { throw 'the retried update removed the added file' }
   Write-Log '  update in place, retried with the right back: done'
+}
+
+# Plan 5 end-of-plan review, finding 1: the uninstall deletes the program first, and a program that cannot be deleted stops it before
+# its uninstaller, its entry in Installed apps or anything else goes (so "run it again from Installed apps" works, and a later Setup
+# sees the recorded installation, not a folder that holds a program and no entry). The delete is made to fail by access denied on
+# the program and on its folder's right to delete a child, never by holding the file open: a file held open at all is refused
+# earlier, by Setup's own check for a running Petalock (it asks for write access with no sharing), and would not reach this stop.
+$Checks["a_program_that_cannot_be_removed_stops_the_uninstall_with_its_entry_kept"] = {
+  Reset-World
+  Install-Good $DefaultDir
+  $program = Join-Path $DefaultDir 'petalock.exe'
+  $uninstaller = Join-Path $DefaultDir 'uninstall.exe'
+  $installed = Get-InstallState $DefaultDir
+  $name = Get-UninstallValue 'DisplayName'
+  if (-not $name) { throw 'the install left no entry in Installed apps to keep' }
+  $assertKept = {
+    param($what)
+    Assert-Unchanged $installed (Get-InstallState $DefaultDir) "the program, its uninstaller and the entry after $what"
+    if (-not [System.IO.File]::Exists($program)) { throw "petalock.exe is gone after $what" }
+    if (-not [System.IO.File]::Exists($uninstaller)) { throw "uninstall.exe is gone after $what" }
+    if ((Get-UninstallValue 'DisplayName') -ne $name) { throw "the entry in Installed apps is gone or changed after $what" }
+  }
+  Set-Deny $program 'DE'
+  try {
+    Set-Deny $DefaultDir 'DC'
+    $logFile = Join-Path $LogDir 'uninstall-stuck-output.txt'
+    $errFile = Join-Path $LogDir 'uninstall-stuck-error.txt'
+    $p = Start-Tracked $uninstaller @('/S', "_?=$DefaultDir") @{ RedirectStandardOutput = $logFile; RedirectStandardError = $errFile }
+    if (-not $p.WaitForExit(120000)) { try { $p.Kill() } catch { }; throw 'the silent uninstall with a program that cannot be deleted did not finish' }
+    $stopCode = Get-ExitCode $p
+    if ($stopCode -eq 0) { throw 'the silent uninstall with a program that cannot be deleted exited 0' }
+    & $assertKept 'the silent uninstall that stopped'
+    $said = ''
+    foreach ($f in @($logFile, $errFile)) { if ([System.IO.File]::Exists($f)) { $said += [System.IO.File]::ReadAllText($f) } }
+    Assert-NamesNothing $said @($DefaultDir, 'petalock.exe', 'uninstall.exe') 'the silent uninstall''s output'
+    if ($said.Length -eq 0) { throw 'the silent uninstall that stopped said nothing: the check that it names no file would pass on nothing' }
+    Write-Log "  silent, a program that cannot be deleted: exit $stopCode, the program, its uninstaller and the entry kept, output of $($said.Length) characters names no file"
+
+    # The same with /UPDATE (the switch the old uninstaller an update runs is given): it stops and exits non-zero, which Setup reads
+    # as "The earlier version was not removed." and so keeps the earlier install.
+    $p = Start-Tracked $uninstaller @('/S', '/UPDATE', "_?=$DefaultDir")
+    if (-not $p.WaitForExit(120000)) { try { $p.Kill() } catch { }; throw 'the silent uninstall with /UPDATE and a program that cannot be deleted did not finish' }
+    $updateCode = Get-ExitCode $p
+    if ($updateCode -eq 0) { throw 'the silent uninstall with /UPDATE and a program that cannot be deleted exited 0' }
+    & $assertKept 'the silent /UPDATE uninstall that stopped'
+    Write-Log "  silent with /UPDATE, a program that cannot be deleted: exit $updateCode, all of it kept"
+
+    # Interactive: the box says the program is in use, with Retry and Cancel; Cancel leaves everything.
+    $result = Uninstall-Interactive $DefaultDir $false 'Cancel'
+    $words = ($result.Texts | Where-Object { $_ -like '*program is still in use*' }) -join "`n"
+    if (-not $words) { Save-Screen 'stuck-no-box'; throw "the interactive uninstall with a program that cannot be deleted showed no box that says it is still in use; it showed: $($result.Texts -join ' | ')" }
+    Assert-NamesNothing $words @($DefaultDir, 'petalock.exe', 'uninstall.exe') 'the box'
+    & $assertKept 'Cancel'
+    Write-Log '  interactive, a program that cannot be deleted: the box said so, Cancel left everything'
+  } finally {
+    Clear-Deny $program
+    Clear-Deny $DefaultDir
+  }
+  # The denial taken away: the uninstall run again removes the program, its uninstaller, the folder and the entry.
+  Uninstall-AsWindowsDoes $DefaultDir
+  if ([System.IO.File]::Exists($program)) { throw 'petalock.exe is still there after the uninstall that could delete it' }
+  if ([System.IO.File]::Exists($uninstaller)) { throw 'uninstall.exe is still there after the uninstall that could delete it' }
+  if ([System.IO.Directory]::Exists($DefaultDir)) { throw 'the install folder is still there after the uninstall that could delete the program' }
+  if (Get-UninstallValue 'DisplayName') { throw 'the entry in Installed apps is still there after the uninstall that could delete the program' }
+  Write-Log '  after the denial was taken away: the program, its uninstaller, the folder and the entry are gone'
 }
 
 # Finding 4: remove-first with an added file in the program folder is refused while the working install is intact (the page says so

@@ -55,7 +55,11 @@ interface DrawingProps {
   className?: string;
 }
 
-/** The two-line mark beside a vault's name. Its petals are shallow, so up to nine points stay clear at 36 pixels. */
+/**
+ * The two-line mark beside a vault's name, at 36 pixels in the unlock heading. Its petals are shallow: up to nine points
+ * (the first five vaults, which start at five) were checked clear at that size; a later vault's mark is denser, and the
+ * name beside it always says which vault it is.
+ */
 export function VaultMark({ points, className }: DrawingProps) {
   const d = lines(points, 2, 1, () => 0.17, (index) => index * Math.PI);
   return (

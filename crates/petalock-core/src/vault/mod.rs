@@ -1242,7 +1242,7 @@ mod tests {
     /// left unknown, and (opened with the password) a recovery slot the copies disagree on, which this write would
     /// copy over.
     #[test]
-    fn the_combined_write_refuses_in_the_guards_words_before_deriving() {
+    fn the_combined_write_refuses_in_the_guards_words_before_writing() {
         // A failed write whose read-back finds no `vault.json` leaves the header state unknown: reopen first.
         let (_parent, mut vault, _recovery, _before) = changed_header_opened_with_the_key();
         let dir = vault.dir().to_path_buf();

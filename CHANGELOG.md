@@ -3,9 +3,11 @@
 All notable changes to Petalock are written here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and Petalock uses [Semantic Versioning](https://semver.org/).
 
-Release candidates are plain versions (0.1.1, 0.1.2 and so on), each published as a GitHub pre-release. The first
-candidate that passes its walk-through is promoted to the release unchanged: the same file, never rebuilt. When that
-happens, "Unreleased" below takes the release's version and date. How a release is made is in
+Release candidates are plain versions (0.1.1, 0.1.2 and so on), each published as a GitHub pre-release. Each candidate's
+version commit gives it a section here, named by its version and marked as a candidate; what changed since the
+candidate before it goes in that section, and "Unreleased" keeps only what has merged since. The first candidate that
+passes its walk-through is promoted to the release unchanged (the same file, never rebuilt), and its section is then
+dated and marked as the release. How a release is made is in
 [RELEASING.md](RELEASING.md), and each release's evidence is in its record in [docs/releases/](docs/releases/).
 
 ## [Unreleased]

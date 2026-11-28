@@ -102,7 +102,9 @@ test state swapped in as above. It refuses to start while any `petalock.exe` run
    value `pv` under `HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}`),
    check its download against Microsoft's publisher signature, and pass it as `node scripts/e2e.mjs --edgedriver
    <full path to msedgedriver.exe>` (or set `PETALOCK_EDGEDRIVER`). The run refuses, naming both versions, when they
-   differ. On the GitHub job the image's own driver (`EDGEWEBDRIVER`) is used.
+   differ. The GitHub job does the same: it reads the runner's WebView2 version, downloads the matching driver, checks
+   Microsoft's signature on it (`scripts/webview-driver.mjs`) and passes it as `PETALOCK_EDGEDRIVER`. Only the site's
+   browser tests use the runner image's own driver (`EDGEWEBDRIVER`), which matches the image's Edge browser.
 
 The specs in `e2e/specs` are the design's end-to-end paths: `thin-path` (first-time setup, lock, unlock, add a login,
 copy, auto-lock), `save-copied-key` (a copied key saved through the real save shortcut with every vault locked),

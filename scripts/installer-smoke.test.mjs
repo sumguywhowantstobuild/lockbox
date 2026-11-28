@@ -48,6 +48,8 @@ export const NAMED = [
   // The second fix round.
   "a_completed_step_puts_words_in_the_status_line",
   "a_refused_registration_keeps_everything_but_the_files_this_attempt_wrote",
+  // Plan 5 end-of-plan review.
+  "a_program_that_cannot_be_removed_stops_the_uninstall_with_its_entry_kept",
 ];
 
 /** Plan 5, Task 4: the checks that need two versions of the same code (-Installer the earlier, -Upgrade the later). */
@@ -364,7 +366,23 @@ test("uninstall_says_where_vaults_stay", () => {
   assert.ok(idx > 0, "an uninstaller finish page exists");
   assert.ok(text.lastIndexOf("MUI_FINISHPAGE_TEXT", idx) > text.lastIndexOf("MUI_UNPAGE_INSTFILES", idx), "the words are set for the uninstaller's finish page");
   assert.ok(text.indexOf(sentence) < idx);
-  assert.match(text, /un\.SkipIfPassive/);
+  assert.match(text, /un\.SkipIfPassiveOrUpdate/);
+});
+
+// Plan 5 end-of-plan review, finding 1 (the rule itself, with its mutants, is in installer-fix-round.test.mjs): the uninstall deletes
+// the program first and, if it is still there, stops before its uninstaller or its entry go; the smoke check makes the delete fail.
+test("a_program_that_cannot_be_removed_stops_the_uninstall_with_its_entry_kept", () => {
+  const uninstall = code(between(template(), /^Section Uninstall$/m, /^SectionEnd$/m, "Section Uninstall")).map((line) => line.trim());
+  const program = uninstall.indexOf('Delete "$INSTDIR\\${MAINBINARYNAME}.exe"');
+  const stop = uninstall.findIndex((line, i) => i > program && line === "Abort");
+  const entry = uninstall.indexOf('DeleteRegKey HKCU "${UNINSTKEY}"');
+  const uninstaller = uninstall.indexOf('Delete "$INSTDIR\\uninstall.exe"');
+  assert.ok(program > 0, "the program is deleted by name");
+  assert.equal(uninstall[program + 1], '${If} ${FileExists} "$INSTDIR\\${MAINBINARYNAME}.exe"', "and looked for at once");
+  assert.ok(stop > program && stop < uninstaller && stop < entry, "a program left behind stops the uninstall before its uninstaller and its entry go");
+  const body = checkBody("a_program_that_cannot_be_removed_stops_the_uninstall_with_its_entry_kept");
+  assert.match(body, /Get-UninstallValue 'DisplayName'/);
+  assert.match(body, /Set-Deny \$program 'DE'/);
 });
 
 test("the bundle is the NSIS installer for the current user, built from this folder's template and hooks", () => {
@@ -1296,14 +1314,16 @@ test("the_app_data_box_is_not_offered_when_the_uninstaller_runs_with_update", ()
   assert.ok(confirmBoxProblems(text.replace("$UpdateMode = 1\n    Return", "$UpdateMode = 0\n    Return")).length >= 1, "a guard on the wrong value is refused");
   assert.ok(confirmBoxProblems(text.replace('w "Delete the application data.', 'w "x')).length >= 1, "a full uninstall that loses the box is refused");
   assert.ok(confirmBoxProblems(text.replace("${AndIf} $UpdateMode <> 1\n    SetShellVarContext", "${AndIf} 1 = 1\n    SetShellVarContext")).length >= 1, "a deletion that no longer needs the update-mode check is refused");
-  // The child-dialog smoke check (the uninstall-first choices of interactive_upgrade_keeps_start_with_windows): the confirm page of the old
-  // uninstaller is seen exactly once and offers no deletion; and the same-version full uninstall's page does (the reader finds the box).
+  // The child-dialog smoke check (the uninstall-first choices of interactive_upgrade_keeps_start_with_windows): the old uninstaller an
+  // update runs (/UPDATE) shows neither its confirm page nor its finish page (end-of-plan review finding 3, so it offers no deletion
+  // either); and the same-version full uninstall's pages do (the reader finds the box and the finish page, which proves it can see).
   const check = checkBody("interactive_upgrade_keeps_start_with_windows");
-  assert.match(check, /\$ConfirmPage = @\{ Seen = 0; Box = 0 \}/);
+  assert.match(check, /\$ConfirmPage = @\{ Seen = 0; Box = 0; Finish = 0 \}/);
   assert.match(check, /Invoke-WindowOver \$Installer \$Upgrade \$uninstallFirst \$confirmReader/);
   assert.match(check, /Invoke-WindowOver \$Upgrade \$Installer \$true \$confirmReader/);
   assert.match(check, /Invoke-WindowOver \$Installer \$Installer \$true \$confirmReader/);
-  assert.match(check, /Assert-ConfirmPageBox \$ConfirmPage \$false/);
+  assert.match(check, /Assert-NoUninstallerPages \$ConfirmPage/);
+  assert.ok(!/Assert-ConfirmPageBox \$ConfirmPage \$false/.test(check), "a confirm page under /UPDATE is no longer expected");
   assert.match(check, /Assert-ConfirmPageBox \$ConfirmPage \$true/);
   const asserter = between(read(SMOKE), /^function Assert-ConfirmPageBox/m, /^\}$/m, "Assert-ConfirmPageBox");
   assert.match(asserter, /\.Seen -ne 1/);

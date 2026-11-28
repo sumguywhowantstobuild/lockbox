@@ -639,7 +639,7 @@ Function ${UN}PetalockRefuseFolder
 FunctionEnd
 
 Function ${UN}PetalockPreflight
-  ; Before anything is written or removed: the effective folder ($INSTDIR, from the folder page, /D, a remembered
+  ; Before anything is written or removed: the effective folder ($INSTDIR, from the page's Options, /D, a remembered
   ; location or an upgrade) is checked, and Petalock must not be running. A folder that is not the recorded installation
   ; is a fresh install, which the uninstaller never is: an uninstaller whose folder is not the recorded installation stops.
   Call ${UN}PetalockSetMode

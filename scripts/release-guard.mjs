@@ -302,7 +302,11 @@ export async function checkCi(api, { repository, sha }) {
     if (n === 0) problems.push(`job "${name}" is missing from the run`);
     else if (n > 1) problems.push(`job "${name}" appears twice`);
   }
-  if (problems.length > 0) throw new Error(`CI is not clean for ${sha}: ${problems.join("; ")}`);
+  // "Re-run failed jobs" leaves the jobs it didn't re-run on an earlier attempt, which reads as stale here: the way back is
+  // "Re-run all jobs", so every job is on one attempt.
+  if (problems.length > 0) {
+    throw new Error(`CI is not clean for ${sha}: ${problems.join("; ")}. If a job failed and was re-run, use "Re-run all jobs" on that CI run (not "Re-run failed jobs"), then start the release again`);
+  }
   return [...CI_JOBS];
 }
 

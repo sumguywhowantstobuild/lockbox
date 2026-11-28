@@ -1,7 +1,8 @@
 # Download page and guide (Plan 5): design
 
-**Date:** 2026-11-26, the picture changed 2026-11-27 · **Author:** Ariel Maningas · **Status:** draft for Ariel's
-approval
+**Date:** 2026-11-26, the picture changed 2026-11-27 · **Author:** Ariel Maningas · **Status:** approved by Ariel,
+2026-11-27; amended 2026-11-28 (the file check made optional,
+[amendment](2026-11-28-optional-file-check-amendment.md))
 
 This is the look and the words of Petalock's public site: the download page, the guide and the not-found page, at
 `https://petalock.arielmaningas.com/`. Plan 5 Task 6 builds it from this document, and its tests pin the words below
@@ -423,6 +424,9 @@ The drawings carried draft words and a few gaps; this document changes them as f
   readers don't reliably read. The groups stay as visible text, read as they are. **standard**.
 
 ## What Task 6 still decides
+
+Decided in Task 6: the picture is drawn inline on each page (it follows the high-contrast rule above); the second point
+is still for Task 13. The choice as it was written:
 
 - **The picture's weight:** drawn inline as `intaglio.mjs` writes it (two decimals, a point every 1.5°), the picture
   is about 164 KB of SVG on each of the three pages. Task 6 may round to fewer decimals or sample less often if the

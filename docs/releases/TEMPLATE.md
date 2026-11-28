@@ -112,15 +112,23 @@ Read from GitHub's API on the day the record is filled, not copied from an earli
 
 ```
 gh api repos/sumguywhowantstobuild/petalock/rulesets
-gh api repos/sumguywhowantstobuild/petalock/rulesets/<ruleset id>
+gh api repos/sumguywhowantstobuild/petalock/rulesets/<id of "release tags">
+gh api repos/sumguywhowantstobuild/petalock/rulesets/<id of "release tags fixed">
 gh api repos/sumguywhowantstobuild/petalock/branches/main/protection
 gh api repos/sumguywhowantstobuild/petalock/environments/release
 gh api repos/sumguywhowantstobuild/petalock/environments/release/deployment-branch-policies
+gh api repos/sumguywhowantstobuild/petalock/environments/site
+gh api repos/sumguywhowantstobuild/petalock/environments/site/deployment-branch-policies
+gh api repos/sumguywhowantstobuild/petalock/environments/site/secrets --jq '.secrets[].name'
 ```
+
+A ruleset's bypass applies to every rule in it, so the two tag rules are two rulesets: one with the owner's bypass for
+creating a tag, one with no bypass for moving or deleting one.
 
 | Setting | Expected | Read |
 |---|---|---|
-| Tag ruleset on `refs/tags/v*` | active; rules creation, update, deletion; bypass: the repository admin role only | |
+| Tag ruleset "release tags" on `refs/tags/v*` | active; rule creation; bypass: the repository admin role only | |
+| Tag ruleset "release tags fixed" on `refs/tags/v*` | active; rules update and deletion; bypass: none | |
 | Branch protection on `main` | pull request required; the required checks; no force push; no deletion | |
 | Environment `release` | required reviewer: the owner; deployment branches: `main` only | |
 | Environment `site` | deployment branches: `main` only; holds the Cloudflare token as its only secret | |
@@ -153,6 +161,7 @@ is fixed.
 | Remote desktop with it on (or the owner's written exception) | |
 | A vault on a USB drive unplugged while open (or parked, with the reason) | |
 | Printing the recovery key to a real printer | parked: no printer |
+| Every screen walked with NVDA and in a Windows high contrast theme (the PRD's "How it is checked"), or the owner's written exception | |
 
 Signed (at RELEASING.md step 2): I walked through `SECURITY.md` against commit `<commit>`, every requirement R1 to R7,
 and the R1 to R7 table above is true. `<name>`, `<YYYY-MM-DD>`. The hands-on rows are filled at step 7, by their own

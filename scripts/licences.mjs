@@ -3,7 +3,7 @@
 //   node scripts/licences.mjs --cargo-about <cargo-about.exe> --out target/notices/THIRD-PARTY-NOTICES.txt [--config about.toml]
 //
 // The file is made in the installer's build and never committed. It holds, in this order: the notices of the two word lists
-// that ship inside the app (from THIRD-PARTY-NOTICES.md), the licence text of every Rust library in the app, and the licence
+// that ship inside the app and of the installer's plugin (from THIRD-PARTY-NOTICES.md), the licence text of every Rust library in the app, and the licence
 // text of every production package of the page (the two fonts included). For each one it holds the library's own licence
 // files exactly as published, copyright lines and all, not just its name. It stops, and writes nothing, when:
 //   - a library's licence is not on the accepted list (about.toml for Rust, `ACCEPTED` below for the page),
@@ -374,12 +374,12 @@ export function renderNotices({ data, crates, packages }) {
     "Petalock: third-party notices",
     "",
     "Petalock includes the work of others. This file carries the licence text of each library the app is built from, as its",
-    "authors publish it, and the notices of the two word lists. It is made when the installer is built, from the exact",
-    "versions in Cargo.lock and ui/package-lock.json.",
+    "authors publish it, and the notices of the two word lists and of the installer's plugin. It is made when the installer",
+    "is built, from the exact versions in Cargo.lock and ui/package-lock.json.",
     "",
     ...mozillaPart,
     RULE,
-    "PART 0. WORD LISTS THAT SHIP INSIDE THE APP",
+    "PART 0. WORD LISTS INSIDE THE APP, AND THE INSTALLER'S PLUGIN",
     RULE,
     "",
     normaliseText(data),
@@ -551,7 +551,7 @@ export function dataSection(markdown) {
   const at = text.indexOf("\n## Libraries the desktop app uses directly");
   if (at < 0) throw new Error("THIRD-PARTY-NOTICES.md has no '## Libraries the desktop app uses directly' heading, so the word lists' part can't be told from the rest");
   const data = text.slice(0, at).trim();
-  for (const needle of ["EFF Large Wordlist", "Pavol Rusnak"]) {
+  for (const needle of ["EFF Large Wordlist", "Pavol Rusnak", "Tauri Programme within The Commons Conservancy"]) {
     if (!data.includes(needle)) throw new Error(`THIRD-PARTY-NOTICES.md has no notice for ${needle} before its table of libraries`);
   }
   return data;

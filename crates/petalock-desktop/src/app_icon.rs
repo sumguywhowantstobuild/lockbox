@@ -23,12 +23,18 @@ pub enum Taskbar {
 }
 
 impl Taskbar {
-    /// The taskbar Windows shows now. Dark when Windows can't say: it is Windows 11's own default, and the light icon
-    /// still measures 3.8 to 1 there, while the dark icon would fade on a light taskbar.
+    /// The taskbar Windows shows now.
     pub fn now() -> Taskbar {
-        match crate::os::win::taskbar_is_light() {
-            Ok(true) => Taskbar::Light,
-            Ok(false) | Err(_) => Taskbar::Dark,
+        Taskbar::from_setting(crate::os::win::taskbar_is_light())
+    }
+
+    /// The taskbar for what Windows' setting said. Light when Windows can't say (no value, or the read failed): the
+    /// light taskbar's icon still measures 3.8 to 1 on a dark taskbar, while the dark taskbar's icon would fade on a
+    /// light one, so the light icon is the one that holds on either.
+    fn from_setting(setting: std::io::Result<Option<bool>>) -> Taskbar {
+        match setting {
+            Ok(Some(false)) => Taskbar::Dark,
+            Ok(Some(true) | None) | Err(_) => Taskbar::Light,
         }
     }
 
@@ -143,6 +149,17 @@ mod tests {
         // The light taskbar's icon is the program's own, the one Explorer shows (compared, not printed, on failure).
         assert!(Taskbar::Light.icon_file() == include_bytes!("../icons/icon.ico"));
         assert!(Taskbar::Dark.icon_file() != Taskbar::Light.icon_file());
+    }
+
+    #[test]
+    fn an_unknown_taskbar_gets_the_icon_that_holds_on_both() {
+        assert_eq!(Taskbar::from_setting(Ok(Some(true))), Taskbar::Light);
+        assert_eq!(Taskbar::from_setting(Ok(Some(false))), Taskbar::Dark);
+        assert_eq!(Taskbar::from_setting(Ok(None)), Taskbar::Light);
+        assert_eq!(
+            Taskbar::from_setting(Err(std::io::Error::other("unreadable"))),
+            Taskbar::Light
+        );
     }
 
     #[test]
