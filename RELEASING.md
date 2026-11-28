@@ -29,7 +29,8 @@ Each of these is set by the owner in GitHub's or Cloudflare's settings, and read
 section 5):
 
 - Two tag rulesets on `refs/tags/v*`, because a ruleset's bypass applies to every rule in it: "release tags" restricts
-  creation, and only the repository admin role bypasses it (so only the owner can make a release tag); "release tags
+  creation (and also lists update and deletion), and only the repository admin role bypasses it (so only the owner can
+  make a release tag); "release tags
   fixed" restricts update and deletion with no bypass at all, so nobody, the owner included, can move or delete one
   without first changing that ruleset in the repository's settings.
 - The environment `release`: the owner as required reviewer; deployment branches: `main` only.

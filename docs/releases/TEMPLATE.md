@@ -127,7 +127,7 @@ creating a tag, one with no bypass for moving or deleting one.
 
 | Setting | Expected | Read |
 |---|---|---|
-| Tag ruleset "release tags" on `refs/tags/v*` | active; rule creation; bypass: the repository admin role only | |
+| Tag ruleset "release tags" on `refs/tags/v*` | active; rules creation (update and deletion may also be listed); bypass: the repository admin role only | |
 | Tag ruleset "release tags fixed" on `refs/tags/v*` | active; rules update and deletion; bypass: none | |
 | Branch protection on `main` | pull request required; the required checks; no force push; no deletion | |
 | Environment `release` | required reviewer: the owner; deployment branches: `main` only | |
