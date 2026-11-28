@@ -441,7 +441,7 @@ test("generator_copy_shows_clear_time", async () => {
   // The settings' own delay is in the words, and the page keeps nothing.
   expect(
     await within(page).findByText(
-      "Clears from the clipboard after 45 seconds, like any password. Lockbox doesn't keep it unless you save it in an item.",
+      "Clears from the clipboard after 45 seconds, like any password. Petalock doesn't keep it unless you save it in an item.",
     ),
   ).toBeTruthy();
   await expectNoAxe(container);
@@ -542,7 +542,7 @@ test("a_save_the_shell_refuses_is_said_in_words_and_the_form_stays", async () =>
   typeInto(form, "Password", TYPED_PASSWORD);
   fireEvent.click(within(form).getByRole("button", { name: "Save" }));
   const alert = await within(form).findByRole("alert");
-  expect(alert.textContent).toBe("That isn't a web address Lockbox can open. Use one that starts with http:// or https://.");
+  expect(alert.textContent).toBe("That isn't a web address Petalock can open. Use one that starts with http:// or https://.");
   // Nothing was made, and the form kept what was typed, to be put right.
   expect(shell.made).toEqual([]);
   expect(inputOf(form, "Title").value).toBe("Odd site");

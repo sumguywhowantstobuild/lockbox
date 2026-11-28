@@ -30,7 +30,7 @@ function wordsFor(asked: CloseAskedEvent): { title: string; text: string; keep: 
   if (asked.past_swap) {
     return {
       title: "A restore is finishing",
-      text: "It's past the point of cancelling. If you close now, Lockbox finishes or undoes it the next time it opens, so nothing is lost.",
+      text: "It's past the point of cancelling. If you close now, Petalock finishes or undoes it the next time it opens, so nothing is lost.",
       keep: KEEP_RUNNING,
     };
   }
@@ -49,7 +49,7 @@ function wordsFor(asked: CloseAskedEvent): { title: string; text: string; keep: 
 }
 
 /**
- * 33b, Ask 15 and Task 13d: the window was closed, or Lockbox quit, while a job runs or a restore waits for its yes, and the shell is waiting for the
+ * 33b, Ask 15 and Task 13d: the window was closed, or Petalock quit, while a job runs or a restore waits for its yes, and the shell is waiting for the
  * answer. It is over whichever screen is up. Focus starts on Keep it running (Keep it open for a waiting restore), so a stray Enter cancels nothing,
  * and so do Escape and a click outside: all of them are that answer.
  * It goes when the answer is accepted (or the shell has no question left), or when the shell drops the question (a lock); an answer that fails leaves it

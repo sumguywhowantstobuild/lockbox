@@ -16,11 +16,11 @@ type Words = Pick<Message, "title" | "body">;
 /** The message for anything this table does not know. */
 export const GENERIC: Words = {
   title: "Something went wrong.",
-  body: "Try again. If it keeps happening, close Lockbox and open it again.",
+  body: "Try again. If it keeps happening, close Petalock and open it again.",
 };
 
-const UPDATE_LOCKBOX: Words = { title: "Update Lockbox to open this vault.", body: "A newer version made it." };
-const DAMAGED: Words = { title: "Lockbox can't read part of this vault.", body: "It may be damaged. A backup can bring it back." };
+const UPDATE_PETALOCK: Words = { title: "Update Petalock to open this vault.", body: "A newer version made it." };
+const DAMAGED: Words = { title: "Petalock can't read part of this vault.", body: "It may be damaged. A backup can bring it back." };
 
 /**
  * The table. A key is `code:<variant>` for the shell's own refusals and `core:<kind>` for the engine's, and either may
@@ -29,31 +29,31 @@ const DAMAGED: Words = { title: "Lockbox can't read part of this vault.", body: 
 export const MESSAGES: Record<string, Words> = {
   "code:locked": { title: "This vault is locked.", body: "Unlock it to carry on." },
   "code:locked_after_change": {
-    title: "The change was made, but the vault locked before Lockbox could show it.",
+    title: "The change was made, but the vault locked before Petalock could show it.",
     body: "Unlock the vault to see it.",
   },
   "code:locked_after_change:password": {
-    title: "Your new password was saved, but the vault locked before Lockbox could say so.",
+    title: "Your new password was saved, but the vault locked before Petalock could say so.",
     body: "Unlock with the new one.",
   },
   // A new recovery key is shown only once: one the lock kept from the screen was never seen, and the next unlock makes another.
   "code:locked_after_change:recovery key": {
-    title: "The vault locked before Lockbox could show your new recovery key.",
-    body: "Unlock the vault, and Lockbox will make another one to write down.",
+    title: "The vault locked before Petalock could show your new recovery key.",
+    body: "Unlock the vault, and Petalock will make another one to write down.",
   },
-  // A new vault was made and listed, then a lock came before Lockbox could show its recovery key (Task 7): it is kept for that vault's unlock, and 21f makes the key.
+  // A new vault was made and listed, then a lock came before Petalock could show its recovery key (Task 7): it is kept for that vault's unlock, and 21f makes the key.
   // The words are the session's, for Ariel to change.
   "code:locked_after_change:vault created": {
-    title: "Your new vault was made, but it locked before Lockbox could show its recovery key.",
-    body: "Unlock it with its password, and Lockbox will make a recovery key to write down.",
+    title: "Your new vault was made, but it locked before Petalock could show its recovery key.",
+    body: "Unlock it with its password, and Petalock will make a recovery key to write down.",
   },
-  "code:not_found": { title: "Lockbox can't find that.", body: "It may have been moved or deleted." },
+  "code:not_found": { title: "Petalock can't find that.", body: "It may have been moved or deleted." },
   "code:busy": { title: "That vault is busy.", body: "Wait for what it's doing to finish, then try again." },
   "code:read_only": { title: "This vault is read-only.", body: "It was opened from a backup, so nothing in it can change." },
-  "code:too_large": { title: "That is too big for Lockbox to keep.", body: "" },
+  "code:too_large": { title: "That is too big for Petalock to keep.", body: "" },
   // The list of vaults is full (a create or an add; nothing was changed). The words are the session's, for Ariel to change.
-  "code:too_large:vault list": { title: "Lockbox's list of vaults is full.", body: "It holds up to 1,000 vaults. Nothing was changed." },
-  "code:invalid_input": { title: "Lockbox can't use that.", body: "Check what you entered and try again." },
+  "code:too_large:vault list": { title: "Petalock's list of vaults is full.", body: "It holds up to 1,000 vaults. Nothing was changed." },
+  "code:invalid_input": { title: "Petalock can't use that.", body: "Check what you entered and try again." },
   "code:invalid_input:removable drive": {
     title: "A vault can't live on a removable, FAT32 or network drive.",
     body: "Choose a folder on this PC.",
@@ -71,14 +71,14 @@ export const MESSAGES: Record<string, Words> = {
     title: "A vault can't live on a removable, FAT32 or network drive.",
     body: "Choose a folder on this PC.",
   },
-  // Lockbox's own settings folder, picked as the place for a vault: the words of `state folder`.
+  // Petalock's own settings folder, picked as the place for a vault: the words of `state folder`.
   "code:invalid_input:app data folder": {
-    title: "Lockbox won't save that in its own settings folder.",
+    title: "Petalock won't save that in its own settings folder.",
     body: "Choose another folder.",
   },
   // A folder picked to add as a vault that has no vault in it (26a).
   "code:invalid_input:not a vault folder": {
-    title: "That folder isn't a Lockbox vault.",
+    title: "That folder isn't a Petalock vault.",
     body: "Choose the vault's own folder.",
   },
   "code:invalid_input:vault not listed": {
@@ -88,27 +88,27 @@ export const MESSAGES: Record<string, Words> = {
   "code:invalid_input:password is empty": { title: "Type the password first.", body: "" },
   // The shell writes a "not confirmed" note before it makes a recovery key, and makes none when it can't.
   "code:too_large:vault state": {
-    title: "Lockbox couldn't save a note it needs before making the key, so it made none.",
+    title: "Petalock couldn't save a note it needs before making the key, so it made none.",
     body: "Try again.",
   },
   "code:invalid_input:state folder": {
-    title: "Lockbox won't save that in its own settings folder.",
+    title: "Petalock won't save that in its own settings folder.",
     body: "Choose another folder.",
   },
-  // Printing: one print of Lockbox's own at a time, and a PDF that never came leaves nothing behind.
-  "code:busy:printer": { title: "Lockbox is still printing.", body: "Wait for it to finish, then try again." },
+  // Printing: one print of Petalock's own at a time, and a PDF that never came leaves nothing behind.
+  "code:busy:printer": { title: "Petalock is still printing.", body: "Wait for it to finish, then try again." },
   // Older copies (Task 8): a copy open read-only (or being opened) can't be deleted. The words are the session's.
   "code:busy:folder is open": { title: "Close this older copy first, then delete it.", body: "" },
-  "code:print_failed": { title: "Lockbox couldn't print that.", body: "Try again." },
-  "code:print_failed:pdf": { title: "Lockbox couldn't make the PDF.", body: "Nothing was saved. Try again." },
+  "code:print_failed": { title: "Petalock couldn't print that.", body: "Try again." },
+  "code:print_failed:pdf": { title: "Petalock couldn't make the PDF.", body: "Nothing was saved. Try again." },
   "code:print_failed:print": {
-    title: "Lockbox couldn't send that to the printer.",
+    title: "Petalock couldn't send that to the printer.",
     body: "Check that it's on and connected, then try again.",
   },
   "code:invalid_input:printer name": { title: "That printer isn't available any more.", body: "Pick another one." },
   // A new login's website: Rust adds https:// where there is none and keeps only http and https addresses.
   "code:invalid_input:website": {
-    title: "That isn't a web address Lockbox can open.",
+    title: "That isn't a web address Petalock can open.",
     body: "Use one that starts with http:// or https://.",
   },
   // A folder named with nothing, new or renamed: the page asks first, and the shell refuses it all the same.
@@ -130,11 +130,11 @@ export const MESSAGES: Record<string, Words> = {
   },
   "code:invalid_input:shortcut taken": { title: "Another app already uses {shortcut}.", body: "Press a different combination." },
   "code:invalid_input:shortcut not set": { title: "Windows didn't take that shortcut.", body: "Try again." },
-  "core:io:startup": { title: "Lockbox couldn't change Start with Windows.", body: "Try again." },
+  "core:io:startup": { title: "Petalock couldn't change Start with Windows.", body: "Try again." },
   // A backup refused before anything is written (Asks 2 and the three beside it): the design's words, without the vault's name, which the
   // screen puts in its own heading ("Can't back up My vault yet").
   "code:invalid_input:details changed": {
-    title: "Its details were changed outside Lockbox, so a backup made now might not open.",
+    title: "Its details were changed outside Petalock, so a backup made now might not open.",
     body: "Look at that change and accept it first, then back up.",
   },
   "code:invalid_input:password copies disagree": { title: "Change this vault's password once more, then back up.", body: "" },
@@ -143,7 +143,7 @@ export const MESSAGES: Record<string, Words> = {
   // Rename a vault (Task 8): refused as a backup is, with the same four reasons ending "then rename it" (the page's own kinds, since the backup words end "then back up"), and a
   // name the engine won't keep (the page asks for a name itself, so in practice this is a name over 200 characters; create says it too). The words are the session's, for Ariel to change.
   "core:invalid_input:vault name": { title: "That name is too long.", body: "A vault name can have up to 200 characters." },
-  "page:rename_details_changed": { title: "Its details were changed outside Lockbox.", body: "Look at that change and accept it first, then rename it." },
+  "page:rename_details_changed": { title: "Its details were changed outside Petalock.", body: "Look at that change and accept it first, then rename it." },
   "page:rename_password_copies_disagree": { title: "Change this vault's password once more, then rename it.", body: "" },
   "page:rename_recovery_key_copies_disagree": { title: "Make a new recovery key for this vault, then rename it.", body: "" },
   "page:rename_details_unchecked": { title: "Lock this vault and open it again, then rename it.", body: "" },
@@ -153,7 +153,7 @@ export const MESSAGES: Record<string, Words> = {
   // Restore a backup (24): the archive the copy opened is not the one that was checked (the file was replaced in between). The shell has let the pick go.
   "code:invalid_input:backup changed": { title: "This backup changed after it was checked.", body: "Pick it again." },
   // Show in Explorer could not open the folder (the shell's own `io`, with no path): the same words as the engine's.
-  "code:io": { title: "Lockbox couldn't reach that folder or file.", body: "Check that the drive is connected, then try again." },
+  "code:io": { title: "Petalock couldn't reach that folder or file.", body: "Check that the drive is connected, then try again." },
   "code:cancelled": { title: "That was stopped before it finished.", body: "" },
   // A choice the shell was holding (the files picked, 9a) was used, dropped by a lock, or left too long: pick again.
   "code:choice_expired": { title: "That choice has expired.", body: "Pick the files again." },
@@ -161,8 +161,8 @@ export const MESSAGES: Record<string, Words> = {
 
   // The page's own refusal (code "page"): it never comes from the shell.
   "page:lock_listener": {
-    title: "Lockbox can't listen for locks, so it won't open a vault.",
-    body: "Close Lockbox and open it again.",
+    title: "Petalock can't listen for locks, so it won't open a vault.",
+    body: "Close Petalock and open it again.",
   },
   // A cloud question left open past the shell's five minutes: the shell let go of the save it had parked, so the yes finds nothing.
   "page:key_pdf_expired": { title: "That took too long, so nothing was saved. Press Save as PDF again.", body: "" },
@@ -196,14 +196,14 @@ export const MESSAGES: Record<string, Words> = {
   "page:export_expired": { title: "That took too long, so nothing was saved. Choose Export again.", body: "" },
   // Save all files: the shell let go of the plan (after its few minutes) before the yes or the start came, or Show in Explorer found its handle gone.
   "page:save_all_expired": { title: "That took too long, so nothing was saved. Choose Save all files again.", body: "" },
-  "page:output_expired": { title: "Lockbox can't open that folder now.", body: "Open it from Windows." },
+  "page:output_expired": { title: "Petalock can't open that folder now.", body: "Open it from Windows." },
   // Show in Explorer on a vault whose place on the list is a file, a link or a junction, not a plain folder (Task 9). The words are the session's, for Ariel to change.
-  "page:show_not_a_folder": { title: "Lockbox won't open that in Explorer.", body: "That vault's place on the list isn't a plain folder." },
+  "page:show_not_a_folder": { title: "Petalock won't open that in Explorer.", body: "That vault's place on the list isn't a plain folder." },
 
   "core:wrong_password": { title: "Wrong password.", body: "" },
   // The spec's words (5.2: "That recovery key has a typo"), on every screen that meets it.
   "core:recovery_key_typo": { title: "That recovery key has a typo.", body: "Check it against the one you saved." },
-  "core:invalid_recovery_key": { title: "That isn't a recovery key for Lockbox.", body: "" },
+  "core:invalid_recovery_key": { title: "That isn't a recovery key for Petalock.", body: "" },
   // These two say a number of their own, filled in from the refusal's: `{position}` and `{found}`, and `{s}`, which is
   // an "s" unless `found` is 1.
   "core:recovery_key_word": { title: "Word {position} isn't a recovery key word.", body: "Check it against the key you saved." },
@@ -215,28 +215,28 @@ export const MESSAGES: Record<string, Words> = {
   "core:damaged:file missing": { title: "This file is missing, so it can't be opened or saved.", body: "A backup may have a good copy." },
   // Ask 12: the list of vaults itself. The lost-list screen (`screens/setup/LostList.tsx`) has the design's own words and its
   // "Start a new list" button; these are for any other place that meets the same refusal (a refused add, say).
-  "core:damaged:vault list": { title: "Lockbox lost its list of vaults.", body: "Your vaults are still in their folders." },
+  "core:damaged:vault list": { title: "Petalock lost its list of vaults.", body: "Your vaults are still in their folders." },
   "core:password_too_short": { title: "That password is too short.", body: "" },
   "core:not_enough_space": { title: "There isn't enough room on that drive.", body: "" },
   "core:file_system_limit": { title: "That drive can't hold a file this big.", body: "" },
-  "core:unsupported_version": UPDATE_LOCKBOX,
+  "core:unsupported_version": UPDATE_PETALOCK,
   "core:params_out_of_bounds": {
-    title: "Lockbox can't open this vault safely.",
-    body: "Its settings are outside what Lockbox allows.",
+    title: "Petalock can't open this vault safely.",
+    body: "Its settings are outside what Petalock allows.",
   },
-  "core:too_large": { title: "That is too big for Lockbox to keep.", body: "" },
-  "core:invalid_input": { title: "Lockbox can't use that.", body: "Check what you entered and try again." },
+  "core:too_large": { title: "That is too big for Petalock to keep.", body: "" },
+  "core:invalid_input": { title: "Petalock can't use that.", body: "Check what you entered and try again." },
   // Delete them all on the leftover files (Ask 5). The files the person was shown are not the files the vault has now (one came, or went), so nothing was
   // deleted and the list is read again; and an item that can't be read may be the one that uses a file, so nothing is deleted at all while Ask 4 stands. The
   // words are the session's, for Ariel to change.
   "core:invalid_input:leftover files changed": { title: "The leftover files changed.", body: "Look at the list again, then delete." },
   "core:invalid_input:unreadable items": {
-    title: "Some items in this vault can't be read, so Lockbox is keeping these files until that's sorted.",
+    title: "Some items in this vault can't be read, so Petalock is keeping these files until that's sorted.",
     body: "",
   },
   // A key's name is a variable name, since a `.env` file is where keys go out: the engine refuses any other.
   "core:invalid_input:key name": {
-    title: "That isn't a name Lockbox can use for a key.",
+    title: "That isn't a name Petalock can use for a key.",
     body: "Use letters, digits and underscores (_) only, and don't start with a digit.",
   },
   // An edit made from a read of the item that is no longer the stored one: the design has no words for it, so these are
@@ -253,11 +253,11 @@ export const MESSAGES: Record<string, Words> = {
   // A restore into a folder holding two working copies of the same vault (a folder copied beside its original): the engine won't guess which to
   // replace. The design has no row for it; the words are the session's (Plan 4B Task 5's hands-on, 2026-11-17).
   "core:invalid_input:several copies of this vault": {
-    title: "That folder holds more than one copy of this vault, so Lockbox can't tell which one to replace.",
+    title: "That folder holds more than one copy of this vault, so Petalock can't tell which one to replace.",
     body: "Choose another folder, or move the extra copies out of it first.",
   },
   "core:invalid_input:destination in a vault folder": {
-    title: "Lockbox won't save that inside a vault's folder.",
+    title: "Petalock won't save that inside a vault's folder.",
     body: "Choose another folder.",
   },
   "core:vault_in_use": {
@@ -268,14 +268,14 @@ export const MESSAGES: Record<string, Words> = {
     title: "A restore of this vault hasn't finished.",
     body: "Finish or undo it first.",
   },
-  "core:not_found": { title: "Lockbox can't find that.", body: "It may have been moved or deleted." },
+  "core:not_found": { title: "Petalock can't find that.", body: "It may have been moved or deleted." },
   "core:io": {
-    title: "Lockbox couldn't reach that folder or file.",
+    title: "Petalock couldn't reach that folder or file.",
     body: "Check that the drive is connected, then try again.",
   },
   // Help: the launcher could not start the browser (task 36). The design gives no words for it; they are the session's, for Ariel to change.
   "core:io:guide": {
-    title: "Lockbox couldn't open the guide.",
+    title: "Petalock couldn't open the guide.",
     body: "Check that this PC has a web browser, then try again.",
   },
 };

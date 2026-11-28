@@ -73,7 +73,7 @@ test("restore_undone_at_launch_shows_ask_6", async () => {
   // The setup frame, with its dark side's line; the words are the drawn ones, and the vault's name is the notice's.
   expect(document.querySelector("header.field .say")?.textContent).toBe(SAY);
   expect(
-    screen.getByText("Lockbox was closed partway through, and has put My vault back the way it was. Nothing is lost. You can start the restore again."),
+    screen.getByText("Petalock was closed partway through, and has put My vault back the way it was. Nothing is lost. You can start the restore again."),
   ).toBeTruthy();
   expect(buttons()).toEqual(["Restore again", "Not now"]);
   // Above the lock screen: no password box is on the page, and the heading has the focus.
@@ -116,7 +116,7 @@ test("restore_undone_at_launch_shows_ask_6: a staging folder removed reads the s
   start([{ kind: "restore", state: "recovered", how: "staging_removed", vault: null }]);
   await heading("A restore didn't finish");
   expect(
-    screen.getByText("Lockbox was closed partway through, and has put your vault back the way it was. Nothing is lost. You can start the restore again."),
+    screen.getByText("Petalock was closed partway through, and has put your vault back the way it was. Nothing is lost. You can start the restore again."),
   ).toBeTruthy();
 });
 
@@ -170,7 +170,7 @@ test("drive_missing_shows_ask_7_and_names_the_folder_as_text: a retry that finis
   await heading("A restore is waiting for a drive");
   shell.retryRestoreGives({ kind: "restore", state: "recovered", how: "finished", vault: { id: 8, name: "Restored vault" } });
   press("Try again");
-  await screen.findByText("Lockbox finished restoring Restored vault. Unlock with the password from when that backup was made.");
+  await screen.findByText("Petalock finished restoring Restored vault. Unlock with the password from when that backup was made.");
   expect(screen.queryByRole("heading", { level: 1, name: "A restore is waiting for a drive" })).toBeNull();
 });
 
@@ -208,7 +208,7 @@ test("pending_and_unclear_offer_a_way_out", async () => {
   await heading("A restore is waiting");
   expect(
     screen.getByText(
-      "Lockbox couldn't finish putting things back yet. Close anything that may be using the vault's folder, then try again. Dismissing leaves the folders there as they are, for you to sort out.",
+      "Petalock couldn't finish putting things back yet. Close anything that may be using the vault's folder, then try again. Dismissing leaves the folders there as they are, for you to sort out.",
     ),
   ).toBeTruthy();
   expect(buttons()).toEqual(["Try again", "Dismiss"]);
@@ -224,7 +224,7 @@ test("pending_and_unclear_offer_a_way_out", async () => {
   press("Try again");
   await heading("A restore didn't finish");
   expect(
-    screen.getByText("Lockbox can't read its notes on what the restore had done. Dismissing leaves the folders there as they are, for you to sort out."),
+    screen.getByText("Petalock can't read its notes on what the restore had done. Dismissing leaves the folders there as they are, for you to sort out."),
   ).toBeTruthy();
   expect(buttons()).toEqual(["Dismiss"]);
   expect(container.textContent).not.toContain("SENTINEL");
@@ -267,7 +267,7 @@ test("a_retry_that_finishes_a_restore_lists_the_new_vault_so_the_finished_notice
   list.push({ id: 8, name: "Restored vault", items: sampleItems() });
   shell.retryRestoreGives({ state: "recovered", how: "finished", vault: { id: 8, name: "Restored vault" } });
   press("Try again");
-  await screen.findByText("Lockbox finished restoring Restored vault. Unlock with the password from when that backup was made.");
+  await screen.findByText("Petalock finished restoring Restored vault. Unlock with the password from when that backup was made.");
   fireEvent.click(screen.getAllByRole("button", { name: "Unlock" })[0] as HTMLElement);
   // Its Unlock chooses the restored vault, which the page knows about now.
   expect(await screen.findByLabelText("Password for Restored vault")).toBeTruthy();
@@ -302,7 +302,7 @@ test("a_restore_refused_by_an_unfinished_one_reads_the_vault_list_again", async 
   list.push({ id: 8, name: "Restored vault", items: sampleItems() });
   shell.restoreRecoversNext({ state: "recovered", how: "finished", vault: { id: 8, name: "Restored vault" } });
   press("Restore");
-  await screen.findByText("Lockbox finished restoring Restored vault. Unlock with the password from when that backup was made.");
+  await screen.findByText("Petalock finished restoring Restored vault. Unlock with the password from when that backup was made.");
   await screen.findByRole("radio", { name: /Restored vault/ });
   expect(sent("list_vaults").length).toBeGreaterThan(before);
 });

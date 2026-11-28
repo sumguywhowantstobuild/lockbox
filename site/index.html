@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Petalock: download for Windows</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="hero">
+<nav class="top" aria-label="Main"><a class="brand" href="/">{{{icon_menu}}}Petalock</a><a href="/" aria-current="page">Download</a><a href="/guide/">Guide</a><a class="hide-s" href="{{repo_url}}">Source code</a></nav>
+<div class="hc">
+<div class="ht-text">
+<p class="pill">Early preview · Unsigned and not independently audited.</p>
+<h1>Your secrets, in print only you can read.</h1>
+<p class="lead">A password manager and file vault for Windows. Your vaults stay on your PC, encrypted.</p>
+<p class="made">Made by Ariel Maningas. It’s unsigned, so your browser and Windows may warn you. <a href="#open">Which warnings mean stop?</a></p>
+<div class="cta">
+<!--if:release--><a class="btn" href="{{download_url}}">{{{arrow}}}Download for Windows</a><!--/if-->
+<!--if:soon--><span class="btn btn-soon">Coming soon</span><!--/if-->
+<p class="meta"><!--if:release-->Version {{version}} · {{size}} · {{date}} · <a href="{{notes_url}}">Release notes</a><!--/if--><!--if:soon-->The first preview isn't out yet.<!--/if--><br>Windows 11, 64-bit</p>
+</div>
+</div>
+<svg class="ht ht-d" viewBox="-8 -8 216 216" aria-hidden="true">{{{picture_hero}}}</svg>
+</div>
+</header>
+<svg class="band" viewBox="0 0 1280 110" preserveAspectRatio="xMidYMid slice" aria-hidden="true">{{{band}}}</svg>
+<main id="main">
+<section class="s" aria-labelledby="h-plain"><div class="wrap two"><h2 id="h-plain">An early preview, said plainly</h2>
+<div class="cols"><div><h3>Unsigned</h3><p>Petalock has no code-signing certificate yet, so Windows can't tell who made the file. Your browser and Windows may warn you before it runs.</p></div>
+<div><h3>Not independently audited</h3><p>No outside security firm has checked Petalock's code yet. The code is public, so anyone can read it.</p></div></div></div></section>
+<section class="s" aria-labelledby="h-steps"><div class="wrap"><h2 id="h-steps">Three steps to install</h2>
+<ol class="st">
+<li><h3>Download</h3>
+<p><!--if:release-->Version {{version}} · {{size}} · {{date}}.<!--/if--><!--if:soon-->The first preview isn't out yet.<!--/if--></p>
+<p>Get Petalock only from petalock.arielmaningas.com or github.com/sumguywhowantstobuild/petalock.</p>
+<p class="dim">Setup needs the internet only if your PC lacks Microsoft Edge WebView2, which Windows 11 includes: setup then gets it from Microsoft. Petalock has no online features: it sends nothing about you or your vaults anywhere.</p>
+<!--if:release--><a class="btn" href="{{download_url}}">{{{arrow}}}Download</a><!--/if-->
+<!--if:soon--><span class="btn btn-soon">Coming soon</span><!--/if-->
+</li>
+<li id="check"><h3>Check the file matches (optional)</h3>
+<p>About a minute. If you downloaded it from petalock.arielmaningas.com or Petalock’s GitHub releases, you can skip this. Got it anywhere else? The simplest is to download it again from this page; to use that copy anyway, check it first (for another version, against that release’s fingerprint on GitHub, as the guide shows). Open PowerShell and paste this line (click in the box, press Ctrl+A, then Ctrl+C):</p>
+<label class="ps-label" for="ps-line">PowerShell line to check the file</label>
+<textarea id="ps-line" class="code m" readonly rows="3" spellcheck="false">{{ps_line}}</textarea>
+<p>If you saved it somewhere else, or your browser renamed it (for example with “(1)” at the end), use these two lines instead. Paste both, then type or paste the file’s full path when PowerShell asks, without quotation marks.</p>
+<label class="ps-label" for="ps-alt">PowerShell lines for a file saved elsewhere or renamed</label>
+<textarea id="ps-alt" class="code m" readonly rows="3" spellcheck="false">{{ps_alt}}</textarea>
+<p>It should print True, which means the file matches the fingerprint published for this version.</p>
+<p class="stop"><strong>If it prints False, stop. Don't open the file: delete it and download it again from this page.</strong></p>
+<details><summary>See the fingerprint</summary>
+<!--if:release--><p class="dim">Fingerprint (SHA-256)</p><p class="fp m">{{{fingerprint_groups}}}</p><!--/if-->
+<!--if:soon--><p class="dim">The fingerprint appears here with the first release.</p><!--/if-->
+</details>
+</li>
+<li id="open"><h3>Open it</h3>
+<p>Because the file is unsigned and new, you may see warnings. The exact words may differ on your PC.</p>
+<p class="stop"><strong>Stop and delete the file if your browser or a security product says it found malware or a virus, or if Windows asks for administrator permission in any form (a password or a Yes/No prompt): setup never needs it.</strong></p>
+<p>Your browser may say the file isn't commonly downloaded. Choose to keep it, and only for that notice.</p>
+<p>Windows may show “Windows protected your PC”, saying it prevented an unrecognized app from starting. If any check you ran on this file failed, don’t run it: delete it. Otherwise, if the file came from this site or Petalock’s GitHub releases, or it printed True in step 2, choose More info, then Run anyway, for that screen only.</p>
+<p class="dim">These notices mean Windows doesn't know the file yet, not that it found something wrong. A fake copy can show the same notices, so get Petalock only from this site or its GitHub releases.</p>
+<p>If Smart App Control is on, Windows may block Petalock with no Run anyway option. This preview can’t run on that PC until Petalock is signed; we don’t suggest turning Smart App Control off for it.</p>
+</li>
+</ol></div></section>
+<section class="s" aria-labelledby="h-vaults"><div class="wrap"><h2 id="h-vaults">What happens to your vaults</h2>
+<div class="g4">
+<div><h3>Installing</h3><p>Petalock goes into your own user folder; no administrator needed. It makes no vault until you create one.</p></div>
+<div><h3>Updating</h3><p>Install the new version over the old one. Your vaults, settings and “start with Windows” stay as they are. Petalock doesn’t update itself or tell you about new versions: check this page or the releases list.</p></div>
+<div><h3>Uninstalling</h3><p>Removes the program and its temporary copies of opened files. Your vaults are never deleted, and nor are Petalock’s settings and list of vaults; the guide shows how to remove those too.</p></div>
+<div><h3>Going back</h3><p>Older versions stay on the releases list. Setup lets you install one over a newer version, but going back hasn’t been tested: an older version may not open vaults or settings a newer one has changed, so keep a tested backup before you try. If a release is withdrawn, this page goes back to the last good one and the withdrawn release’s notes say why.</p></div>
+</div>
+<div class="del"><h3>Deleting a vault on purpose</h3><p>Petalock can't delete a vault for you yet. First note the vault's exact folder (in Petalock, choose Show in File Explorer). If you might want the vault back, make sure you have a tested backup you can restore. Then remove it from the list in Petalock, then delete that folder in File Explorer. <a href="/guide/#delete-a-vault">Step by step in the guide</a>.</p></div>
+</div></section>
+<section class="s" aria-labelledby="h-need"><div class="wrap two"><h2 id="h-need">What you need</h2>
+<div class="need"><p>Windows 11, 64-bit. Windows 10 (64-bit) should work but hasn't been tested.</p>
+<p class="dim">Setup needs the internet only if your PC lacks Microsoft Edge WebView2, which Windows 11 includes: setup then gets it from Microsoft. Petalock has no online features: it sends nothing about you or your vaults anywhere.</p>
+<h3>Not offered yet</h3>
+<p class="dim">No code signature (Authenticode or PGP), no package managers and no automatic updates in this preview: the optional check in step 2 shows a file matches the one published (the guide also shows GitHub’s build record, which shows the workflow that built it).</p></div></div></section>
+</main>
+<footer><div class="wrap"><span class="f">{{{icon_foot}}}Petalock</span>
+<ul class="links"><li><a href="{{notes_url}}">Release notes</a></li><li><span aria-hidden="true">·</span> <a href="{{releases_url}}">Older versions</a></li><li><span aria-hidden="true">·</span> <a href="{{repo_url}}">Source code</a></li><li><span aria-hidden="true">·</span> <a href="{{security_url}}">Security policy</a></li></ul>
+<p>Petalock is free and open source (MIT). Made by Ariel Maningas.</p></div></footer>
+</body>
+</html>

@@ -1,4 +1,4 @@
-// The question a close or a Quit asks while a job runs (Plan 4B Task 12). The shell sends `lockbox://close-asked` and holds everything (nothing is
+// The question a close or a Quit asks while a job runs (Plan 4B Task 12). The shell sends `petalock://close-asked` and holds everything (nothing is
 // locked, hidden or cancelled) until `close_answer`. The page keeps the one question that is pending, answers it once, and drops it when the shell
 // has: a lock epoch change (Lock all, Windows locking or sleeping, an idle lock) clears the shell's side, so the page's goes with it.
 // Only fixed names of kinds, two flags (a restore past its swap, a restore waiting at 24d) and the question's number pass through here: never a vault, a
@@ -57,7 +57,7 @@ function isKind(name: unknown): name is JobKind {
 }
 
 /**
- * Takes in one `lockbox://close-asked`. What is not a question is ignored: a reason that is not close or quit, a flag that is not a boolean, a number
+ * Takes in one `petalock://close-asked`. What is not a question is ignored: a reason that is not close or quit, a flag that is not a boolean, a number
  * that is not a positive whole number (it could not be answered), and nothing running with nothing past its swap and no restore waiting (there is
  * nothing to say). Kinds the page does not know are left out of the words (a question with none it knows says "Several jobs are running"), and each
  * kind counts once. The number of the question showing is the same question said again, and one whose answer settled or that is older than the newest

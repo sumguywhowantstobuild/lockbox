@@ -45,12 +45,12 @@ const WRONG_CURRENT = "That isn't the current password.";
 const EMPTY = "Type the password first.";
 const KEY_HEADING = "Your new recovery key";
 const PICK_HEADING = "Check your new recovery key";
-const WALLET = "Lockbox recovery key, not a crypto wallet phrase";
+const WALLET = "Petalock recovery key, not a crypto wallet phrase";
 const LOSE = "If you lose both your password and this key, nobody can get your data back.";
 const OFFER_TITLE = "Make a fresh backup now?";
 const OFFER_WORDS = "Backups you already made still need the old key. A fresh one opens with what you use today.";
 const LOCKED_KEY =
-  "The vault locked before Lockbox could show your new recovery key. Unlock the vault, and Lockbox will make another one to write down.";
+  "The vault locked before Petalock could show your new recovery key. Unlock the vault, and Petalock will make another one to write down.";
 const KEY_COPIES = "Make a new recovery key for this vault, then back up.";
 
 function vault(id: number, name: string, extra: Partial<FakeVault> = {}): FakeVault {
@@ -397,7 +397,7 @@ test("wrong_current_password_is_said_and_nothing_changes", async () => {
   shell.refuseMarkNext();
   typeInto(form, PASSWORD);
   submit(form);
-  await within(form).findByText("Lockbox couldn't save a note it needs before making the key, so it made none. Try again.");
+  await within(form).findByText("Petalock couldn't save a note it needs before making the key, so it made none. Try again.");
   expect(fields(form).map((box) => box.value)).toEqual([""]);
   expect(shell.keyOf(7)).toBeUndefined();
   expect(screen.queryByRole("heading", { level: 1, name: KEY_HEADING })).toBeNull();

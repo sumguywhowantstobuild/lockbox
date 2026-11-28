@@ -14,7 +14,7 @@ export const LEFTOVER_NOTE =
 const WHOLE = "This can't be undone. Deleting these files won't change your existing backups.";
 
 /** Said in place of Delete them all while an item can't be read (Ask 4): it may be the one that uses a file, and nothing says which. */
-export const KEPT_WHILE_UNREADABLE = "Some items in this vault can't be read, so Lockbox is keeping these files until that's sorted.";
+export const KEPT_WHILE_UNREADABLE = "Some items in this vault can't be read, so Petalock is keeping these files until that's sorted.";
 
 /** The older file first, as drawn; the shell's order (by id) breaks a tie, so the order never changes between two reads. */
 function byDate(a: OrphanFile, b: OrphanFile): number {

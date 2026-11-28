@@ -1,5 +1,7 @@
 # User interface (Plan 4): design
 
+> 2026-11-25: the product is now Petalock; decisions below keep their original wording.
+
 **Date:** 2026-11-05 · **Author:** Ariel Maningas · **Status:** approved by Ariel, 2026-11-05; results of the first build checks added 2026-11-06 ([Results of the risky checks](#results-of-the-risky-checks)), and two changes from Task 5's hands-on and review (the vault mark, what the page does when a lock event is lost)
 
 The product side is in the [PRD](../PRD.md); the engine, vault format and security rules are in the
@@ -196,8 +198,9 @@ Tray icon, save shortcut and close button arrive at the shell, not the page.
 - **Vault colour:** each vault has one, shown on the main button, the selected row and the vault mark. Three accents are
   drawn, each with light and dark values: Work `#14663F` / `#4FD08A`, Home `#4E2FA8` / `#B49CF5`, a read-only old copy
   `#7A5A00` / `#F2C14E`. No gradients (Ariel: they looked unprofessional for strangers).
-- **Vault mark:** each vault's line mark has its own number of points, from its place on the vault list (3, 5, 6, 7 and
-  on; 4 stays the read-only copy's), while the colours take turns, Work then Home. So two vaults of one colour still look
+- **Vault mark:** each vault's line mark has its own number of points, from its place on the vault list (5, 6, 7 and on;
+  4 stays the read-only copy's; 3 is the app's own mark, changed 2026-11-25 from "3, 5, 6, 7" when the three petals became
+  Petalock's mark), while the colours take turns, Work then Home. So two vaults of one colour still look
   different (Ariel, 2026-11-06, at the first hands-on: the first and third vault looked alike). The small mark beside a
   name is drawn in its vault's colour (a contrast theme's text colour under one), with a line thick enough to stay clear
   at 36 pixels. On the lock screen every vault takes its place's look, since whether it's a read-only copy is known only
@@ -205,10 +208,48 @@ Tray icon, save shortcut and close button arrive at the shell, not the page.
 - **Item details** open in a side panel, not a third column. Forms and rarer jobs use the same panel. Restore, first-time
   setup and forgot password are full-screen steps, since they start from places with no main window.
 - **Lock screen (Ariel, 2026-11-04, "stick with the current design"):** split, a dark side with the line pattern and "Your
-  items stay encrypted until you enter the password.", the form on the other side.
+  items stay encrypted until you enter the password.", the form on the other side. From Plan 5 the line pattern there
+  and on the full-screen steps is Petalock's engraved logo (the 2026-11-27 note under "Name and logo").
 - **Type:** Geist, with Geist Mono for key values and recovery keys. Light and dark both ship.
 - **Name and logo:** the name stays for now; the final logo follows once it's decided before release. The vault mark stands
   in, and the final logo needs a simpler version for 16 to 20 pixels.
+  2026-11-25 (Ariel's picks, Plan 5 Tasks 0a and 0b): the name is Petalock and the logo is the three petals. Its colour is
+  slate blue, `#5B7BA8` on the icon for a light taskbar (3.9 to 1) and `#9DB6DA` for a dark one (7.9 to 1; Ariel saw the
+  slate blue look dull there beside other apps' icons), the app picking by Windows' own light or dark setting and
+  switching when it changes (Explorer's icon for the program stays the slate blue), and `#9DB6DA` on the app's dark side (Ariel, the same day: rose "not complementing the gray", then slate blue for a password manager that
+  must feel trustworthy and secure; it shares the greys' cool tint and no vault uses blue). The colour shows only on the
+  icon, the window's title bar and the small two-line mark beside the name on the lock and setup screens; every large
+  pattern stays white lines (the setup screens show the three petals, the lock screen the vault's own), so inside the app
+  the vaults keep the only colour. A contrast theme draws the mark in its text colour. The app icon draws each small size
+  on its own (a solid trefoil at 16 and 20 pixels, thicker lines at 24 and 32).
+  2026-11-25, later (Ariel's pick on the canvas's board H, "Solid, brighter", after a photo of the real taskbar): the two
+  crossing lines read as six loops on the taskbar button and didn't match the tray beside it, so the icon is the solid
+  trefoil at every size from 16 to 64 pixels (tray, title bar, taskbar button, Alt+Tab); only Explorer's 256 pixel view
+  keeps the fourteen-line pattern. The light slate blue for a dark taskbar and the app's dark side becomes `#BCD0EC`
+  (10.4 to 1 on the dark taskbar, was `#9DB6DA` at 7.9), brighter beside other apps' icons and still blue; the light
+  taskbar's `#5B7BA8` is unchanged.
+  2026-11-27 (Ariel's picks with the download page's design, Plan 5 Task 5): the large picture on the dark side of the
+  lock screen and of every full-screen step (first-time setup, a new vault, restore, opening a backup, forgot password,
+  a lost vault list) becomes Petalock's logo engraved, the download page's picture (its rule in
+  `docs/design/2026-11-26-download-page-design.md`, "The opening picture"), in place of the fourteen-line pattern. It
+  keeps the pattern's place, size and strength today (760 pixels square, 120 past the right edge and 140 past the bottom,
+  white at half strength), in the pattern's own 200 by 200 frame (`viewBox="0 0 200 200"`, not the page's 216), so it is
+  shown at 3.8 pixels per logo unit and drawn at weight 0.62. It is filled ribbons, not lines, so a contrast theme fills
+  it in its text colour. The words on that side ("Your items stay encrypted…" and each step's line) sit on a soft patch
+  of the side's own colour (the words' box filled with it, its edge faded by a 28 px blur), so no line crosses a letter
+  at any window size or text size; a contrast theme drops the fade and keeps the filled box (in the drawing the lines
+  touched "until" and "password" without it). Every vault shows the same picture there, so the vault's own look moves to
+  the heading: "Unlock Work" starts with the vault's small mark in its colour, as beside its name in the side menu, with
+  one vault or many, and changes with the choice. It is 36 pixels, the list's size: this replaces Plan 5's brand decision
+  that the vault's own mark stays large on the lock screen, since Ariel's pick puts the app's logo in the large place. From two vaults the list beside it still shows each vault's colour and
+  small mark, as above. The New vault screen no longer previews the new vault's shape in the large picture (its small
+  mark shows it once the vault is made). **my call** for the patch and the heading's mark (Codex's review of this note,
+  2026-11-27: text over the lines, and the large picture was the one vault cue with a single vault). The colours stay as built (the dark side `#1a1d22`, white words, the small mark in slate) and
+  so does the icon (the solid trefoil from 16 to 64 pixels, the fourteen-line pattern at 256). So the page and the app
+  share the drawing, not the colours (Ariel, after both were drawn in each other's colours: "I feel like blue is not
+  appropriate to the app itself"; of the lock screen, "I like the position and size of set 2 just change the logo", and
+  of its placement, "As is, like old"). The drawing is `f-lock` (light and dark) beside the page on the design board
+  `final.html` in the private design notes. A new Plan 5 task builds it.
 - **Words on screen:** "folder", never "collection" or "project". "Key" for an API key; "recovery key" always in full; the
   vault key never appears. "Details" for the header, "leftover files" for orphaned files. "Backup" is encrypted; "export"
   is readable.

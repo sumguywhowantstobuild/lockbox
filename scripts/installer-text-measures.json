@@ -1,0 +1,2324 @@
+[
+    {
+        "text":  "Licence (MIT)",
+        "weight":  400,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  72,
+                  88,
+                  101,
+                  123,
+                  141
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Version 0.10.10 · Public preview",
+        "weight":  400,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  164,
+                  206,
+                  249,
+                  290,
+                  335
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Petalock needs 120 MB on drive C: and 119 MB is free. Free some space, then choose Retry.",
+        "weight":  600,
+        "em":  12,
+        "width":  452,
+        "w":  [
+                  566,
+                  688,
+                  813,
+                  937,
+                  1069
+              ],
+        "h":  [
+                  30,
+                  40,
+                  50,
+                  60,
+                  64
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Petalock is open. Quit it from its icon near the clock (right-click it, then Quit), then choose Retry. Setup never closes it for you. From the keyboard: press Windows+B, move to Petalock’s icon, press the Menu key, then choose Quit.",
+        "weight":  600,
+        "em":  12,
+        "width":  452,
+        "w":  [
+                  1436,
+                  1725,
+                  2036,
+                  2347,
+                  2674
+              ],
+        "h":  [
+                  60,
+                  80,
+                  100,
+                  90,
+                  96
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Petalock’s folder holds files Setup didn’t install. Untick the box below to update in place instead; nothing was changed.",
+        "weight":  600,
+        "em":  12,
+        "width":  452,
+        "w":  [
+                  744,
+                  903,
+                  1057,
+                  1218,
+                  1387
+              ],
+        "h":  [
+                  30,
+                  40,
+                  50,
+                  60,
+                  64
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Petalock 0.10.10 is installed here. Make sure Setup has write access to this folder, then choose Retry. Nothing was changed.",
+        "weight":  600,
+        "em":  12,
+        "width":  452,
+        "w":  [
+                  768,
+                  930,
+                  1095,
+                  1266,
+                  1437
+              ],
+        "h":  [
+                  30,
+                  40,
+                  50,
+                  60,
+                  64
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Setup leaves your vault files in place.",
+        "weight":  600,
+        "em":  12,
+        "width":  452,
+        "w":  [
+                  231,
+                  281,
+                  327,
+                  379,
+                  433
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Connect to the internet, then run Setup again. Petalock needs WebView2 to show its screens. Nothing of Petalock was installed.",
+        "weight":  400,
+        "em":  12,
+        "width":  452,
+        "w":  [
+                  669,
+                  835,
+                  1003,
+                  1182,
+                  1361
+              ],
+        "h":  [
+                  30,
+                  40,
+                  50,
+                  60,
+                  64
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "The earlier version could not be removed, so Setup stopped before installing. Run Setup again once nothing is using it.",
+        "weight":  400,
+        "em":  12,
+        "width":  452,
+        "w":  [
+                  623,
+                  782,
+                  940,
+                  1098,
+                  1273
+              ],
+        "h":  [
+                  30,
+                  40,
+                  50,
+                  60,
+                  64
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Windows would not take Petalock’s entry in Installed apps, so Setup removed the files it had just copied. Run Setup again to try once more.",
+        "weight":  400,
+        "em":  12,
+        "width":  452,
+        "w":  [
+                  730,
+                  916,
+                  1104,
+                  1289,
+                  1488
+              ],
+        "h":  [
+                  30,
+                  40,
+                  50,
+                  60,
+                  64
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Windows refused Petalock’s entry in Installed apps, and Setup could not remove every file it copied. Run Setup again and choose another folder under Options.",
+        "weight":  400,
+        "em":  12,
+        "width":  452,
+        "w":  [
+                  836,
+                  1049,
+                  1263,
+                  1476,
+                  1705
+              ],
+        "h":  [
+                  30,
+                  40,
+                  50,
+                  60,
+                  64
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Petalock’s files were updated, but Windows would not take the new entry in Installed apps. Setup removed nothing. Run Setup again to try once more.",
+        "weight":  400,
+        "em":  12,
+        "width":  452,
+        "w":  [
+                  790,
+                  989,
+                  1192,
+                  1393,
+                  1609
+              ],
+        "h":  [
+                  30,
+                  40,
+                  50,
+                  60,
+                  64
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Setup couldn’t write one of Petalock’s files. Some files were already copied to its folder; running Setup again replaces them.",
+        "weight":  400,
+        "em":  12,
+        "width":  452,
+        "w":  [
+                  647,
+                  815,
+                  973,
+                  1141,
+                  1320
+              ],
+        "h":  [
+                  30,
+                  40,
+                  50,
+                  60,
+                  64
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Setup left your vault files in place.",
+        "weight":  600,
+        "em":  12,
+        "width":  452,
+        "w":  [
+                  214,
+                  260,
+                  302,
+                  350,
+                  400
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Ag",
+        "weight":  600,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  17,
+                  21,
+                  25,
+                  28,
+                  31
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Ag",
+        "weight":  400,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  15,
+                  19,
+                  23,
+                  26,
+                  29
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Ag",
+        "weight":  600,
+        "em":  19,
+        "width":  0,
+        "w":  [
+                  25,
+                  31,
+                  36,
+                  42,
+                  49
+              ],
+        "h":  [
+                  25,
+                  31,
+                  38,
+                  45,
+                  51
+              ],
+        "pitch":  [
+                      25,
+                      31,
+                      38,
+                      45,
+                      51
+                  ]
+    },
+    {
+        "text":  "Ag",
+        "weight":  400,
+        "em":  15,
+        "width":  0,
+        "w":  [
+                  19,
+                  23,
+                  27,
+                  32,
+                  37
+              ],
+        "h":  [
+                  20,
+                  25,
+                  30,
+                  36,
+                  41
+              ],
+        "pitch":  [
+                      20,
+                      25,
+                      30,
+                      36,
+                      41
+                  ]
+    },
+    {
+        "text":  "Ag",
+        "weight":  600,
+        "em":  15,
+        "width":  0,
+        "w":  [
+                  21,
+                  25,
+                  29,
+                  34,
+                  39
+              ],
+        "h":  [
+                  20,
+                  25,
+                  30,
+                  36,
+                  41
+              ],
+        "pitch":  [
+                      20,
+                      25,
+                      30,
+                      36,
+                      41
+                  ]
+    },
+    {
+        "text":  "Ag",
+        "weight":  600,
+        "em":  20,
+        "width":  0,
+        "w":  [
+                  27,
+                  33,
+                  39,
+                  46,
+                  52
+              ],
+        "h":  [
+                  28,
+                  35,
+                  41,
+                  47,
+                  54
+              ],
+        "pitch":  [
+                      28,
+                      35,
+                      41,
+                      47,
+                      54
+                  ]
+    },
+    {
+        "text":  "Remove Petalock 0.10.10 first, with its temporary copies of opened files",
+        "weight":  400,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  373,
+                  471,
+                  567,
+                  658,
+                  760
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Check for Microsoft WebView2",
+        "weight":  400,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  163,
+                  204,
+                  245,
+                  286,
+                  330
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Install 0.10.10 in the same folder; keep its Start menu shortcut",
+        "weight":  400,
+        "em":  12,
+        "width":  432,
+        "w":  [
+                  322,
+                  404,
+                  489,
+                  572,
+                  660
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Install 0.10.10 in the same folder; keep its Start menu shortcut",
+        "weight":  400,
+        "em":  12,
+        "width":  388,
+        "w":  [
+                  322,
+                  404,
+                  489,
+                  572,
+                  660
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Install 0.10.10 in the same folder; keep its Start menu shortcut",
+        "weight":  400,
+        "em":  12,
+        "width":  356,
+        "w":  [
+                  322,
+                  404,
+                  489,
+                  572,
+                  660
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Install Petalock for this Windows account",
+        "weight":  400,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  217,
+                  270,
+                  324,
+                  381,
+                  435
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Add it to the Start menu and to Installed apps",
+        "weight":  400,
+        "em":  12,
+        "width":  432,
+        "w":  [
+                  239,
+                  303,
+                  365,
+                  425,
+                  489
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Add it to the Start menu and to Installed apps",
+        "weight":  400,
+        "em":  12,
+        "width":  388,
+        "w":  [
+                  239,
+                  303,
+                  365,
+                  425,
+                  489
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Add it to the Start menu and to Installed apps",
+        "weight":  400,
+        "em":  12,
+        "width":  356,
+        "w":  [
+                  239,
+                  303,
+                  365,
+                  425,
+                  489
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Replace Petalock 0.10.10 with 0.10.10 in its folder",
+        "weight":  400,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  255,
+                  324,
+                  390,
+                  454,
+                  523
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Keep its Start menu shortcut; Installed apps shows 0.10.10",
+        "weight":  400,
+        "em":  12,
+        "width":  432,
+        "w":  [
+                  302,
+                  379,
+                  461,
+                  536,
+                  616
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Keep its Start menu shortcut; Installed apps shows 0.10.10",
+        "weight":  400,
+        "em":  12,
+        "width":  388,
+        "w":  [
+                  302,
+                  379,
+                  461,
+                  536,
+                  616
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Keep its Start menu shortcut; Installed apps shows 0.10.10",
+        "weight":  400,
+        "em":  12,
+        "width":  356,
+        "w":  [
+                  302,
+                  379,
+                  461,
+                  536,
+                  616
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Replace 0.10.10 with the older 0.10.10 in its folder",
+        "weight":  400,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  257,
+                  328,
+                  395,
+                  459,
+                  531
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Copy Petalock 0.10.10 into its folder again",
+        "weight":  400,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  220,
+                  278,
+                  335,
+                  388,
+                  448
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Keep its Start menu shortcut and Installed apps entry",
+        "weight":  400,
+        "em":  12,
+        "width":  432,
+        "w":  [
+                  277,
+                  348,
+                  419,
+                  491,
+                  566
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Keep its Start menu shortcut and Installed apps entry",
+        "weight":  400,
+        "em":  12,
+        "width":  388,
+        "w":  [
+                  277,
+                  348,
+                  419,
+                  491,
+                  566
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Keep its Start menu shortcut and Installed apps entry",
+        "weight":  400,
+        "em":  12,
+        "width":  356,
+        "w":  [
+                  277,
+                  348,
+                  419,
+                  491,
+                  566
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Replace it with 0.10.10 in its folder",
+        "weight":  400,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  178,
+                  227,
+                  271,
+                  317,
+                  366
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "If it’s missing, Setup downloads it from Microsoft and needs internet.",
+        "weight":  400,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  363,
+                  453,
+                  548,
+                  638,
+                  736
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Removing Petalock 0.10.10…",
+        "weight":  600,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  176,
+                  214,
+                  254,
+                  289,
+                  330
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Petalock 0.10.10 was removed",
+        "weight":  400,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  157,
+                  198,
+                  240,
+                  277,
+                  319
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Remove Petalock 0.10.10 first",
+        "weight":  600,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  182,
+                  222,
+                  263,
+                  300,
+                  341
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Getting Microsoft WebView2…",
+        "weight":  600,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  187,
+                  229,
+                  268,
+                  308,
+                  352
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "It was missing, so Setup is downloading it from Microsoft.",
+        "weight":  400,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  305,
+                  381,
+                  462,
+                  534,
+                  614
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Checking for Microsoft WebView2…",
+        "weight":  600,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  221,
+                  268,
+                  315,
+                  362,
+                  414
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Microsoft WebView2",
+        "weight":  400,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  109,
+                  138,
+                  165,
+                  192,
+                  221
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Installed by Setup",
+        "weight":  400,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  93,
+                  118,
+                  142,
+                  165,
+                  191
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Not found: an update does not get it, so Petalock may not open",
+        "weight":  400,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  336,
+                  421,
+                  510,
+                  593,
+                  684
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Already installed",
+        "weight":  400,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  87,
+                  111,
+                  130,
+                  153,
+                  176
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Get Microsoft WebView2",
+        "weight":  600,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  152,
+                  187,
+                  219,
+                  252,
+                  287
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Installing Petalock for this Windows account",
+        "weight":  600,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  278,
+                  335,
+                  393,
+                  454,
+                  513
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Copying Petalock 0.10.10 into its folder again",
+        "weight":  600,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  283,
+                  345,
+                  406,
+                  463,
+                  528
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Installing 0.10.10 in the same folder",
+        "weight":  600,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  222,
+                  271,
+                  319,
+                  366,
+                  417
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Replacing Petalock 0.10.10 with 0.10.10",
+        "weight":  600,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  243,
+                  297,
+                  351,
+                  401,
+                  455
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Petalock is installed for this Windows account",
+        "weight":  400,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  241,
+                  301,
+                  360,
+                  423,
+                  485
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Petalock 0.10.10 was copied into its folder again",
+        "weight":  400,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  251,
+                  319,
+                  382,
+                  444,
+                  511
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Petalock 0.10.10 is installed in the same folder",
+        "weight":  400,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  240,
+                  304,
+                  364,
+                  426,
+                  492
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Petalock 0.10.10 replaced 0.10.10 in its folder",
+        "weight":  400,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  233,
+                  297,
+                  358,
+                  415,
+                  479
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Install Petalock for this Windows account",
+        "weight":  600,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  258,
+                  311,
+                  365,
+                  422,
+                  476
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Install Petalock 0.10.10 in its folder",
+        "weight":  600,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  218,
+                  266,
+                  312,
+                  358,
+                  406
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "The Start menu shortcut was skipped; Installed apps lists Petalock",
+        "weight":  600,
+        "em":  12,
+        "width":  384,
+        "w":  [
+                  410,
+                  496,
+                  584,
+                  672,
+                  762
+              ],
+        "h":  [
+                  30,
+                  40,
+                  50,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "The Start menu shortcut was skipped; Installed apps lists Petalock",
+        "weight":  600,
+        "em":  12,
+        "width":  378,
+        "w":  [
+                  410,
+                  496,
+                  584,
+                  672,
+                  762
+              ],
+        "h":  [
+                  30,
+                  40,
+                  50,
+                  60,
+                  64
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "The Start menu shortcut couldn’t be made; Installed apps lists Petalock",
+        "weight":  600,
+        "em":  12,
+        "width":  384,
+        "w":  [
+                  444,
+                  536,
+                  630,
+                  727,
+                  826
+              ],
+        "h":  [
+                  30,
+                  40,
+                  50,
+                  60,
+                  64
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "The Start menu shortcut couldn’t be made; Installed apps lists Petalock",
+        "weight":  600,
+        "em":  12,
+        "width":  378,
+        "w":  [
+                  444,
+                  536,
+                  630,
+                  727,
+                  826
+              ],
+        "h":  [
+                  30,
+                  40,
+                  50,
+                  60,
+                  64
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Added to the Start menu and to Installed apps",
+        "weight":  600,
+        "em":  12,
+        "width":  384,
+        "w":  [
+                  287,
+                  352,
+                  415,
+                  475,
+                  540
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Added to the Start menu and to Installed apps",
+        "weight":  600,
+        "em":  12,
+        "width":  378,
+        "w":  [
+                  287,
+                  352,
+                  415,
+                  475,
+                  540
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Start menu shortcut kept; Installed apps shows 0.10.10",
+        "weight":  600,
+        "em":  12,
+        "width":  384,
+        "w":  [
+                  338,
+                  409,
+                  488,
+                  557,
+                  632
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Start menu shortcut kept; Installed apps shows 0.10.10",
+        "weight":  600,
+        "em":  12,
+        "width":  378,
+        "w":  [
+                  338,
+                  409,
+                  488,
+                  557,
+                  632
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Start menu shortcut added; Installed apps shows 0.10.10",
+        "weight":  600,
+        "em":  12,
+        "width":  384,
+        "w":  [
+                  349,
+                  424,
+                  505,
+                  576,
+                  653
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Start menu shortcut added; Installed apps shows 0.10.10",
+        "weight":  600,
+        "em":  12,
+        "width":  378,
+        "w":  [
+                  349,
+                  424,
+                  505,
+                  576,
+                  653
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Add it to the Start menu and to Installed apps",
+        "weight":  600,
+        "em":  12,
+        "width":  384,
+        "w":  [
+                  285,
+                  349,
+                  411,
+                  471,
+                  535
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Add it to the Start menu and to Installed apps",
+        "weight":  600,
+        "em":  12,
+        "width":  378,
+        "w":  [
+                  285,
+                  349,
+                  411,
+                  471,
+                  535
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Keep its Start menu shortcut; Installed apps shows 0.10.10",
+        "weight":  600,
+        "em":  12,
+        "width":  384,
+        "w":  [
+                  360,
+                  437,
+                  519,
+                  594,
+                  674
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Keep its Start menu shortcut; Installed apps shows 0.10.10",
+        "weight":  600,
+        "em":  12,
+        "width":  378,
+        "w":  [
+                  360,
+                  437,
+                  519,
+                  594,
+                  674
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Petalock’s files were copied, then removed again",
+        "weight":  400,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  256,
+                  322,
+                  383,
+                  450,
+                  520
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Microsoft couldn’t be reached: this PC seems to be offline.",
+        "weight":  400,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  308,
+                  383,
+                  461,
+                  541,
+                  624
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Microsoft’s installer didn’t finish (exit code 1234567).",
+        "weight":  400,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  275,
+                  347,
+                  416,
+                  485,
+                  562
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Done",
+        "weight":  400,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  28,
+                  36,
+                  43,
+                  50,
+                  58
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Now",
+        "weight":  600,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  28,
+                  34,
+                  40,
+                  46,
+                  52
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Next",
+        "weight":  400,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  24,
+                  31,
+                  36,
+                  44,
+                  50
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Failed",
+        "weight":  600,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  37,
+                  46,
+                  52,
+                  60,
+                  69
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Not started",
+        "weight":  400,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  59,
+                  75,
+                  90,
+                  105,
+                  120
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Removed",
+        "weight":  400,
+        "em":  12,
+        "width":  0,
+        "w":  [
+                  50,
+                  63,
+                  76,
+                  87,
+                  101
+              ],
+        "h":  [
+                  15,
+                  20,
+                  25,
+                  30,
+                  32
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Setup couldn’t write one of Petalock’s files, so it removed the files it had just copied. Run Setup again to try once more.",
+        "weight":  400,
+        "em":  12,
+        "width":  452,
+        "w":  [
+                  625,
+                  784,
+                  942,
+                  1103,
+                  1276
+              ],
+        "h":  [
+                  30,
+                  40,
+                  50,
+                  60,
+                  64
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    },
+    {
+        "text":  "Setup couldn’t write one of Petalock’s files, and could not remove every file it copied. Run Setup again and choose another folder under Options.",
+        "weight":  400,
+        "em":  12,
+        "width":  452,
+        "w":  [
+                  761,
+                  954,
+                  1146,
+                  1341,
+                  1552
+              ],
+        "h":  [
+                  30,
+                  40,
+                  50,
+                  60,
+                  64
+              ],
+        "pitch":  [
+                      15,
+                      20,
+                      25,
+                      30,
+                      32
+                  ]
+    }
+]

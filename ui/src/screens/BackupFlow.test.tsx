@@ -36,7 +36,7 @@ const NO_SPACE = "Not enough space. This backup needs 1.2 GB, and that drive has
 const OVERDUE = "My vault hasn't been backed up in 30 days";
 const CANT = "Can't back up My vault yet";
 
-const CHANGED = "Its details were changed outside Lockbox, so a backup made now might not open. Look at that change and accept it first, then back up.";
+const CHANGED = "Its details were changed outside Petalock, so a backup made now might not open. Look at that change and accept it first, then back up.";
 const PASSWORD_COPIES = "Change this vault's password once more, then back up.";
 const KEY_COPIES = "Make a new recovery key for this vault, then back up.";
 const UNCHECKED = "Lock this vault and open it again, then back up.";
@@ -129,7 +129,7 @@ test("backup_says_keep_it_on_another_drive", async () => {
   expect(within(panel).getByText(KEEP_IT)).toBeTruthy();
   expect(buttonsIn(panel)).toEqual(["Close panel", "Cancel", "Back up"]);
   expect(sent("backup_vault")).toEqual([]);
-  expect(document.body.textContent).not.toMatch(/lockbox-backup|[A-Z]:\//);
+  expect(document.body.textContent).not.toMatch(/petalock-backup|[A-Z]:\//);
   // Cancel leaves with nothing sent.
   press(panel, "Cancel");
   await waitFor(() => {
@@ -183,7 +183,7 @@ test("backup_shows_progress_and_cancel", async () => {
   const panel = await openBackup();
   const release = shell.holdFiles();
   press(panel, "Back up");
-  // The shell says the work started (`lockbox://job-started`, matched to the request the page sent); 22b is the bar, in words.
+  // The shell says the work started (`petalock://job-started`, matched to the request the page sent); 22b is the bar, in words.
   const card = await screen.findByRole("region", { name: "Backing up My vault" });
   const job = theJob();
   expect(job.kind).toBe("backup");
@@ -274,7 +274,7 @@ test("a_refusal_before_writing_is_said_on_22a_in_the_tables_words_and_never_the_
   shell.refuseNext("backup_vault", { code: "invalid_input", what: "state folder", detail: "E:/Backups/secret-folder" });
   press(panel, "Back up");
   const alert = await within(panel).findByRole("alert");
-  expect(alert.textContent).toBe("Lockbox won't save that in its own settings folder. Choose another folder.");
+  expect(alert.textContent).toBe("Petalock won't save that in its own settings folder. Choose another folder.");
   expect(document.body.textContent).not.toContain("secret-folder");
   expect(screen.queryByText(NOT_FINISHED)).toBeNull();
 });
@@ -327,7 +327,7 @@ test("failed_or_cancelled_says_nothing_half_made_was_left", async () => {
   });
   expect(await screen.findByText(NOT_FINISHED)).toBeTruthy();
   panel = screen.getByRole("complementary", { name: "Back up" });
-  expect(within(panel).getByText("Lockbox couldn't reach that folder or file. Check that the drive is connected, then try again.")).toBeTruthy();
+  expect(within(panel).getByText("Petalock couldn't reach that folder or file. Check that the drive is connected, then try again.")).toBeTruthy();
   expect(shell.fileOps.filter((op) => op.cmd === "backup_vault")).toEqual([]);
 
   // A failure the table has no words for says the sentence alone, never the generic "Something went wrong".
@@ -388,7 +388,7 @@ test("see_the_change_opens_ask_3_for_that_vault", async () => {
   const dialog = await screen.findByRole("dialog", { name: CANT });
   fireEvent.click(within(dialog).getByRole("button", { name: "See the change" }));
   // The existing question (Ask 3), for the same vault, and the refusal's own dialog is gone.
-  const ask = await screen.findByRole("dialog", { name: "My vault's details were changed outside Lockbox." });
+  const ask = await screen.findByRole("dialog", { name: "My vault's details were changed outside Petalock." });
   expect(within(ask).getByRole("button", { name: "Accept" })).toBeTruthy();
   expect(within(ask).getByRole("button", { name: "Lock this vault" })).toBeTruthy();
   expect(screen.queryByRole("dialog", { name: CANT })).toBeNull();
@@ -531,7 +531,7 @@ test("the_reminder_waits_behind_ask_3_so_two_questions_never_stack", async () =>
   const field = await screen.findByLabelText(/^Password for /);
   fireEvent.change(field, { target: { value: PASSWORD } });
   fireEvent.submit((field as HTMLInputElement).form as HTMLFormElement);
-  await screen.findByRole("dialog", { name: "My vault's details were changed outside Lockbox." });
+  await screen.findByRole("dialog", { name: "My vault's details were changed outside Petalock." });
   await waitFor(() => {
     expect(sent("vault_backup_due")).toHaveLength(1);
   });

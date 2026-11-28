@@ -8,7 +8,7 @@ import { Frame, SAY_FIRST } from "./Frame";
 export function Welcome({ onCreate }: { onCreate: () => void }) {
   return (
     <Frame say={SAY_FIRST}>
-      <h1>Welcome to Lockbox</h1>
+      <h1>Welcome to Petalock</h1>
       <p className="fu-sub">
         There is no account and no server. Start with a vault, or bring in one you already have.
       </p>

@@ -43,8 +43,8 @@ const FOR_THE_VAULT = "For My vault: logins, keys and notes. Stored files aren't
 const WARNING = "Anyone who gets this file can read everything in it.";
 const WRONG_CURRENT = "That isn't the current password.";
 const EMPTY = "Type the password first.";
-const IN_A_VAULT_FOLDER = "Lockbox won't save that inside a vault's folder. Choose another folder.";
-const IN_THE_STATE_FOLDER = "Lockbox won't save that in its own settings folder. Choose another folder.";
+const IN_A_VAULT_FOLDER = "Petalock won't save that inside a vault's folder. Choose another folder.";
+const IN_THE_STATE_FOLDER = "Petalock won't save that in its own settings folder. Choose another folder.";
 const CLOUD_TITLE = "This folder is synced to the cloud";
 const CLOUD_WORDS = "This file would be uploaded unprotected.";
 const DELETE_IT = "This file isn't protected. Delete it once you're done with it, and empty the Recycle Bin.";
@@ -423,7 +423,7 @@ test("wrong_password_is_said_with_an_empty_field", { timeout: 20_000 }, async ()
 });
 
 test("vault_folder_refusal_and_cloud_warning_use_the_existing_words", { timeout: 20_000 }, async () => {
-  // A vault's folder, and Lockbox's own: refused in the design's words on the form, the field empty, nothing written.
+  // A vault's folder, and Petalock's own: refused in the design's words on the form, the field empty, nothing written.
   await unlocked();
   let panel = await openForm();
   shell.refuseNext("export_csv", { code: "core", kind: "invalid_input", what: "destination in a vault folder" });
@@ -606,8 +606,8 @@ test("afterwards_says_to_delete_the_file_and_empty_the_recycle_bin", { timeout: 
 });
 
 const HEX_32 = /^[0-9a-f]{32}$/;
-const CAN_NOT_OPEN = "Lockbox can't open that folder now. Open it from Windows.";
-const COULD_NOT_REACH = "Lockbox couldn't reach that folder or file.";
+const CAN_NOT_OPEN = "Petalock can't open that folder now. Open it from Windows.";
+const COULD_NOT_REACH = "Petalock couldn't reach that folder or file.";
 
 function toast(): string {
   return document.querySelector(".tstack")?.textContent ?? "";

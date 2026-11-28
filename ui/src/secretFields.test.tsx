@@ -87,7 +87,7 @@ const PLACES: Place[] = [
     fields: ["new-password", "new-password"],
     reach: async () => {
       start([]);
-      await screen.findByRole("heading", { level: 1, name: "Welcome to Lockbox" });
+      await screen.findByRole("heading", { level: 1, name: "Welcome to Petalock" });
       fireEvent.click(screen.getByRole("button", { name: "Create a vault" }));
       await screen.findByRole("heading", { level: 1, name: "Create your vault" });
     },

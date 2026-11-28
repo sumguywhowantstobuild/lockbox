@@ -30,11 +30,11 @@ const OLDER = "My vault.before-restore";
 const LABEL = "Password or recovery key from when it was made";
 const BUSY = { code: "busy", what: "operation in progress" };
 const BUSY_WORDS = "That vault is busy. Wait for what it's doing to finish, then try again.";
-const IO_WORDS = "Lockbox couldn't reach that folder or file. Check that the drive is connected, then try again.";
-const NOT_A_FOLDER = "Lockbox won't open that in Explorer. That vault's place on the list isn't a plain folder.";
+const IO_WORDS = "Petalock couldn't reach that folder or file. Check that the drive is connected, then try again.";
+const NOT_A_FOLDER = "Petalock won't open that in Explorer. That vault's place on the list isn't a plain folder.";
 const STILL = "Still unavailable. Connect its drive or put its folder back, then try again.";
 const UNAVAILABLE_LINE = "Unavailable: its folder or drive isn't there";
-const NOT_A_VAULT = "That folder isn't a Lockbox vault. Choose the vault's own folder.";
+const NOT_A_VAULT = "That folder isn't a Petalock vault. Choose the vault's own folder.";
 const REMOVABLE = "That folder is on a removable drive. Copy it to this PC first, then choose the copy.";
 const SENTINEL = "MU-SENTINEL-C:\\Users\\secret";
 
@@ -278,7 +278,7 @@ test("remove_of_the_only_vault_points_at_the_first_screen_and_leaves_it", async 
   expect(box.querySelector("p")?.textContent).toBe(removeWordsLast("My vault"));
   pressIn(box, "Remove");
   // No vault is listed and none is open: 21a, which has the way back.
-  await screen.findByRole("heading", { level: 1, name: "Welcome to Lockbox" });
+  await screen.findByRole("heading", { level: 1, name: "Welcome to Petalock" });
   expect(screen.getByRole("button", { name: "I already have a vault or a backup" })).toBeTruthy();
   expect(debugState().sessions).toEqual([]);
 });
@@ -596,7 +596,7 @@ test("an_unavailable_vault_shows_try_again_and_remove_also_when_it_is_the_only_v
 
   fireEvent.click(remove);
   pressIn(await findRemoveBox(), "Remove");
-  await screen.findByRole("heading", { level: 1, name: "Welcome to Lockbox" });
+  await screen.findByRole("heading", { level: 1, name: "Welcome to Petalock" });
   expect(sent("forget_vault")).toEqual([{ vault: { list: shell.listIdentity(), id: 8 } }]);
 });
 

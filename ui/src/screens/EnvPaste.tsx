@@ -15,7 +15,7 @@ import type { FolderEntry } from "./SideMenu";
 type Pick = "replace" | "keep_both";
 
 /** What the panel says when the shell no longer holds the pasted values (five minutes, or a lock): the person pastes again. */
-const LET_GO = "Lockbox let go of the pasted keys after 5 minutes. Paste the .env again.";
+const LET_GO = "Petalock let go of the pasted keys after 5 minutes. Paste the .env again.";
 
 const NOTHING_FOUND = "No keys were found in what you pasted.";
 

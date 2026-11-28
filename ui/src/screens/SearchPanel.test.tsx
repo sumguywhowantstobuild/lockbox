@@ -299,7 +299,7 @@ test("a_copy_that_fails_says_so_in_the_search", async () => {
   fireEvent.click(within(row).getByRole("button", { name: "Copy password" }));
   // In words, in the search where the person is looking, and the search stays.
   const alert = await within(dialog).findByRole("alert");
-  expect(alert.textContent).toBe("Lockbox couldn't reach that folder or file. Check that the drive is connected, then try again.");
+  expect(alert.textContent).toBe("Petalock couldn't reach that folder or file. Check that the drive is connected, then try again.");
   expect(screen.getByRole("dialog", { name: SEARCH })).toBeTruthy();
 });
 
@@ -488,7 +488,7 @@ test("open_site_goes_through_open_url", async () => {
     );
     fireEvent.click(within(row).getByRole("button", { name: "Open site" }));
     const alert = await within(dialog).findByRole("alert");
-    expect(alert.textContent).toBe("Lockbox can't use that. Check what you entered and try again.");
+    expect(alert.textContent).toBe("Petalock can't use that. Check what you entered and try again.");
   } finally {
     opened.mockRestore();
   }

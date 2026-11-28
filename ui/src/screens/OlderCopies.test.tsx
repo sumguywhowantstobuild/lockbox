@@ -319,7 +319,7 @@ test("a_copy_open_read_only_is_refused_its_delete_until_it_is_locked", async () 
 
 test("a_changed_listing_is_refreshed", async () => {
   const panel = await toTheList();
-  // Another listing replaced the shell's IDs, and a copy was deleted outside Lockbox: the page's IDs no longer match.
+  // Another listing replaced the shell's IDs, and a copy was deleted outside Petalock: the page's IDs no longer match.
   shell.forgetOlderIds();
   shell.olderCopies(copies().filter((entry) => entry.folder !== SECOND));
   const listings = sent("list_pre_restore").length;
@@ -363,7 +363,7 @@ test("a_lock_takes_the_older_copies_panel_and_what_was_typed_with_the_vault", as
 });
 
 const CHANGED_DETAILS =
-  "My vault's details were changed outside Lockbox. Its name, or other details kept beside your items, don't match what Lockbox last saved. Nothing in this older copy can change. If you didn't edit its files yourself, check your PC first.";
+  "My vault's details were changed outside Petalock. Its name, or other details kept beside your items, don't match what Petalock last saved. Nothing in this older copy can change. If you didn't edit its files yourself, check your PC first.";
 
 test("an_older_copy_whose_details_were_changed_says_so", async () => {
   const panel = await toTheList([

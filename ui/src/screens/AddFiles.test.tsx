@@ -40,9 +40,9 @@ const NOTES = { name: "scope-notes-demo.docx", size: 84 * 1024 };
 const THREE = [CONTRACT, DESIGN, NOTES];
 
 const PLURAL_ORIGINALS =
-  "The originals are still unprotected on your PC. Lockbox didn't change or delete them, so remove them yourself if you no longer need them.";
+  "The originals are still unprotected on your PC. Petalock didn't change or delete them, so remove them yourself if you no longer need them.";
 const SINGLE_ORIGINAL =
-  "The original is still unprotected on your PC. Lockbox didn't change or delete it, so remove it yourself if you no longer need it.";
+  "The original is still unprotected on your PC. Petalock didn't change or delete it, so remove it yourself if you no longer need it.";
 const KEEP_OPEN = "Keep the laptop open. Windows locking or sleeping cancels this, and files not finished aren't added.";
 const EXPIRED = "That choice has expired. Pick the files again.";
 
@@ -525,7 +525,7 @@ test("over_256_gib_names_the_file_and_its_size", async () => {
   const panel = await pickFiles([CONTRACT, { name: "huge-demo.img", size: 300 * GB }]);
   fireEvent.click(addButton(panel, "Add 2 files"));
   const alert = await within(panel).findByRole("alert");
-  expect(alert.textContent).toBe("huge-demo.img is 300 GB. Lockbox can keep a file up to 256 GB.");
+  expect(alert.textContent).toBe("huge-demo.img is 300 GB. Petalock can keep a file up to 256 GB.");
   expect(shell.runningJobs()).toEqual([]);
   expect(within(panel).getByRole("button", { name: "Add 2 files" }).getAttribute("aria-disabled")).toBe("true");
   fireEvent.click(within(panel).getByRole("button", { name: "Leave out huge-demo.img" }));

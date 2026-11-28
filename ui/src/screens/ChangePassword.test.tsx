@@ -37,7 +37,7 @@ const OFFER_WORDS = "Backups you already made still need the old details. A fres
 const WRONG_CURRENT = "That isn't the current password.";
 const TOO_SHORT = "At least 12 characters.";
 const MISMATCH = "The two new passwords don't match.";
-const ASK16 = "Your new password was saved, but the vault locked before Lockbox could say so. Unlock with the new one.";
+const ASK16 = "Your new password was saved, but the vault locked before Petalock could say so. Unlock with the new one.";
 const ASK9_HEADING = "Opened from the backup copy of this vault's details";
 // The banner's body, under its heading (4C Task 13b).
 const ASK9 = "If you changed this vault's password recently, it may need your previous password. Change the password again now that it's open.";
@@ -614,7 +614,7 @@ test("locked_before_it_could_say_shows_ask_16_on_that_vaults_unlock", async () =
   fill(panel, PASSWORD, NEW);
   shell.interruptChangeNext({ refused_before_write: { code: "core", kind: "io" } });
   submit(panel);
-  await within(panel).findByText("Lockbox couldn't reach that folder or file. Check that the drive is connected, then try again.");
+  await within(panel).findByText("Petalock couldn't reach that folder or file. Check that the drive is connected, then try again.");
   expect(inputs(panel).map((box) => box.value)).toEqual(["", "", ""]);
   expect(vaults[0]?.password).toBeUndefined();
   expect(screen.queryByText(ASK16)).toBeNull();

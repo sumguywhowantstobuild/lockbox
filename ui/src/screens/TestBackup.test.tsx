@@ -34,7 +34,7 @@ const USE_ANOTHER = "Use another backup if you have one.";
 const STORED_FILE = `A stored file in this backup doesn't match what the backup recorded, so it can't be trusted. ${USE_ANOTHER}`;
 const AN_ITEM = `An item in this backup doesn't match what the backup recorded, so it can't be trusted. ${USE_ANOTHER}`;
 const OTHER_VAULT = `This backup was made from a different vault. ${USE_ANOTHER}`;
-const NOT_WHOLE = `This file isn't a whole Lockbox backup, or its contents were changed after it was made, so it can't be trusted. ${USE_ANOTHER}`;
+const NOT_WHOLE = `This file isn't a whole Petalock backup, or its contents were changed after it was made, so it can't be trusted. ${USE_ANOTHER}`;
 const EXPIRED = "That choice has expired. Pick the backup again.";
 const GOOD_WORDS = "Every item and file checked out. Nothing was changed.";
 
@@ -136,7 +136,7 @@ test("settings_offers_test_a_backup_beside_back_up_and_the_pick_comes_first", as
   expect(buttonsIn(panel)).toEqual(["Close panel", "Pick another", "Show what you typed", "Cancel", "Test"]);
   expect(box(panel).getAttribute("type")).toBe("password");
   // No path, in the page or in what it was told.
-  expect(document.body.textContent).not.toMatch(/[A-Z]:[\\/]|\\Users|lockbox-test-folder/);
+  expect(document.body.textContent).not.toMatch(/[A-Z]:[\\/]|\\Users|petalock-test-folder/);
   expect(JSON.stringify(debugState())).not.toMatch(/[A-Z]:[\\/]|\\Users/);
   // Focus is on the step's heading.
   expect(document.activeElement).toBe(within(panel).getByRole("heading", { level: 2, name: "Test a backup" }));
@@ -184,14 +184,14 @@ test("pick_another_sends_the_choice_it_has_and_swaps_the_file", async () => {
   expect(first).toEqual({ choice: null });
   const choice = shell.testChoiceTokens()[0];
   expect(choice).toMatch(/^[0-9a-f]{32}$/);
-  shell.pickBackupNext("Older vault 2026-08-01.lockbox-backup", 5 * MB);
+  shell.pickBackupNext("Older vault 2026-08-01.petalock-backup", 5 * MB);
   press(panel, "Pick another");
-  await within(panel).findByText("Older vault 2026-08-01.lockbox-backup");
+  await within(panel).findByText("Older vault 2026-08-01.petalock-backup");
   expect(sent("test_backup_pick")[1]).toEqual({ choice });
   expect(within(panel).getByText("5 MB")).toBeTruthy();
   expect(within(panel).queryByText(BACKUP_NAME)).toBeNull();
   // The shell forgot the first choice and holds the new one.
-  expect(shell.testChoices()).toEqual([{ name: "Older vault 2026-08-01.lockbox-backup", size: 5 * MB }]);
+  expect(shell.testChoices()).toEqual([{ name: "Older vault 2026-08-01.petalock-backup", size: 5 * MB }]);
   // A closed picker leaves the file as it was.
   shell.dismissFileNext();
   press(panel, "Pick another");
@@ -201,7 +201,7 @@ test("pick_another_sends_the_choice_it_has_and_swaps_the_file", async () => {
   await act(async () => {
     await new Promise((done) => window.setTimeout(done, 5));
   });
-  expect(within(panel).getByText("Older vault 2026-08-01.lockbox-backup")).toBeTruthy();
+  expect(within(panel).getByText("Older vault 2026-08-01.petalock-backup")).toBeTruthy();
   expect(within(panel).queryByRole("alert")).toBeNull();
 });
 
@@ -436,18 +436,18 @@ test("other_refusals_are_said_in_the_tables_words_under_the_box_and_keep_the_fil
   const panel = await openTest();
   shell.refuseNext("test_backup", { code: "core", kind: "unsupported_version" });
   test_(panel, BACKUP_PASSWORD);
-  expect((await within(panel).findByRole("alert")).textContent).toBe("Update Lockbox to open this vault. A newer version made it.");
+  expect((await within(panel).findByRole("alert")).textContent).toBe("Update Petalock to open this vault. A newer version made it.");
   expect(within(panel).getByText(BACKUP_NAME)).toBeTruthy();
   shell.refuseNext("test_backup", { code: "core", kind: "io", what: "backup" });
   test_(panel, BACKUP_PASSWORD);
   await waitFor(() => {
-    expect(within(panel).getByRole("alert").textContent).toBe("Lockbox couldn't reach that folder or file. Check that the drive is connected, then try again.");
+    expect(within(panel).getByRole("alert").textContent).toBe("Petalock couldn't reach that folder or file. Check that the drive is connected, then try again.");
   });
   // Never the generic words, never the engine's own text.
   shell.refuseNext("test_backup", { code: "core", kind: "never_seen_before", detail: "E:/secret/folder" });
   test_(panel, BACKUP_PASSWORD);
   await waitFor(() => {
-    expect(within(panel).getByRole("alert").textContent).toBe("Something went wrong. Try again. If it keeps happening, close Lockbox and open it again.");
+    expect(within(panel).getByRole("alert").textContent).toBe("Something went wrong. Try again. If it keeps happening, close Petalock and open it again.");
   });
   expect(document.body.textContent).not.toContain("secret");
 });
@@ -464,9 +464,9 @@ test("expired_choice_asks_to_pick_again", async () => {
   // The file is gone from the panel, Test is off, and Pick a backup starts again from the picker.
   expect(within(panel).queryByText(BACKUP_NAME)).toBeNull();
   expect(within(panel).getByRole("button", { name: "Test" }).getAttribute("aria-disabled")).toBe("true");
-  shell.pickBackupNext("Fresh 2026-11-01.lockbox-backup", 2 * GB);
+  shell.pickBackupNext("Fresh 2026-11-01.petalock-backup", 2 * GB);
   press(panel, "Pick a backup");
-  await within(panel).findByText("Fresh 2026-11-01.lockbox-backup");
+  await within(panel).findByText("Fresh 2026-11-01.petalock-backup");
   expect(sent("test_backup_pick")[1]).toEqual({ choice: null });
   expect(within(panel).queryByRole("alert")).toBeNull();
   test_(panel, BACKUP_PASSWORD);

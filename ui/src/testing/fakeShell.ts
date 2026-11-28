@@ -1,7 +1,7 @@
 // A stand-in for the Rust side, for the screens' tests. It answers the commands the first screens call, in the shapes
 // the shell's own serialisers pin (`views.rs`, `error.rs`, `session.rs`): an answer carries its session and
 // generation, a refusal is a plain object with a `code`, and a command refuses a field it does not know with the
-// shell's fixed malformed-request answer. A lock changes the generation and sends `lockbox://locked` before the
+// shell's fixed malformed-request answer. A lock changes the generation and sends `petalock://locked` before the
 // command that caused it answers, as the shell does.
 import type { Mock } from "vitest";
 
@@ -69,7 +69,7 @@ export interface FakeVault {
    */
   markUnreadable?: boolean;
   /**
-   * The vault's details were changed outside Lockbox: every unlock reports `header_mac_mismatch` until `accept_header`,
+   * The vault's details were changed outside Petalock: every unlock reports `header_mac_mismatch` until `accept_header`,
    * and the engine refuses a new recovery key meanwhile, as `HeaderGuard` does.
    */
   headerChanged?: boolean;
@@ -90,7 +90,7 @@ export interface FakeVault {
    * `used` is a copy an item still attaches: it waits in the quarantine for the next unlock, and is neither listed nor deleted.
    */
   orphans?: { file_id: string; length: number; stored: number; used?: boolean }[];
-  /** A newer Lockbox made this vault: unlock is refused as `unsupported_version`. */
+  /** A newer Petalock made this vault: unlock is refused as `unsupported_version`. */
   newer?: boolean;
   /** A long change holds the vault past the short wait: a search reports it in `busy` and gives none of its items. */
   busy?: boolean;
@@ -123,7 +123,7 @@ export const WRONG_PASSWORD = { code: "core", kind: "wrong_password" };
 export const LOCKED = { code: "locked" };
 /** What the shell sends when the vault list file can't be read (`registry.rs`: `Damaged { what: "vault list" }`). */
 export const VAULT_LIST_DAMAGED = { code: "core", kind: "damaged", what: "vault list" };
-/** What the engine sends when a newer Lockbox made the vault (`unsupported_version`). */
+/** What the engine sends when a newer Petalock made the vault (`unsupported_version`). */
 export const NEWER_VAULT = { code: "core", kind: "unsupported_version" };
 /** What the engine refuses a new recovery key with while a changed header waits to be accepted (`HeaderGuard::check`). */
 const ACCEPT_FIRST = { code: "core", kind: "invalid_input", what: "accept the header change first" };
@@ -295,7 +295,7 @@ function summary(item: FakeItem) {
   };
 }
 
-/** What a job belongs to, as `lockbox://job-started` says: a session at a generation, or the launch at a lock epoch (a test of a backup). */
+/** What a job belongs to, as `petalock://job-started` says: a session at a generation, or the launch at a lock epoch (a test of a backup). */
 type JobScopeOf = { type: "session"; session: number; generation: number } | { type: "launch"; epoch: number };
 
 export interface FakeShell {
@@ -303,11 +303,11 @@ export interface FakeShell {
   calls: { cmd: string; args: unknown }[];
   /** Every `copy_field` that reached the shell, as it was sent. */
   copied: Record<string, unknown>[];
-  /** Sends `lockbox://locked` for the session and moves its generation on, as a lock does. */
+  /** Sends `petalock://locked` for the session and moves its generation on, as a lock does. */
   lock(session: number, reason?: string): void;
   /**
    * Locks the session in the shell without telling the page: the generation moves on and everything the session had parked (a cloud
-   * question, a pasted `.env`) is let go, as a lock does, but no `lockbox://locked` is sent. The page learns of it only from the next
+   * question, a pasted `.env`) is let go, as a lock does, but no `petalock://locked` is sent. The page learns of it only from the next
    * refusal (`locked`) or stale answer, as when a lock event is missed.
    */
   lockWithoutEvent(session: number): void;
@@ -373,7 +373,7 @@ export interface FakeShell {
   holdPrinterList(): () => void;
   /** What launch found, as `launch_notices` answers it (kept, not used up). Set before the page starts. */
   setLaunchNotices(notices: object[]): void;
-  /** A notice of a running app: sent as `lockbox://notice` to the page, and kept for `launch_notices` as `tell` does. */
+  /** A notice of a running app: sent as `petalock://notice` to the page, and kept for `launch_notices` as `tell` does. */
   tell(notice: object): void;
   /** How many times `reset_output_journal` reached the shell. */
   outputJournalResets(): number;
@@ -392,7 +392,7 @@ export interface FakeShell {
   /** What the next `clear_copied` answers (`"cleared"` until set): `"gone"` or `"busy"` for the shell's other answers. */
   answerClearCopied(answer: "cleared" | "gone" | "busy"): void;
   /**
-   * A close or a Quit while a job runs, as the shell asks it (Plan 4B Task 12): `lockbox://close-asked` goes out and the question is pending,
+   * A close or a Quit while a job runs, as the shell asks it (Plan 4B Task 12): `petalock://close-asked` goes out and the question is pending,
    * with nothing locked, hidden or cancelled, until `close_answer`. `running` is the kinds as the shell names them (distinct, in start order);
    * `restoreWaiting` is a finished restore waiting for its yes at 24d (Task 13d), alone or beside jobs. Each call is a new question: the shell
    * gives it the next number (1, 2, ...), which is in the event and is returned; `close_answer` must name it, and an answer naming another
@@ -401,9 +401,9 @@ export interface FakeShell {
   askClose(reason: "close" | "quit", options: { running: string[]; pastSwap?: boolean; restoreWaiting?: boolean }): number;
   /** The shell says the pending question again (a second close or Quit, a reloaded page): the same event, with the same `question` number. Nothing if none is pending. */
   repeatClose(): void;
-  /** How many `lockbox://close-asked` events the page's listener has been handed so far (every one, however it was sent). */
+  /** How many `petalock://close-asked` events the page's listener has been handed so far (every one, however it was sent). */
   closeAskedHeard(): number;
-  /** The shell's lock epoch changes (Lock all, Windows locking or sleeping, an idle lock): `lockbox://lock-epoch` goes out and a pending question is dropped. */
+  /** The shell's lock epoch changes (Lock all, Windows locking or sleeping, an idle lock): `petalock://lock-epoch` goes out and a pending question is dropped. */
   changeLockEpoch(reason?: string): void;
   /** Whether a question is waiting for `close_answer`. */
   pendingClose(): boolean;
@@ -415,7 +415,7 @@ export interface FakeShell {
   sendRaw(channel: string, payload: unknown): void;
   /** The shell has already shown 5b in an earlier run: the next close hides at once. */
   markCloseExplained(): void;
-  /** A notice sent as `lockbox://notice` only, never kept for `launch_notices` (`first_close` is only ever an event). */
+  /** A notice sent as `petalock://notice` only, never kept for `launch_notices` (`first_close` is only ever an event). */
   sendEvent(notice: object): void;
   /** Every `open_url` that reached the shell, as it was sent (a link the shell refused is not here). */
   opened: Record<string, unknown>[];
@@ -479,7 +479,7 @@ export interface FakeShell {
   /**
    * The save shortcut pressed with `what` on the clipboard: a text (kept as read, the surrounding spaces and line breaks too), `"empty"`
    * (no text: an image, say) or `"too_large"`. A new slot with a new id replaces the one waiting, as the shell does, and
-   * `lockbox://capture` is sent with `changed` and `env_keys` worked out by the connection's rules. The clipboard is left as it is.
+   * `petalock://capture` is sent with `changed` and `env_keys` worked out by the connection's rules. The clipboard is left as it is.
    */
   press(what: { text: string } | "empty" | "too_large"): void;
   /** What the clipboard holds now (`null` for no text): set it to what the person copied before pressing, or to something else after. */
@@ -489,7 +489,7 @@ export interface FakeShell {
   failClipboardClearNext(): void;
   /** The slot the shell holds, as the page can only know it by asking: its id, state and the vault it was handed to (session and generation). `null` for none. */
   captureSlot(): { id: string; state: string; chosen: number | null; chosenGeneration: number | null } | null;
-  /** Empties the slot as a lock of its vault does: `lockbox://capture` with `gone` is sent. */
+  /** Empties the slot as a lock of its vault does: `petalock://capture` with `gone` is sent. */
   emptyCaptureSlot(): void;
   /** Empties the slot and says nothing, as when the page missed the `gone` event: the next command about it is `not_found`. */
   forgetCaptureSlot(): void;
@@ -559,20 +559,20 @@ export interface FakeShell {
   /** How many summary handles the shell holds now (one per finished Save all files or export, until `close_output`, a lock or `dropParkedChoices`). */
   heldOutputs(): number;
   /**
-   * Holds every stored-file command's answer until `release` is called, as a big file would: `lockbox://busy` says the vault is
+   * Holds every stored-file command's answer until `release` is called, as a big file would: `petalock://busy` says the vault is
    * working (`import`, `save_copy` or `open`) as the command arrives, and says it is not when the answer is decided, which is
    * at release, as the shell decides it: a lock in between leaves a refusal (`locked`) and nothing done.
    */
   holdFiles(): () => void;
   /**
    * The long jobs of a held command that has a request (an add, an attach, a Save a copy and its cloud yes), as the shell's job table would
-   * list them: sent to the page by `lockbox://job-started` as the command arrives, ended by `lockbox://progress` with `finished` when it is let
+   * list them: sent to the page by `petalock://job-started` as the command arrives, ended by `petalock://progress` with `finished` when it is let
    * go, cancelled (`cancel_operation`) or its vault locks. The operation is the shell's number, which the page learns from that event only.
    */
   runningJobs(): { request: number; operation: number; scope: { type: "session"; session: number; generation: number }; kind: string }[];
   /** The launch-scoped jobs running (a test of a backup), as `runningJobs` lists a vault's: the scope names the lock epoch the job began in. */
   runningLaunchJobs(): { request: number; operation: number; scope: { type: "launch"; epoch: number }; kind: string }[];
-  /** Sends `lockbox://progress` for a running job with these figures. */
+  /** Sends `petalock://progress` for a running job with these figures. */
   sendProgress(operation: number, done: number, total: number): void;
   /**
    * Test a backup (Plan 4B Task 4). The shell holds the picked backups under choices of 32 hex characters, launch-scoped: a pick forgets the choice it was
@@ -597,7 +597,7 @@ export interface FakeShell {
    */
   holdTest(): () => void;
   /**
-   * Holds the `lockbox://job-started` of a test of a backup until `release` is called, as an event that reaches the page late (the command has begun
+   * Holds the `petalock://job-started` of a test of a backup until `release` is called, as an event that reaches the page late (the command has begun
    * and the job is running in the shell; the page has not heard which operation it is).
    */
   holdJobStarted(): () => void;
@@ -700,7 +700,7 @@ export interface FakeShell {
   /** The name and the choice of the backup the last `backup_vault` wrote and parked for 22c's Test this backup. */
   lastBackupName(): string;
   lastBackupChoice(): string;
-  /** How many opened copies another program holds, as the last `lockbox://notice` of `open_cleanup` told. `retry_open_cleanup` leaves this many. */
+  /** How many opened copies another program holds, as the last `petalock://notice` of `open_cleanup` told. `retry_open_cleanup` leaves this many. */
   retryLeaves(stillOpen: number): void;
   /** How many times `retry_open_cleanup` reached the shell. */
   retries(): number;
@@ -1059,7 +1059,7 @@ export const FILE_DAMAGED = { code: "core", kind: "damaged", what: "file" };
 const CANNOT_HOLD_FILES = { code: "core", kind: "invalid_input", what: "item cannot hold files" };
 /** The types the shell asks about before it opens them (`is_executable`: a few of the many it knows). */
 const PROGRAM_FILE = /\.(exe|bat|cmd|msi|ps1|scr|com)$/i;
-/** What a stored-file command is called in `lockbox://busy`. */
+/** What a stored-file command is called in `petalock://busy`. */
 const OPERATION: Record<string, string> = {
   open_file: "open",
   save_file_copy: "save_copy",
@@ -1072,7 +1072,7 @@ const OPERATION: Record<string, string> = {
   save_all_start: "save_all",
 };
 
-/** What a stored-file command that takes a `request` is called in `lockbox://job-started` and `lockbox://progress` (the others start no job event). */
+/** What a stored-file command that takes a `request` is called in `petalock://job-started` and `petalock://progress` (the others start no job event). */
 const JOB_KIND: Record<string, string> = {
   add_file: "import",
   attach_file: "import",
@@ -1088,7 +1088,7 @@ const MAX_FILE = 256 * 1024 ** 3;
 /** What the shell sends for a choice that was used, dropped, expired or is another session's. */
 export const CHOICE_EXPIRED = { code: "choice_expired" };
 /** The backup the picker chooses when a test names none, how big it is, and the password it was made with (the day it was made, not today's). */
-export const BACKUP_NAME = "My vault 2026-10-02.lockbox-backup";
+export const BACKUP_NAME = "My vault 2026-10-02.petalock-backup";
 const BACKUP_SIZE = 1_288_490_188;
 export const BACKUP_PASSWORD = "from-the-day-it-was-made";
 /** The backup the fake's backups write, as named and kept for 22c. */
@@ -1108,7 +1108,7 @@ export interface FakeOlderCopy {
   last_written?: string | null;
   size?: number | null;
   password?: string;
-  /** Its details were changed outside Lockbox: opening it answers `header_changed: true`. */
+  /** Its details were changed outside Petalock: opening it answers `header_changed: true`. */
   headerChanged?: boolean;
 }
 
@@ -1238,11 +1238,11 @@ export function installFakeShell(
   let heldSettings: (() => void)[] | undefined;
   // The handlers each event has, as `listen` was given them.
   const handlers = new Map<string, ((event: { payload: unknown }) => void)[]>();
-  // How many `lockbox://close-asked` events a listener was handed, by whatever sent them (a test checks a repeat really arrived).
+  // How many `petalock://close-asked` events a listener was handed, by whatever sent them (a test checks a repeat really arrived).
   let closeAskedHeard = 0;
   const emit = (event: string, payload: unknown): void => {
     for (const handler of handlers.get(event) ?? []) {
-      if (event === "lockbox://close-asked") closeAskedHeard += 1;
+      if (event === "petalock://close-asked") closeAskedHeard += 1;
       handler({ payload });
     }
   };
@@ -1508,7 +1508,7 @@ export function installFakeShell(
     return {
       name: found.name,
       made: found.made,
-      folder_shown: `${found.usual ? "C:\\Users\\Someone\\Lockbox Vaults" : "D:\\Vaults"}\\${found.name}`,
+      folder_shown: `${found.usual ? "C:\\Users\\Someone\\Petalock Vaults" : "D:\\Vaults"}\\${found.name}`,
       usual: found.usual,
       replaces_existing: found.replaces,
     };
@@ -1537,7 +1537,7 @@ export function installFakeShell(
     if (slot === undefined) return;
     const gone = slot.id;
     slot = undefined;
-    emit("lockbox://capture", { capture_id: gone, state: "gone", changed: false, env_keys: null });
+    emit("petalock://capture", { capture_id: gone, state: "gone", changed: false, env_keys: null });
   };
 
   listen.mockImplementation((event: string, handler: (event: { payload: unknown }) => void) => {
@@ -1559,19 +1559,19 @@ export function installFakeShell(
     for (const [token, held] of savePlans) if (held.session === session) savePlans.delete(token);
     for (const [token, held] of parkedSaves) if (held.session === session) parkedSaves.delete(token);
     for (const [token, held] of outputs) if (held.session === session) outputs.delete(token);
-    emit("lockbox://locked", { session, generation: entry.generation, reason });
+    emit("petalock://locked", { session, generation: entry.generation, reason });
     // A lock stops every job of its session, and each says it has ended.
     for (const job of [...running.values()]) {
       if (job.scope.type !== "session" || job.scope.session !== session) continue;
       running.delete(job.operation);
-      emit("lockbox://progress", { operation: job.operation, scope: job.scope, kind: job.kind, done: job.done, total: job.total, finished: true });
+      emit("petalock://progress", { operation: job.operation, scope: job.scope, kind: job.kind, done: job.done, total: job.total, finished: true });
     }
     // The copy handed to this vault goes with its lock.
     if (slot?.chosen === session) emptySlot();
   };
 
   /**
-   * The shell's lock epoch moves on (Lock all, an idle lock, Windows locking or sleeping, the app closing): `lockbox://lock-epoch` goes out, the backups
+   * The shell's lock epoch moves on (Lock all, an idle lock, Windows locking or sleeping, the app closing): `petalock://lock-epoch` goes out, the backups
    * it held for Test a backup are let go, and every launch-scoped job ends (its command, still out, is refused as `locked` when it answers).
    */
   const bumpEpoch = (reason = "manual"): void => {
@@ -1588,9 +1588,9 @@ export function installFakeShell(
     for (const job of [...running.values()]) {
       if (job.scope.type !== "launch" || (job.pastTheSwap ?? false)) continue;
       running.delete(job.operation);
-      emit("lockbox://progress", { operation: job.operation, scope: job.scope, kind: job.kind, done: job.done, total: job.total, finished: true });
+      emit("petalock://progress", { operation: job.operation, scope: job.scope, kind: job.kind, done: job.done, total: job.total, finished: true });
     }
-    emit("lockbox://lock-epoch", { epoch: lockEpoch, reason });
+    emit("petalock://lock-epoch", { epoch: lockEpoch, reason });
   };
 
   /** 5b's button, or a second close while it shows: the flag is kept, `explain: false` is sent, the window hides. */
@@ -1598,7 +1598,7 @@ export function installFakeShell(
     closeExplained = true;
     explaining = false;
     hidden = true;
-    emit("lockbox://notice", { kind: "first_close", explain: false });
+    emit("petalock://notice", { kind: "first_close", explain: false });
   };
 
   /** The window's close, as the shell does it with nothing running (and after a yes): every vault locks, then 5b or the hide. */
@@ -1612,7 +1612,7 @@ export function installFakeShell(
       hidden = true;
     } else {
       explaining = true;
-      emit("lockbox://notice", { kind: "first_close", explain: true });
+      emit("petalock://notice", { kind: "first_close", explain: true });
     }
   };
 
@@ -3035,7 +3035,7 @@ export function installFakeShell(
         // And parks the backup it wrote for 22c's Test this backup, which opens it with this vault's password (the one it was made with).
         nextToken += 1;
         const token = nextToken.toString(16).padStart(32, "0");
-        const name = `${vault.name ?? "Vault"} ${BACKUP_DAY}.lockbox-backup`;
+        const name = `${vault.name ?? "Vault"} ${BACKUP_DAY}.petalock-backup`;
         testHeld.set(token, { name, size: view.size_on_disk, password: vault.password ?? PASSWORD });
         lastBackup = { name, choice: token };
         return tagged(sent.session, sent.generation, { Done: { ...view, test: { choice: token, file_name: name, size: view.size_on_disk } } });
@@ -3726,7 +3726,7 @@ export function installFakeShell(
 
   /**
    * Test a backup, as the shell does it: the arguments are checked and the credential read as one box's (`password_or_key`); a choice that is not held
-   * is `choice_expired`; only then does the job begin (launch-scoped, kind `test`, `lockbox://job-started` before the answer). It ends when the answer is
+   * is `choice_expired`; only then does the job begin (launch-scoped, kind `test`, `petalock://job-started` before the answer). It ends when the answer is
    * decided (held until released with `holdTest`): a Cancel answers `cancelled`; a lock epoch that moved meanwhile refuses `locked`; a wrong password is
    * `wrong_password`; a damaged backup is `damaged` with the first failing `what`; else the summary. The choice is kept by every one of these.
    */
@@ -3752,9 +3752,9 @@ export function installFakeShell(
     };
     running.set(job.operation, job);
     const startedEvent = { request, operation: job.operation, scope: job.scope, kind: job.kind };
-    if (heldStarts === undefined) emit("lockbox://job-started", startedEvent);
+    if (heldStarts === undefined) emit("petalock://job-started", startedEvent);
     else heldStarts.push(() => {
-      emit("lockbox://job-started", startedEvent);
+      emit("petalock://job-started", startedEvent);
     });
     return new Promise((resolve, reject) => {
       let settled = false;
@@ -3763,7 +3763,7 @@ export function installFakeShell(
         settled = true;
         if (running.delete(job.operation)) {
           if (!cancelled) job.done = job.total;
-          emit("lockbox://progress", { operation: job.operation, scope: job.scope, kind: job.kind, done: job.done, total: job.total, finished: true });
+          emit("petalock://progress", { operation: job.operation, scope: job.scope, kind: job.kind, done: job.done, total: job.total, finished: true });
         }
         const found = ((): { refused: object } | { done: object } => {
           if (cancelled) return { refused: { code: "cancelled" } };
@@ -3795,10 +3795,10 @@ export function installFakeShell(
 
   /**
    * Open a backup read-only, as the shell does it: the arguments are checked and the credential read as one box's (`password_or_key`); a choice that is not
-   * held (or is a test's) is `choice_expired`, before anything; only then does the job begin (launch-scoped, kind `open_backup`, `lockbox://job-started` before
+   * held (or is a test's) is `choice_expired`, before anything; only then does the job begin (launch-scoped, kind `open_backup`, `petalock://job-started` before
    * the answer). It ends when the answer is decided (held until released with `holdOpen`): a Cancel answers `cancelled`; a lock epoch that moved meanwhile
    * refuses `locked` (the choice went with it); a wrong password is `wrong_password`; a damaged backup is `damaged`; else the backup is a read-only session whose
-   * name is the file's name without `.lockbox-backup`, and the choice is used up. A wrong password, damage and a Stop keep the choice. A backup that is open
+   * name is the file's name without `.petalock-backup`, and the choice is used up. A wrong password, damage and a Stop keep the choice. A backup that is open
    * already is answered as it is (and its choice is used up too).
    */
   const openBackupCommand = (args: unknown): Promise<unknown> => {
@@ -3824,9 +3824,9 @@ export function installFakeShell(
     };
     running.set(job.operation, job);
     const startedEvent = { request, operation: job.operation, scope: job.scope, kind: job.kind };
-    if (heldStarts === undefined) emit("lockbox://job-started", startedEvent);
+    if (heldStarts === undefined) emit("petalock://job-started", startedEvent);
     else heldStarts.push(() => {
-      emit("lockbox://job-started", startedEvent);
+      emit("petalock://job-started", startedEvent);
     });
     return new Promise((resolve, reject) => {
       let settled = false;
@@ -3835,7 +3835,7 @@ export function installFakeShell(
         settled = true;
         if (running.delete(job.operation)) {
           if (!cancelled) job.done = job.total;
-          emit("lockbox://progress", { operation: job.operation, scope: job.scope, kind: job.kind, done: job.done, total: job.total, finished: true });
+          emit("petalock://progress", { operation: job.operation, scope: job.scope, kind: job.kind, done: job.done, total: job.total, finished: true });
         }
         if (cancelled) {
           rejectPlain(reject, { code: "cancelled" });
@@ -3869,7 +3869,7 @@ export function installFakeShell(
         }
         const vault: FakeVault = {
           id: -(nextSession + 1),
-          name: held.name.replace(/\.lockbox-backup$/, ""),
+          name: held.name.replace(/\.petalock-backup$/, ""),
           password: held.password,
           readOnly: true,
           kind: "backup",
@@ -3899,7 +3899,7 @@ export function installFakeShell(
 
   /**
    * 24a's check of the picked backup, as the shell does it: the arguments are checked and the credential read as one box's; a pick that is not held is
-   * `choice_expired`, before anything; only then does the job begin (launch-scoped, kind `restore_check`, `lockbox://job-started` under the page's
+   * `choice_expired`, before anything; only then does the job begin (launch-scoped, kind `restore_check`, `petalock://job-started` under the page's
    * request, no progress). It ends when the answer is decided (held until released with `holdRestoreCheck`): a Cancel answers `cancelled` and keeps the pick
    * and no result; otherwise the answer is the check's own (a wrong password, damage, or what was found).
    */
@@ -3923,9 +3923,9 @@ export function installFakeShell(
     };
     running.set(job.operation, job);
     const startedEvent = { request, operation: job.operation, scope: job.scope, kind: job.kind };
-    if (heldStarts === undefined) emit("lockbox://job-started", startedEvent);
+    if (heldStarts === undefined) emit("petalock://job-started", startedEvent);
     else heldStarts.push(() => {
-      emit("lockbox://job-started", startedEvent);
+      emit("petalock://job-started", startedEvent);
     });
     return new Promise((resolve, reject) => {
       let settled = false;
@@ -3970,9 +3970,9 @@ export function installFakeShell(
     };
     running.set(job.operation, job);
     const startedEvent = { request, operation: job.operation, scope: job.scope, kind: job.kind };
-    if (heldStarts === undefined) emit("lockbox://job-started", startedEvent);
+    if (heldStarts === undefined) emit("petalock://job-started", startedEvent);
     else heldStarts.push(() => {
-      emit("lockbox://job-started", startedEvent);
+      emit("petalock://job-started", startedEvent);
     });
     return { job, epoch };
   };
@@ -3990,7 +3990,7 @@ export function installFakeShell(
         settled = true;
         if (running.delete(job.operation)) {
           if (!cancelled) job.done = job.total;
-          emit("lockbox://progress", { operation: job.operation, scope: job.scope, kind: job.kind, done: job.done, total: job.total, finished: true });
+          emit("petalock://progress", { operation: job.operation, scope: job.scope, kind: job.kind, done: job.done, total: job.total, finished: true });
         }
         if (cancelled) {
           // A Stop lets the pick go.
@@ -4082,12 +4082,12 @@ export function installFakeShell(
     const copy = restorePrepared.get(sent.restore);
     if (copy === undefined || copy.ended) return refuse({ code: "cancelled" });
     const { job } = restoreJob(request, 1, true);
-    emit("lockbox://progress", { operation: job.operation, scope: job.scope, kind: job.kind, done: 0, total: 1, finished: false });
+    emit("petalock://progress", { operation: job.operation, scope: job.scope, kind: job.kind, done: 0, total: 1, finished: false });
     return new Promise((resolve, reject) => {
       const end = (): void => {
         running.delete(job.operation);
         job.done = 1;
-        emit("lockbox://progress", { operation: job.operation, scope: job.scope, kind: job.kind, done: 1, total: 1, finished: true });
+        emit("petalock://progress", { operation: job.operation, scope: job.scope, kind: job.kind, done: 1, total: 1, finished: true });
         if (restoreCommitRefusal !== undefined) {
           const refusal = restoreCommitRefusal;
           restoreCommitRefusal = undefined;
@@ -4325,9 +4325,9 @@ export function installFakeShell(
           cancel: () => undefined,
         };
         running.set(job.operation, job);
-        emit("lockbox://job-started", { request, operation: job.operation, scope: job.scope, kind: job.kind });
+        emit("petalock://job-started", { request, operation: job.operation, scope: job.scope, kind: job.kind });
       }
-      emit("lockbox://busy", { session, operations: [OPERATION[cmd]] });
+      emit("petalock://busy", { session, operations: [OPERATION[cmd]] });
       return new Promise((resolve, reject) => {
         const settle = (): void => {
           const late = refusals.get(cmd);
@@ -4351,9 +4351,9 @@ export function installFakeShell(
           // The job's last event says it ended, with the whole of it done on success; a lock has already sent its own.
           if (job !== undefined && running.delete(job.operation)) {
             if (!cancelled) job.done = job.total;
-            emit("lockbox://progress", { operation: job.operation, scope: job.scope, kind: job.kind, done: job.done, total: job.total, finished: true });
+            emit("petalock://progress", { operation: job.operation, scope: job.scope, kind: job.kind, done: job.done, total: job.total, finished: true });
           }
-          emit("lockbox://busy", { session, operations: [] });
+          emit("petalock://busy", { session, operations: [] });
           if (cancelled && batch !== undefined && request !== undefined) {
             // A Stop on a batch is not a refusal: the files before it stay stored, and the answer says what went in and what did not.
             batches.delete(request);
@@ -4653,7 +4653,7 @@ export function installFakeShell(
     },
     tell: (notice) => {
       launchNotices.push(notice);
-      emit("lockbox://notice", notice);
+      emit("petalock://notice", notice);
     },
     outputJournalResets: () => outputResets,
     closeWindow: closeAsBefore,
@@ -4661,11 +4661,11 @@ export function installFakeShell(
       closeQuestions += 1;
       const event = { reason, running: kinds, past_swap: pastSwap, restore_waiting: restoreWaiting, question: closeQuestions };
       pendingClose = { reason, question: closeQuestions, event };
-      emit("lockbox://close-asked", event);
+      emit("petalock://close-asked", event);
       return closeQuestions;
     },
     repeatClose: () => {
-      if (pendingClose !== undefined) emit("lockbox://close-asked", pendingClose.event);
+      if (pendingClose !== undefined) emit("petalock://close-asked", pendingClose.event);
     },
     closeAskedHeard: () => closeAskedHeard,
     changeLockEpoch: bumpEpoch,
@@ -4685,7 +4685,7 @@ export function installFakeShell(
       closeExplained = true;
     },
     sendEvent: (notice) => {
-      emit("lockbox://notice", notice);
+      emit("petalock://notice", notice);
     },
     opened,
     holdSearch: () => {
@@ -5066,7 +5066,7 @@ export function installFakeShell(
       if (job === undefined) return;
       job.done = done;
       job.total = total;
-      emit("lockbox://progress", { operation, scope: job.scope, kind: job.kind, done, total, finished: false });
+      emit("petalock://progress", { operation, scope: job.scope, kind: job.kind, done, total, finished: false });
     },
     retryLeaves: (stillOpen) => {
       stillOpenAfterRetry = stillOpen;
@@ -5123,7 +5123,7 @@ export function installFakeShell(
       // A copy was waiting and its value differs from this one's.
       const changed = before !== undefined && value(before) !== value(next);
       slot = next;
-      emit("lockbox://capture", slotEvent(next, changed));
+      emit("petalock://capture", slotEvent(next, changed));
     },
     setClipboard: (text) => {
       clipboardText = text;

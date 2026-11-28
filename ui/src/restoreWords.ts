@@ -10,8 +10,8 @@ export const SAY_RESTORE = "A restore keeps your current vault beside the restor
 /** 24c's line under the bar. */
 export const KEEP_OPEN = "Keep the laptop open. Windows locking or sleeping cancels this.";
 
-/** 24d's second line. It names what ends a waiting restore (spec 7.4): Lock all, Close anyway (closing Lockbox), and Windows locking or sleeping. An idle lock does not. */
-export const WAITS = "This waits for your answer, however long you take. Lock all, closing Lockbox, or Windows locking or sleeping cancels it.";
+/** 24d's second line. It names what ends a waiting restore (spec 7.4): Lock all, Close anyway (closing Petalock), and Windows locking or sleeping. An idle lock does not. */
+export const WAITS = "This waits for your answer, however long you take. Lock all, closing Petalock, or Windows locking or sleeping cancels it.";
 
 /** The words of the folder step's refusals, for the drives a vault can't live on: the engine's four whats are one answer to the person. */
 const DRIVE_WHATS: ReadonlySet<string> = new Set(["removable drive", "network drive", "drive type not supported", "file system not supported"]);
@@ -71,7 +71,7 @@ export function passwordFromWords(made: string | null): string {
  * open vault's (Ask 4) gave it, and the person has not chosen another.
  */
 export function whereWords(name: string, usual: boolean, replaces: boolean, beside: "damaged" | "open" | null = null): string {
-  if (replaces) return `${name} is already in this folder. Lockbox asks before replacing it, and keeps your current one beside it.`;
+  if (replaces) return `${name} is already in this folder. Petalock asks before replacing it, and keeps your current one beside it.`;
   if (beside === "damaged") return `It unpacks as ${name}, in a new folder beside the damaged one.`;
   if (beside === "open") return `It unpacks as ${name}, in the same folder as your vault.`;
   return usual ? `It unpacks as ${name}, in your usual vaults folder.` : `It unpacks as ${name}, in the folder you chose.`;
@@ -83,14 +83,14 @@ export function whereWords(name: string, usual: boolean, replaces: boolean, besi
 /** Ask 6's heading, which the screen for notes that can't be read shares. */
 export const UNDONE_HEADING = "A restore didn't finish";
 
-/** Ask 6: Lockbox was closed partway through and put the vault back. */
+/** Ask 6: Petalock was closed partway through and put the vault back. */
 export function undoneWords(name: string | null): string {
-  return `Lockbox was closed partway through, and has put ${name ?? "your vault"} back the way it was. Nothing is lost. You can start the restore again.`;
+  return `Petalock was closed partway through, and has put ${name ?? "your vault"} back the way it was. Nothing is lost. You can start the restore again.`;
 }
 
 /** The finished notice on the lock screen. */
 export function finishedWords(name: string | null): string {
-  return `Lockbox finished restoring ${name ?? "a vault"}. Unlock with the password from when that backup was made.`;
+  return `Petalock finished restoring ${name ?? "a vault"}. Unlock with the password from when that backup was made.`;
 }
 
 /** Ask 7's heading. */
@@ -107,13 +107,13 @@ export const DRIVE_STILL_MISSING = "That drive still isn't connected.";
 /** The state with no drawn screen: the drive is there but a rename failed. */
 export const PENDING_HEADING = "A restore is waiting";
 export const PENDING_WORDS =
-  "Lockbox couldn't finish putting things back yet. Close anything that may be using the vault's folder, then try again. Dismissing leaves the folders there as they are, for you to sort out.";
+  "Petalock couldn't finish putting things back yet. Close anything that may be using the vault's folder, then try again. Dismissing leaves the folders there as they are, for you to sort out.";
 /** What Try again says when it still cannot finish. */
 export const RESTORE_STILL_WAITING = "That restore still isn't finished.";
 
 /** The state with no drawn screen: the notes on what the restore had done can't be read. */
 export const UNCLEAR_WORDS =
-  "Lockbox can't read its notes on what the restore had done. Dismissing leaves the folders there as they are, for you to sort out.";
+  "Petalock can't read its notes on what the restore had done. Dismissing leaves the folders there as they are, for you to sort out.";
 
 /** Ask 8's heading: the vault by its name when the list gives one, else "This vault". */
 export function damagedHeading(name: string | null): string {

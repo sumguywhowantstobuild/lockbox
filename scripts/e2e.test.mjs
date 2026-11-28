@@ -1,5 +1,5 @@
 // Tests for scripts/e2e.mjs and e2e/lib/app.mjs, e2e/lib/folderbox.mjs: the end-to-end runner's own logic. Nothing here
-// starts Lockbox or a driver, and nothing touches the real state folders: every run is handed disposable folders. The
+// starts Petalock or a driver, and nothing touches the real state folders: every run is handed disposable folders. The
 // tests that need the built app are in e2e/real-app.test.mjs, which scripts/e2e.mjs runs. Every comparison counts what
 // it compared and fails on zero.
 
@@ -54,7 +54,7 @@ function makeWorld() {
     writeFileSync(join(locations[key], "MU-note.txt"), `Made-up note for ${key}\n`);
     writeFileSync(join(locations[key], "sub", "MU-data.bin"), Buffer.from(Array.from({ length: 64 }, (_, i) => (i + key.length) % 256)));
   }
-  const journal = join(env.USERPROFILE, "Lockbox Vaults.swap-journal.json");
+  const journal = join(env.USERPROFILE, "Petalock Vaults.swap-journal.json");
   return {
     root,
     locations,
@@ -104,14 +104,14 @@ function fakeRun(world, { suites, build, isRunning = () => false, env = {}, spec
 
 // ---- the refusal ---------------------------------------------------------------------------------------------------
 
-test("e2e_refuses_to_start_while_lockbox_runs", async () => {
+test("e2e_refuses_to_start_while_petalock_runs", async () => {
   const world = makeWorld();
   try {
     const before = world.prints();
     const run = fakeRun(world, { isRunning: () => true });
     const result = await run.promise;
     assert.equal(result.code, 2, "a refusal ends with code 2");
-    assert.match(result.lines.join("\n"), /Lockbox is running/);
+    assert.match(result.lines.join("\n"), /Petalock is running/);
     assert.deepEqual(run.calls, ["isRunning"], "nothing else ran: no tool check, no build, no swap, no suites");
     assertSamePrints(before, world.prints(), "the state after a refusal");
     assert.equal(existsSync(world.journal), false, "no swap was begun");
@@ -120,16 +120,16 @@ test("e2e_refuses_to_start_while_lockbox_runs", async () => {
   }
 });
 
-test("e2e_refuses_to_start_while_lockbox_runs: a process that really has the program's name", async () => {
-  // A copy of node.exe named like the app, left running: the real Windows question (tasklist) says Lockbox runs.
+test("e2e_refuses_to_start_while_petalock_runs: a process that really has the program's name", async () => {
+  // A copy of node.exe named like the app, left running: the real Windows question (tasklist) says Petalock runs.
   const world = makeWorld();
   const holder = mkdtempSync(join(tmpdir(), "e2e-name-"));
-  const imitation = join(holder, "lockbox-desktop.exe");
+  const imitation = join(holder, state.PROGRAM);
   copyFileSync(process.execPath, imitation);
   const child = spawn(imitation, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore", windowsHide: true });
   try {
     await sleep(500);
-    assert.equal(state.isLockboxRunning(), true, "the imitation shows to Windows as Lockbox");
+    assert.equal(state.isPetalockRunning(), true, "the imitation shows to Windows as Petalock");
     const calls = [];
     const result = await e2e.runE2e({
       env: {},
@@ -170,7 +170,7 @@ test("a_failed_run_swaps_back", async () => {
           // (the place is empty: the app makes its own folder when it starts)
           mkdirSync(world.locations.state, { recursive: true });
           writeFileSync(join(world.locations.state, "MU-test-state.txt"), "Made-up state the app wrote\n");
-          // what someone who opened Lockbox during the run would have made in the substituted default vault folder
+          // what someone who opened Petalock during the run would have made in the substituted default vault folder
           mkdirSync(world.locations.vaults, { recursive: true });
           writeFileSync(join(world.locations.vaults, "MU-vault-made-by-someone.txt"), "Made-up vault made during the run\n");
           if (how === "throws") throw new Error("a suite failed");
@@ -246,7 +246,7 @@ test("a_swap_that_stops_part_way_is_put_right_by_the_run", async () => {
 
 test("a_run_refused_by_another_runs_swap_leaves_that_swap_alone", async () => {
   // Two local runs can overlap (the build comes before the swap). The second is refused by the first's swap, and its
-  // cleanup must not undo the first's: the first is mid-run, in a gap with no Lockbox process.
+  // cleanup must not undo the first's: the first is mid-run, in a gap with no Petalock process.
   const world = makeWorld();
   try {
     const before = world.prints();
@@ -346,7 +346,7 @@ test("on_ci_the_state_folders_must_be_fresh", async () => {
     for (const key of state.LOCATION_KEYS) rmSync(fresh.locations[key], { recursive: true, force: true });
     let swapping = null;
     const run = fakeRun(fresh, {
-      env: { LOCKBOX_E2E_CI: "1" },
+      env: { PETALOCK_E2E_CI: "1" },
       suites: () => {
         swapping = existsSync(fresh.journal);
         return 0;
@@ -364,7 +364,7 @@ test("on_ci_the_state_folders_must_be_fresh", async () => {
   const used = makeWorld();
   try {
     const before = used.prints();
-    const run = fakeRun(used, { env: { LOCKBOX_E2E_CI: "1" } });
+    const run = fakeRun(used, { env: { PETALOCK_E2E_CI: "1" } });
     const result = await run.promise;
     assert.equal(result.code, 2);
     assert.match(result.lines.join("\n"), /already there/);
@@ -397,9 +397,9 @@ test("ci_equal_true_alone_grants_nothing", async () => {
   }
   assert.equal(app.clipboardSteps({ CI: "true" }).run, false, "CI=true alone leaves the clipboard alone");
   assert.equal(app.clipboardSteps({ CI: "true", GITHUB_ACTIONS: "true" }).run, false);
-  assert.equal(app.clipboardSteps({ LOCKBOX_E2E_CI: "true" }).run, false, "only the marker's own value counts");
-  assert.deepEqual(app.clipboardSteps({ LOCKBOX_E2E_CI: "1" }), { run: true, why: "on the GitHub end-to-end job" });
-  assert.throws(() => e2e.findNativeDriver({ env: { EDGEWEBDRIVER: "C:\\SeleniumWebDrivers\\EdgeDriver", CI: "true" } }), /--edgedriver|LOCKBOX_EDGEDRIVER/, "the image's driver folder is not taken on CI=true alone");
+  assert.equal(app.clipboardSteps({ PETALOCK_E2E_CI: "true" }).run, false, "only the marker's own value counts");
+  assert.deepEqual(app.clipboardSteps({ PETALOCK_E2E_CI: "1" }), { run: true, why: "on the GitHub end-to-end job" });
+  assert.throws(() => e2e.findNativeDriver({ env: { EDGEWEBDRIVER: "C:\\SeleniumWebDrivers\\EdgeDriver", CI: "true" } }), /--edgedriver|PETALOCK_EDGEDRIVER/, "the image's driver folder is not taken on CI=true alone");
 });
 
 test("each_spec_gets_a_fresh_state_and_every_test_state_is_kept", async () => {
@@ -892,34 +892,34 @@ test("the_machine_policy_is_used_only_elevated_on_the_github_job", () => {
   assert.throws(() => app.drivenLaunchNeeds({ elevated: true, ci: false }), /elevated.*not elevated/, "an elevated PC run is refused");
 });
 
-test("start_lockbox_refuses_an_elevated_run_off_the_job_before_anything_starts", async () => {
-  const holder = mkdtempSync(join(tmpdir(), "lockbox-e2e-elevated-"));
+test("start_petalock_refuses_an_elevated_run_off_the_job_before_anything_starts", async () => {
+  const holder = mkdtempSync(join(tmpdir(), "petalock-e2e-elevated-"));
   try {
     const where = { tauriDriver: join(holder, "no-such-driver.exe"), nativeDriver: join(holder, "no-such-native.exe"), tempDir: join(holder, "temp"), webviewDir: join(holder, "webview"), logFile: join(holder, "driver.log") };
-    await assert.rejects(app.startLockbox({ ...where, base: { LOCKBOX_E2E_CI: "true" }, elevated: true }), /elevated/, "only the marker's own value is the job");
+    await assert.rejects(app.startPetalock({ ...where, base: { PETALOCK_E2E_CI: "true" }, elevated: true }), /elevated/, "only the marker's own value is the job");
     assert.deepEqual(readdirSync(holder), [], "no folder, log or process was made");
   } finally {
     rmSync(holder, { recursive: true, force: true });
   }
 });
 
-test("start_lockbox_sets_the_policy_only_elevated_on_the_job_and_a_failed_start_removes_it", async () => {
-  const holder = mkdtempSync(join(tmpdir(), "lockbox-e2e-policy-"));
+test("start_petalock_sets_the_policy_only_elevated_on_the_job_and_a_failed_start_removes_it", async () => {
+  const holder = mkdtempSync(join(tmpdir(), "petalock-e2e-policy-"));
   try {
     const where = (name) => ({ tauriDriver: join(holder, "no-such-driver.exe"), nativeDriver: join(holder, "no-such-native.exe"), tempDir: join(holder, name, "temp"), webviewDir: join(holder, name, "webview"), logFile: join(holder, `${name}.log`) });
     // not elevated: reg.exe is never asked
     const plain = fakeRegistry();
-    await assert.rejects(app.startLockbox({ ...where("plain"), base: { LOCKBOX_E2E_CI: "1" }, elevated: false, reg: plain.reg }));
+    await assert.rejects(app.startPetalock({ ...where("plain"), base: { PETALOCK_E2E_CI: "1" }, elevated: false, reg: plain.reg }));
     assert.deepEqual(plain.calls, [], "a run that is not elevated touches no policy");
     // elevated on the job: set before the driver starts, and gone again when it does not start
     const job = fakeRegistry();
-    await assert.rejects(app.startLockbox({ ...where("job"), base: { LOCKBOX_E2E_CI: "1" }, elevated: true, reg: job.reg }));
+    await assert.rejects(app.startPetalock({ ...where("job"), base: { PETALOCK_E2E_CI: "1" }, elevated: true, reg: job.reg }));
     assert.ok(job.calls.some((call) => call.startsWith("add ")), "the policy was set");
     assert.equal(job.keys.size - WINDOWS_KEYS.length + job.values.size, 0, "the failed start left no policy");
     // a removal that fails is said in the error
     const stuck = fakeRegistry();
     const stuckReg = (args) => (args[0] === "delete" ? 1 : stuck.reg(args));
-    await assert.rejects(app.startLockbox({ ...where("stuck"), base: { LOCKBOX_E2E_CI: "1" }, elevated: true, reg: stuckReg }), /policy could not be removed/);
+    await assert.rejects(app.startPetalock({ ...where("stuck"), base: { PETALOCK_E2E_CI: "1" }, elevated: true, reg: stuckReg }), /policy could not be removed/);
   } finally {
     rmSync(holder, { recursive: true, force: true });
   }
@@ -931,7 +931,7 @@ test("the_policy_is_set_for_the_app_and_removed_with_the_keys_it_made", () => {
   const fresh = fakeRegistry();
   const undo = app.setDebuggingPolicy(fresh.reg);
   assert.deepEqual(undo.created, [edge, webview2, args], "all three keys were made by this run");
-  assert.ok(fresh.calls.includes(`add ${args} /v lockbox-desktop.exe /t REG_SZ /d --remote-debugging-port=0 /f`), "the switch is set for lockbox-desktop.exe alone");
+  assert.ok(fresh.calls.includes(`add ${args} /v petalock.exe /t REG_SZ /d --remote-debugging-port=0 /f`), "the switch is set for petalock.exe alone");
   assert.equal(fresh.values.size, 1);
   assert.deepEqual(app.removeDebuggingPolicy(undo, fresh.reg), [], "nothing is left");
   assert.equal(fresh.keys.size - WINDOWS_KEYS.length + fresh.values.size, 0, "the machine is as it was");
@@ -946,7 +946,7 @@ test("the_policy_is_set_for_the_app_and_removed_with_the_keys_it_made", () => {
 
 test("a_policy_already_there_is_left_alone_and_a_failed_set_leaves_nothing", () => {
   const [edge, webview2, args] = app.POLICY_KEYS;
-  const theirs = fakeRegistry([edge, webview2, args], [`${args}\\lockbox-desktop.exe`]);
+  const theirs = fakeRegistry([edge, webview2, args], [`${args}\\petalock.exe`]);
   assert.throws(() => app.setDebuggingPolicy(theirs.reg), /already has a WebView2 policy/);
   assert.equal(theirs.calls.some((call) => call.startsWith("add ") || call.startsWith("delete ")), false, "nothing was changed");
   const failing = fakeRegistry([], [], { failAdd: true });
@@ -954,7 +954,7 @@ test("a_policy_already_there_is_left_alone_and_a_failed_set_leaves_nothing", () 
   assert.equal(failing.keys.size - WINDOWS_KEYS.length + failing.values.size, 0, "nothing is left");
 });
 
-test("stop_lockbox_removes_the_policy_after_the_processes_and_says_what_is_left", () => {
+test("stop_petalock_removes_the_policy_after_the_processes_and_says_what_is_left", () => {
   const order = [];
   const stop = () => {
     order.push("stop");
@@ -964,30 +964,30 @@ test("stop_lockbox_removes_the_policy_after_the_processes_and_says_what_is_left"
     order.push("policy");
     return policy.left;
   };
-  assert.deepEqual(app.stopLockbox({ pid: 7, created: "1" }, { stop, removePolicy }), { killed: [7], remaining: [] }, "no policy: none removed");
+  assert.deepEqual(app.stopPetalock({ pid: 7, created: "1" }, { stop, removePolicy }), { killed: [7], remaining: [] }, "no policy: none removed");
   assert.deepEqual(order, ["stop"]);
   order.length = 0;
-  assert.deepEqual(app.stopLockbox({ pid: 7, created: "1", policy: { created: [], left: [] } }, { stop, removePolicy }).remaining, []);
+  assert.deepEqual(app.stopPetalock({ pid: 7, created: "1", policy: { created: [], left: [] } }, { stop, removePolicy }).remaining, []);
   assert.deepEqual(order, ["stop", "policy"], "the app is stopped before its policy goes");
-  const left = app.stopLockbox({ pid: 7, created: "1", policy: { created: [], left: ["HKLM\\x"] } }, { stop, removePolicy });
+  const left = app.stopPetalock({ pid: 7, created: "1", policy: { created: [], left: ["HKLM\\x"] } }, { stop, removePolicy });
   assert.deepEqual(left.remaining, ["HKLM\\x"], "a policy left behind is reported as left running");
   order.length = 0;
   const broken = () => {
     order.push("stop");
     throw new Error("Windows did not answer");
   };
-  assert.throws(() => app.stopLockbox({ pid: 7, created: "1", policy: { created: [], left: ["HKLM\\x"] } }, { stop: broken, removePolicy }), /did not answer.*could not be removed: HKLM\\x/);
+  assert.throws(() => app.stopPetalock({ pid: 7, created: "1", policy: { created: [], left: ["HKLM\\x"] } }, { stop: broken, removePolicy }), /did not answer.*could not be removed: HKLM\\x/);
   assert.deepEqual(order, ["stop", "policy"], "the policy goes even when stopping failed");
 });
 
 test("clipboard_and_shortcut_steps_run_on_ci_and_locally_only_when_the_pc_is_free", () => {
-  assert.deepEqual(app.clipboardSteps({ LOCKBOX_E2E_CI: "1" }), { run: true, why: "on the GitHub end-to-end job" });
+  assert.deepEqual(app.clipboardSteps({ PETALOCK_E2E_CI: "1" }), { run: true, why: "on the GitHub end-to-end job" });
   const local = app.clipboardSteps({});
   assert.equal(local.run, false);
-  assert.match(local.why, /skipped here.*LOCKBOX_E2E_PC_FREE=1/);
-  assert.equal(app.clipboardSteps({ LOCKBOX_E2E_PC_FREE: "0" }).run, false);
-  assert.equal(app.clipboardSteps({ LOCKBOX_E2E_PC_FREE: "true" }).run, false, "only 1 counts");
-  assert.deepEqual(app.clipboardSteps({ LOCKBOX_E2E_PC_FREE: "1" }), { run: true, why: "LOCKBOX_E2E_PC_FREE=1" });
+  assert.match(local.why, /skipped here.*PETALOCK_E2E_PC_FREE=1/);
+  assert.equal(app.clipboardSteps({ PETALOCK_E2E_PC_FREE: "0" }).run, false);
+  assert.equal(app.clipboardSteps({ PETALOCK_E2E_PC_FREE: "true" }).run, false, "only 1 counts");
+  assert.deepEqual(app.clipboardSteps({ PETALOCK_E2E_PC_FREE: "1" }), { run: true, why: "PETALOCK_E2E_PC_FREE=1" });
 });
 
 // ---- the driver and its version ------------------------------------------------------------------------------------
@@ -1007,11 +1007,11 @@ test("the_driver_is_found_from_the_flag_then_the_environment_then_the_ci_image",
     mkdirSync(ciDir);
     const ci = join(ciDir, "msedgedriver.exe");
     writeFileSync(ci, "x");
-    assert.equal(e2e.findNativeDriver({ flag, env: { LOCKBOX_EDGEDRIVER: fromEnv, EDGEWEBDRIVER: ciDir, LOCKBOX_E2E_CI: "1" } }), flag);
-    assert.equal(e2e.findNativeDriver({ env: { LOCKBOX_EDGEDRIVER: fromEnv, EDGEWEBDRIVER: ciDir, LOCKBOX_E2E_CI: "1" } }), fromEnv);
-    assert.equal(e2e.findNativeDriver({ env: { EDGEWEBDRIVER: ciDir, LOCKBOX_E2E_CI: "1" } }), ci);
-    assert.throws(() => e2e.findNativeDriver({ env: { EDGEWEBDRIVER: ciDir } }), /--edgedriver|LOCKBOX_EDGEDRIVER/, "the CI image's folder is used on CI only");
-    assert.throws(() => e2e.findNativeDriver({ env: {} }), /--edgedriver|LOCKBOX_EDGEDRIVER/);
+    assert.equal(e2e.findNativeDriver({ flag, env: { PETALOCK_EDGEDRIVER: fromEnv, EDGEWEBDRIVER: ciDir, PETALOCK_E2E_CI: "1" } }), flag);
+    assert.equal(e2e.findNativeDriver({ env: { PETALOCK_EDGEDRIVER: fromEnv, EDGEWEBDRIVER: ciDir, PETALOCK_E2E_CI: "1" } }), fromEnv);
+    assert.equal(e2e.findNativeDriver({ env: { EDGEWEBDRIVER: ciDir, PETALOCK_E2E_CI: "1" } }), ci);
+    assert.throws(() => e2e.findNativeDriver({ env: { EDGEWEBDRIVER: ciDir } }), /--edgedriver|PETALOCK_EDGEDRIVER/, "the CI image's folder is used on CI only");
+    assert.throws(() => e2e.findNativeDriver({ env: {} }), /--edgedriver|PETALOCK_EDGEDRIVER/);
     assert.throws(() => e2e.findNativeDriver({ flag: join(dir, "missing", "msedgedriver.exe"), env: {} }), /not found|does not exist/);
     assert.throws(() => e2e.findNativeDriver({ flag: "msedgedriver.exe", env: {} }), /full path/);
     const wrongName = join(dir, "flag", "other.exe");
@@ -1093,7 +1093,7 @@ test("arguments_are_read_as_documented", () => {
 });
 
 test("a_failed_ci_run_keeps_its_logs_and_nothing_else", () => {
-  const holder = mkdtempSync(join(tmpdir(), "lockbox-e2e-keep-"));
+  const holder = mkdtempSync(join(tmpdir(), "petalock-e2e-keep-"));
   try {
     const runRoot = join(holder, "run");
     for (const dir of ["logs", "driven/temp/scoped_dir1/EBWebView", "normal/webview", "vaults"]) mkdirSync(join(runRoot, dir), { recursive: true });

@@ -1,4 +1,4 @@
-// Plan 4B Task 12's page: the question the shell asks when the window is closed, or Lockbox is quit, while a job runs (33b, Ask 15).
+// Plan 4B Task 12's page: the question the shell asks when the window is closed, or Petalock is quit, while a job runs (33b, Ask 15).
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "../App";
@@ -55,7 +55,7 @@ const WAITING_TITLE = "A restore is waiting for your answer";
 const WAITING_TEXT = "Closing cancels it. Your vault stays as it is, and you can start the restore again.";
 const SWAP_TITLE = "A restore is finishing";
 const SWAP_TEXT =
-  "It's past the point of cancelling. If you close now, Lockbox finishes or undoes it the next time it opens, so nothing is lost.";
+  "It's past the point of cancelling. If you close now, Petalock finishes or undoes it the next time it opens, so nothing is lost.";
 
 /** The shell asks; the number it gave the question is returned (the shell mints it, the first is 1). */
 function asked(reason: "close" | "quit", running: string[], pastSwap = false, restoreWaiting = false): number {
@@ -247,7 +247,7 @@ test("close_anyway_on_a_close_answers_yes_once_and_the_close_goes_on", async () 
     await Promise.resolve();
   });
   // Today's close path ran: the vault locked, and the first close is explained (5b), as it is without a question.
-  expect(await screen.findByRole("dialog", { name: "Lockbox stays by the clock" })).toBeTruthy();
+  expect(await screen.findByRole("dialog", { name: "Petalock stays by the clock" })).toBeTruthy();
   expect(screen.queryByRole("dialog", { name: BACKUP_TITLE })).toBeNull();
   expect(shell.closeAnswers()).toEqual([true]);
   expect(shell.sessionOf(7)?.unlocked).toBe(false);
@@ -406,7 +406,7 @@ test("an_event_that_is_not_a_question_asks_nothing", async () => {
   ];
   for (const payload of bad) {
     act(() => {
-      shell.sendRaw("lockbox://close-asked", payload);
+      shell.sendRaw("petalock://close-asked", payload);
     });
   }
   await new Promise((resolve) => setTimeout(resolve, 20));
@@ -419,7 +419,7 @@ test("a_question_naming_only_kinds_the_page_does_not_know_still_asks", async () 
   // The shell holds its question until it is answered, so a question the page drops leaves Close and Quit doing nothing. A job the page has no name
   // for (a kind added in the shell before the page knows it) still asks, in the words for jobs in general.
   act(() => {
-    shell.sendRaw("lockbox://close-asked", { reason: "close", running: ["format_disk"], past_swap: false, restore_waiting: false, question: 1 });
+    shell.sendRaw("petalock://close-asked", { reason: "close", running: ["format_disk"], past_swap: false, restore_waiting: false, question: 1 });
   });
   const dialog = await screen.findByRole("dialog", { name: "Several jobs are running" });
   expect(within(dialog).getByText("Closing will cancel them, and nothing half-made is left behind.")).toBeTruthy();
@@ -496,7 +496,7 @@ test("a_waiting_restore_alone_is_a_question", async () => {
   asked("close", ["format_disk"], false, true);
   const again = await screen.findByRole("dialog", { name: WAITING_TITLE });
   fireEvent.click(within(again).getByRole("button", { name: ANYWAY }));
-  expect(await screen.findByRole("dialog", { name: "Lockbox stays by the clock" })).toBeTruthy();
+  expect(await screen.findByRole("dialog", { name: "Petalock stays by the clock" })).toBeTruthy();
   expect(answersSent()).toEqual([
     ["close_answer", { question: 1, go: false }],
     ["close_answer", { question: 2, go: true }],
@@ -584,7 +584,7 @@ test("a_repeated_event_after_its_answer_cannot_reopen_it", async () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
   act(() => {
-    shell.sendRaw("lockbox://close-asked", eventFor(first));
+    shell.sendRaw("petalock://close-asked", eventFor(first));
   });
   await new Promise((resolve) => setTimeout(resolve, 20));
   expect(screen.queryByRole("dialog")).toBeNull();
@@ -594,7 +594,7 @@ test("a_repeated_event_after_its_answer_cannot_reopen_it", async () => {
   expect(second).not.toBe(first);
   await screen.findByRole("dialog", { name: "Files are being added" });
   act(() => {
-    shell.sendRaw("lockbox://close-asked", eventFor(first));
+    shell.sendRaw("petalock://close-asked", eventFor(first));
   });
   await new Promise((resolve) => setTimeout(resolve, 20));
   expect(screen.getAllByRole("dialog")).toHaveLength(1);
@@ -610,12 +610,12 @@ test("a_repeated_event_after_its_answer_cannot_reopen_it", async () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
   act(() => {
-    shell.sendRaw("lockbox://close-asked", eventFor(first));
+    shell.sendRaw("petalock://close-asked", eventFor(first));
   });
   await new Promise((resolve) => setTimeout(resolve, 20));
   expect(screen.queryByRole("dialog")).toBeNull();
   act(() => {
-    shell.sendRaw("lockbox://close-asked", eventFor(second, ["import"]));
+    shell.sendRaw("petalock://close-asked", eventFor(second, ["import"]));
   });
   await screen.findByRole("dialog", { name: "Files are being added" });
   act(() => {
@@ -636,7 +636,7 @@ test("a_repeated_event_after_its_answer_cannot_reopen_it", async () => {
 
   // A control: an event numbered above any shown shows its question, so the absences above were not an `eventFor` the page throws out.
   act(() => {
-    shell.sendRaw("lockbox://close-asked", eventFor(third + 100, ["import"]));
+    shell.sendRaw("petalock://close-asked", eventFor(third + 100, ["import"]));
   });
   expect(await screen.findByRole("dialog", { name: "Files are being added" })).toBeTruthy();
 });
@@ -658,7 +658,7 @@ test("a_question_cleared_by_a_lock_before_an_answer_shows_again_when_the_shell_r
 
   // The shell still holds it, and says it again.
   act(() => {
-    shell.sendRaw("lockbox://close-asked", eventFor(id));
+    shell.sendRaw("petalock://close-asked", eventFor(id));
   });
   expect(shell.closeAskedHeard()).toBe(heard + 1);
   const dialog = await screen.findByRole("dialog", { name: BACKUP_TITLE });
@@ -670,7 +670,7 @@ test("a_question_cleared_by_a_lock_before_an_answer_shows_again_when_the_shell_r
   });
   expect(answersSent()).toEqual([["close_answer", { question: id, go: false }]]);
   act(() => {
-    shell.sendRaw("lockbox://close-asked", eventFor(id));
+    shell.sendRaw("petalock://close-asked", eventFor(id));
   });
   await new Promise((resolve) => setTimeout(resolve, 20));
   expect(screen.queryByRole("dialog")).toBeNull();

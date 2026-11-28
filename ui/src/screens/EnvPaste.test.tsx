@@ -713,7 +713,7 @@ test("a_token_the_shell_let_go_of_says_so_and_asks_for_the_paste_again", async (
   shell.expireEnvTokens();
   fireEvent.click(saveButton(panel));
   const alert = await within(panel).findByRole("alert");
-  expect(alert.textContent).toBe("Lockbox let go of the pasted keys after 5 minutes. Paste the .env again.");
+  expect(alert.textContent).toBe("Petalock let go of the pasted keys after 5 minutes. Paste the .env again.");
   expect(boxOf(panel).value).toBe("");
   expect(sent("env_save")).toHaveLength(1);
 });

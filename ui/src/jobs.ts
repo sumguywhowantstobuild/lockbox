@@ -1,7 +1,7 @@
 // The page's job store (Plan 4B Task 2). A long job (a file added or saved, and the backups later tasks add) is started by a command that took
-// a `request` number the page chose; the shell tells the page which operation that became with `lockbox://job-started` (the operation never
+// a `request` number the page chose; the shell tells the page which operation that became with `petalock://job-started` (the operation never
 // comes in an answer, since an answer arrives after the job has ended and its Cancel would have nothing to stop), and then sends
-// `lockbox://progress`. This store ties them together by `request`, never by kind or session, so two jobs at once each get their own Cancel.
+// `petalock://progress`. This store ties them together by `request`, never by kind or session, so two jobs at once each get their own Cancel.
 //
 // A job belongs to a scope (a session at its generation, or the launch's lock epoch). Whatever the shell sends for a scope that has gone is
 // dropped: a lock takes its vault's jobs off the screen, a new epoch takes the launch's. Only ids and two numbers pass through here: never a
@@ -152,14 +152,14 @@ export function currentLockEpoch(): number {
   return lastEpoch;
 }
 
-/** The lock epoch as a screen reads it: it changes (and the screen draws again) on every `lockbox://lock-epoch`, even with no vault open. */
+/** The lock epoch as a screen reads it: it changes (and the screen draws again) on every `petalock://lock-epoch`, even with no vault open. */
 export function useLockEpoch(): number {
   return useSyncExternalStore(subscribe, currentLockEpoch);
 }
 
 /**
  * Starts listening (once). Each listener is separate: one that cannot be set up costs only what it carries (no bar), never the job itself,
- * which the screens still show as 4A's "working" words from `lockbox://busy`.
+ * which the screens still show as 4A's "working" words from `petalock://busy`.
  */
 export function startJobs(): Promise<void> {
   started ??= (async () => {

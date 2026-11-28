@@ -30,7 +30,7 @@ jobs:
           - label: linux
             os: ubuntu-24.04
             # The desktop app is Windows-only; building it on Linux would need WebKitGTK for nothing.
-            packages: --workspace --exclude lockbox-desktop
+            packages: --workspace --exclude petalock-desktop
     runs-on: ${{ matrix.os }}
     # The Windows run also builds the UI and a release build of the app. A pull request's first run has no cache
     # (branch caches do not reach it) and compiles everything, which has run past 45 minutes.
@@ -63,19 +63,19 @@ jobs:
         run: cargo clippy --locked --all-targets ${{ matrix.packages }} -- -D warnings
       # The engine's private modules, failpoints and the integration tests that build on them (`test-internals`).
       - name: Lint (engine internals)
-        run: cargo clippy -p lockbox-core --locked --all-targets --features test-internals -- -D warnings
+        run: cargo clippy -p petalock-core --locked --all-targets --features test-internals -- -D warnings
       - name: Test
         run: cargo test --locked ${{ matrix.packages }}
       # Integration tests only: the engine's unit and doc tests already ran in "Test", without the feature.
       - name: Test (engine internals)
-        run: cargo test -p lockbox-core --locked --features test-internals --test '*'
+        run: cargo test -p petalock-core --locked --features test-internals --test '*'
       # The only run where release-only checks (`cfg(not(dev))`, such as refusing the dev server) are compiled in.
       - name: Bridge tests (release configuration)
         if: matrix.label == 'windows'
-        run: cargo test -p lockbox-desktop --locked --features custom-protocol --test ipc
+        run: cargo test -p petalock-desktop --locked --features custom-protocol --test ipc
       - name: Tauri build
         if: matrix.label == 'windows'
-        run: cargo build -p lockbox-desktop --release --locked --features custom-protocol
+        run: cargo build -p petalock-desktop --release --locked --features custom-protocol
 
   ui:
     name: "UI: lint, test, build"
@@ -134,20 +134,20 @@ jobs:
           Get-Verified 'https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_windows_x64.zip' 'd29144deff3a68aa93ced33dddf84b7fdc26070add4aa0f4513094c8332afc4e' $zip
           Expand-Archive $zip -DestinationPath $bin
           Get-Verified 'https://github.com/google/osv-scanner/releases/download/v2.7.0/osv-scanner_windows_amd64.exe' '9964ed64ec9a387391eb4cc006ad5c531154821aef29b793e02c448de4686438' (Join-Path $bin 'osv-scanner.exe')
-          "LOCKBOX_GITLEAKS=$bin\gitleaks.exe" >> $env:GITHUB_ENV
-          "LOCKBOX_OSV=$bin\osv-scanner.exe" >> $env:GITHUB_ENV
+          "PETALOCK_GITLEAKS=$bin\gitleaks.exe" >> $env:GITHUB_ENV
+          "PETALOCK_OSV=$bin\osv-scanner.exe" >> $env:GITHUB_ENV
       - name: Scanner tests
         run: node --test "scripts/*.test.mjs"
       - name: Scan
         env:
-          LOCKBOX_SEMGREP: semgrep
+          PETALOCK_SEMGREP: semgrep
         run: node scripts/scan.mjs
 
   # End-to-end tests on the real app: the shipped (release) build, driven through tauri-driver and the image's Edge
   # WebDriver. Not a required check (branch protection is not changed): a failure shows on the run and is fixed
   # first, but it does not block a merge. After the Rust job, so a build that is already broken is not built again.
   # The job runs elevated, where WebView2 ignores the driver's settings: the driven launches get WebView2's machine policy
-  # for lockbox-desktop.exe instead, set and removed around each one (e2e/lib/app.mjs).
+  # for petalock.exe instead, set and removed around each one (e2e/lib/app.mjs).
   e2e:
     name: "End-to-end: the real app (windows)"
     needs: rust
@@ -157,7 +157,7 @@ jobs:
     env:
       # The marker only this job sets: it skips the swap of a fresh runner's state and allows the clipboard steps. The
       # generic CI=true grants neither.
-      LOCKBOX_E2E_CI: "1"
+      PETALOCK_E2E_CI: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -185,7 +185,10 @@ jobs:
       - name: Install tauri-driver
         if: steps.tauri-driver.outputs.cache-hit != 'true'
         run: cargo install tauri-driver --locked --version 2.1.0
-      # The driver and the web-view runtime must share a major version; the run refuses otherwise, and says both.
+      # The driver and the web-view runtime must match in their first three parts (only the last may differ); the run
+      # refuses otherwise, and says both. The image's driver follows the image's Edge browser, and the runtime updates on
+      # its own, so they can differ: the end-to-end step gets a driver downloaded for the runtime's exact version (the
+      # download step below). The site's browser tests below keep the image's driver, which matches the image's Edge browser.
       - name: Show the web-view runtime and the Edge WebDriver versions
         shell: pwsh
         run: |
@@ -193,7 +196,21 @@ jobs:
           "WebView2 runtime: $((Get-ItemProperty $key -ErrorAction SilentlyContinue).pv)"
           "EDGEWEBDRIVER: $env:EDGEWEBDRIVER"
           & (Join-Path $env:EDGEWEBDRIVER 'msedgedriver.exe') --version
+      # The download page, guide and not-found page in the runner's Edge: every request same-site, axe at both sizes in
+      # light and dark, the contrast-theme rules (Plan 5 Task 6). Set to fail, not skip, when the driver or axe is missing.
+      - name: The site in a real browser
+        env:
+          PETALOCK_SITE_BROWSER: "1"
+        run: node --test scripts/site.test.mjs
+      # The Edge WebDriver for the runtime's exact version, from Microsoft's driver host: its signature must be valid and
+      # Microsoft Corporation's before it is used, and it is handed to the end-to-end step alone (scripts/webview-driver.mjs).
+      # Just before that step, so a failed download does not stop the site's browser tests above.
+      - name: Download the Edge WebDriver that matches the web-view runtime
+        id: webview-driver
+        run: node scripts/webview-driver.mjs
       - name: End-to-end tests
+        env:
+          PETALOCK_EDGEDRIVER: ${{ steps.webview-driver.outputs.path }}
         run: node scripts/e2e.mjs
       # A run that did not pass leaves its build and test logs in target/e2e-logs (made-up test state only, never the
       # web-view data), kept for a week to read why.
@@ -206,3 +223,14 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
           overwrite: true
+
+  # The installer, built from this commit and smoke-tested on the bytes that were built (install, upgrade, uninstall, in
+  # a clean per-user setup). Not a required check yet (branch protection is not changed): a failure shows on the run and is
+  # fixed first. Side by side with the Rust job, not after it: the installer's result comes in about 25 minutes instead of
+  # after the 47-minute Rust job, and a commit that fails the Rust job is still red, so it is not released. The workflow it
+  # calls is read-only and is the one the release uses too, so the installer that ships is the one that was tested.
+  installer:
+    name: Installer
+    uses: ./.github/workflows/build-installer.yml
+    with:
+      source: ${{ github.sha }}

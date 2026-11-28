@@ -46,9 +46,9 @@ const TYPO = "That recovery key has a typo. Check it against the one you saved."
 const WORD_7 = "Word 7 isn't a recovery key word. Check it against the key you saved.";
 const COUNT_23 = "That's 23 words; a recovery key has 24. Check none are missing or doubled.";
 const EXPIRED = "Type the recovery key again. It waited too long, or the vault changed since it was checked. Nothing was changed.";
-const ASK16 = "Your new password was saved, but the vault locked before Lockbox could say so. Unlock with the new one.";
+const ASK16 = "Your new password was saved, but the vault locked before Petalock could say so. Unlock with the new one.";
 const CHANGED_WORDS =
-  "Its name, or other details kept beside your items, don't match what Lockbox last saved. If you edited that file yourself, accept them and go on. If you didn't, say No and check your PC first; restoring a backup you trust is the safer way back.";
+  "Its name, or other details kept beside your items, don't match what Petalock last saved. If you edited that file yourself, accept them and go on. If you didn't, say No and check your PC first; restoring a backup you trust is the safer way back.";
 
 function vault(id: number, name: string, extra: Partial<FakeVault> = {}): FakeVault {
   return { id, name, items: sampleItems(), ...extra };
@@ -293,7 +293,7 @@ test("a_refusal_the_shell_gives_for_the_check_is_said_in_its_own_words", async (
   shell.refuseNext("recover_check", { code: "core", kind: "damaged" });
   sendKey(shell.recoveryKeyOf(7));
   await waitFor(() => {
-    expect(alerts()).toEqual(["Lockbox can't read part of this vault. It may be damaged. A backup can bring it back."]);
+    expect(alerts()).toEqual(["Petalock can't read part of this vault. It may be damaged. A backup can bring it back."]);
   });
   expect(keyBox().value).toBe(shell.recoveryKeyOf(7));
   // Never the shell's own text.
@@ -478,7 +478,7 @@ test("changed_header_asks_first_then_sets_the_password", async () => {
   await forgot(list);
   sendKey(shell.recoveryKeyOf(7));
   // Ask 3's words, for the vault the key opened: the question comes first, before the new password, and nothing is written meanwhile.
-  const dialog = await screen.findByRole("dialog", { name: "My vault's details were changed outside Lockbox." });
+  const dialog = await screen.findByRole("dialog", { name: "My vault's details were changed outside Petalock." });
   expect(within(dialog).getByText(CHANGED_WORDS)).toBeTruthy();
   // The key was accepted: it is gone from 28a's box under the question.
   expect(foundOnPage([shell.recoveryKeyOf(7)])).toEqual([]);
@@ -487,7 +487,7 @@ test("changed_header_asks_first_then_sets_the_password", async () => {
   expect(list[0]?.password).toBeUndefined();
   // Escape is not a yes: only a button answers.
   fireEvent.keyDown(dialog, { key: "Escape" });
-  expect(screen.getByRole("dialog", { name: "My vault's details were changed outside Lockbox." })).toBeTruthy();
+  expect(screen.getByRole("dialog", { name: "My vault's details were changed outside Petalock." })).toBeTruthy();
   fireEvent.click(within(dialog).getByRole("button", { name: "Yes" }));
   await screen.findByRole("heading", { level: 1, name: NEW_HEADING });
   expect(screen.queryByRole("dialog")).toBeNull();
@@ -508,7 +508,7 @@ test("no_to_the_changed_header_forgets_the_choice", async () => {
   const list = mine({ headerChanged: true });
   await forgot(list);
   sendKey(shell.recoveryKeyOf(7));
-  const dialog = await screen.findByRole("dialog", { name: "My vault's details were changed outside Lockbox." });
+  const dialog = await screen.findByRole("dialog", { name: "My vault's details were changed outside Petalock." });
   const [choice] = shell.recoveryChoiceTokens();
   expect(choice).toBeDefined();
   // No is the safe answer and has the focus first.
@@ -699,7 +699,7 @@ test("forgot_password_wipes_the_typed_secrets_pending_refused_back_and_locked", 
   typeNew(NEW);
   setPassword();
   await waitFor(() => {
-    expect(alerts()).toEqual(["Lockbox couldn't reach that folder or file. Check that the drive is connected, then try again."]);
+    expect(alerts()).toEqual(["Petalock couldn't reach that folder or file. Check that the drive is connected, then try again."]);
   });
   expect(keyBox().value).toBe("");
   await waitFor(() => {
@@ -821,7 +821,7 @@ test("a_header_changed_between_the_check_and_the_finish_asks_for_the_key_again",
   expect(first.password).toBeUndefined();
   // A fresh check now meets the changed details, and asks.
   sendKey(shell.recoveryKeyOf(7));
-  await screen.findByRole("dialog", { name: "My vault's details were changed outside Lockbox." });
+  await screen.findByRole("dialog", { name: "My vault's details were changed outside Petalock." });
 });
 
 test("locked_before_it_could_say_shows_ask_16_on_that_vaults_unlock", async () => {
@@ -959,7 +959,7 @@ test("forgot_password_screens_have_no_axe_violations", async () => {
   press("Back");
   // The changed details' question.
   sendKey(shell.recoveryKeyOf(7));
-  const dialog = await screen.findByRole("dialog", { name: "My vault's details were changed outside Lockbox." });
+  const dialog = await screen.findByRole("dialog", { name: "My vault's details were changed outside Petalock." });
   await expectNoAxe(dialog);
   fireEvent.click(within(dialog).getByRole("button", { name: "Yes" }));
   // 28d, with its lines on it.

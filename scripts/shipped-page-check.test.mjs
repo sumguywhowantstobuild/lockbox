@@ -8,11 +8,11 @@ import { buildPage, buildToolProblems, canBuild } from "./shipped-page-check.mjs
 /** A chunk as Vite's build returns it: its file name and the modules it holds. */
 const chunk = (fileName, ...moduleIds) => ({ type: "chunk", fileName, moduleIds });
 
-const OWN = "C:/lockbox/ui/src/main.tsx";
+const OWN = "C:/petalock/ui/src/main.tsx";
 
 test("shipped_page_holds_no_build_tool_code: a page of our own code and React passes", () => {
   const output = [
-    chunk("assets/index-a1.js", OWN, "C:/lockbox/ui/node_modules/react/index.js"),
+    chunk("assets/index-a1.js", OWN, "C:/petalock/ui/node_modules/react/index.js"),
     { type: "asset", fileName: "assets/index-b2.css" },
   ];
   assert.deepEqual(buildToolProblems(output), []);
@@ -21,7 +21,7 @@ test("shipped_page_holds_no_build_tool_code: a page of our own code and React pa
 test("shipped_page_holds_no_build_tool_code: a module from picomatch, minimatch or tinyglobby fails", () => {
   const output = [
     chunk("assets/index-a1.js", OWN, "/repo/ui/node_modules/picomatch/lib/picomatch.js"),
-    chunk("assets/vendor-c3.js", "C:\\lockbox\\ui\\node_modules\\minimatch\\dist\\esm\\index.js"),
+    chunk("assets/vendor-c3.js", "C:\\petalock\\ui\\node_modules\\minimatch\\dist\\esm\\index.js"),
     chunk("assets/glob-d4.js", "/repo/ui/node_modules/.pnpm/tinyglobby@0.2.17/node_modules/tinyglobby/dist/x.mjs"),
   ];
   const problems = buildToolProblems(output);

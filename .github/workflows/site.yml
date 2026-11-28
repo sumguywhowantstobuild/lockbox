@@ -1,0 +1,134 @@
+name: Site
+
+# Builds the public site (site/) from main and, once it has been switched on, uploads it to Cloudflare Pages. Nothing here
+# publishes a release: the page only offers a release that already is public and is named in site/release.json.
+#
+# Who may run this is decided in three places. This file: only a push to main that touches the site or the scripts that make
+# it, never a pull request, a dispatch, a release or a schedule. The GitHub environment `site`, whose deployment rule allows
+# only main and which alone holds the Cloudflare token. And the repository variable SITE_DEPLOY: until it is `on`, the
+# build and its tests run on every such push and nothing is uploaded.
+#
+# Two jobs, each holding only what it needs:
+#   build   reads the repository and the release's attestations, holds no secret. In order: straight after the checkout,
+#           before any of the repository's code or packages run, the uploader's package files (site-deploy/) are kept as
+#           an artifact, so nothing later in the job can change them; the installer the page would offer is downloaded and
+#           its attestation verified, and the digest of that file is written (a failure stops here, nothing is built or
+#           uploaded); the site is built from that choice, and the build stops if the installer it downloads for the page's
+#           fingerprint is not the file that was verified; the site's own tests run in a real browser, on the test suite's
+#           fixture builds (not on the built folder); and the folder the build wrote is kept as an artifact. With
+#           release.json at {"tag": null} (Coming soon) there is no installer and the verify ends at once.
+#   deploy  no checkout and no repository rights: it runs none of the repository's code beside the token. It takes the
+#           two artifacts the build kept (never a rebuild), installs Wrangler from its lockfile (site-deploy/) in a step that
+#           has no token, and uploads in the last step, the only one that sees the token.
+#
+# Changing the Wrangler version: edit site-deploy/package.json, regenerate its lockfile, and commit both in a reviewed
+# commit on main; read the release notes first. The dependency scan reads the lockfile.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/site.yml
+      - scripts/release-guard.mjs
+      - scripts/site-build.mjs
+      - scripts/site-picture.mjs
+      - scripts/site-verify.mjs
+      - site-deploy/**
+      - site/**
+
+permissions: {}
+
+# One deploy at a time; a second push waits rather than cancelling an upload half-way.
+concurrency:
+  group: site-deploy
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Verify, build and test the site
+    # The runner and the browser setup are the ones CI's end-to-end job runs the same tests on.
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      # The uploader's package.json and lockfile exactly as checked out, kept before any step that runs repository code, so
+      # nothing that runs later in this job can change what the deploy job installs from.
+      - name: Keep the uploader's package files for the upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: site-deploy-tools
+          path: site-deploy
+          retention-days: 7
+          if-no-files-found: error
+          overwrite: true
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: ui/.node-version
+      # axe-core, which the page tests run in the browser, comes from the UI's dependencies.
+      - name: Install UI dependencies
+        working-directory: ui
+        run: npm ci --ignore-scripts
+      # The one definition of the pins is the build's (the same ones the page shows a visitor); this step only runs it.
+      - name: Verify the offered installer
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/site-verify.mjs --dir "$RUNNER_TEMP/installer"
+      # Given the folder the verify wrote its digest to: the installer this step downloads for the fingerprint must be that file.
+      - name: Build the site
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/site-build.mjs --out target/site --verified-from "$RUNNER_TEMP/installer"
+      - name: The site in a real browser
+        env:
+          PETALOCK_SITE_BROWSER: "1"
+        run: node --test scripts/site.test.mjs
+      - name: Keep the built site for the upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: site
+          path: target/site
+          retention-days: 7
+          if-no-files-found: error
+          overwrite: true
+
+  deploy:
+    name: Upload the site to Cloudflare Pages
+    needs: build
+    if: ${{ github.ref == 'refs/heads/main' && github.event_name == 'push' && vars.SITE_DEPLOY == 'on' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: site
+    permissions: {}
+    steps:
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.22.1"
+      - name: Fetch the site the build job built
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: site
+          path: ${{ runner.temp }}/site
+      - name: Fetch the uploader's package files
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: site-deploy-tools
+          path: ${{ runner.temp }}/wrangler
+      # Every package of Wrangler's tree comes from the lockfile, by hash (npm ci stops if it and package.json disagree); no
+      # install script runs, and this step holds no token.
+      - name: Install Wrangler from the lockfile
+        run: npm ci --prefix "$RUNNER_TEMP/wrangler" --ignore-scripts --no-audit --no-fund
+      # The only step with the token. The account id is not a secret: a variable of the repository or the environment.
+      - name: Upload the site to Cloudflare Pages
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          WRANGLER_SEND_METRICS: "false"
+        run: node "$RUNNER_TEMP/wrangler/node_modules/wrangler/bin/wrangler.js" pages deploy "$RUNNER_TEMP/site" --project-name petalock-site --branch main --commit-hash "$GITHUB_SHA"

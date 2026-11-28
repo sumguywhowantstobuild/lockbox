@@ -34,7 +34,7 @@ const WRONG = "Wrong password. It needs the one from the day this backup was mad
 const EXPIRED = "That choice has expired. Pick the backup again.";
 const CANCELLED = "The restore was cancelled. Your vault is as it was.";
 const KEEP_OPEN = "Keep the laptop open. Windows locking or sleeping cancels this.";
-const WAITS = "This waits for your answer, however long you take. Lock all, closing Lockbox, or Windows locking or sleeping cancels it.";
+const WAITS = "This waits for your answer, however long you take. Lock all, closing Petalock, or Windows locking or sleeping cancels it.";
 const NO_SPACE = "Not enough space. This needs 1.2 GB, and that drive has 400 MB free.";
 const WRONG_DRIVE = "A vault can't live on a removable, FAT32 or network drive. Choose a folder on this PC.";
 const TOO_MANY = "There are too many older copies of this vault. Delete some, then restore again.";
@@ -255,11 +255,11 @@ test("pick_another_sends_the_choice_it_has_and_swaps_the_file", async () => {
   await onTheLockScreen();
   await restoreFromTheLockScreen();
   const choice = shell.restorePickTokens()[0];
-  shell.pickBackupNext("Older vault 2026-08-01.lockbox-backup", 5 * MB);
+  shell.pickBackupNext("Older vault 2026-08-01.petalock-backup", 5 * MB);
   press("Pick another");
-  await screen.findByText("Older vault 2026-08-01.lockbox-backup, 5 MB");
+  await screen.findByText("Older vault 2026-08-01.petalock-backup, 5 MB");
   expect(sent("restore_pick")[1]).toEqual({ choice, vault: null });
-  expect(shell.restorePicks()).toEqual([{ name: "Older vault 2026-08-01.lockbox-backup", size: 5 * MB, checked: false }]);
+  expect(shell.restorePicks()).toEqual([{ name: "Older vault 2026-08-01.petalock-backup", size: 5 * MB, checked: false }]);
   // A closed picker leaves the file as it was.
   shell.dismissFileNext();
   press("Pick another");
@@ -269,7 +269,7 @@ test("pick_another_sends_the_choice_it_has_and_swaps_the_file", async () => {
   await act(async () => {
     await new Promise((done) => window.setTimeout(done, 5));
   });
-  expect(screen.getByText("Older vault 2026-08-01.lockbox-backup, 5 MB")).toBeTruthy();
+  expect(screen.getByText("Older vault 2026-08-01.petalock-backup, 5 MB")).toBeTruthy();
   expect(screen.queryByRole("alert")).toBeNull();
 });
 
@@ -339,7 +339,7 @@ test("folder_step_suggests_the_usual_folder", async () => {
   // 24b, as drawn: the name the backup unpacks as, in the usual folder shown as text, Choose another, Restore and Back.
   expect(document.querySelector("header.field .say")?.textContent).toBe(SAY);
   expect(screen.getByText("It unpacks as My vault, in your usual vaults folder.")).toBeTruthy();
-  expect(screen.getByText("C:\\Users\\Someone\\Lockbox Vaults\\My vault")).toBeTruthy();
+  expect(screen.getByText("C:\\Users\\Someone\\Petalock Vaults\\My vault")).toBeTruthy();
   expect(["Choose another", "Restore", "Back"].map((name) => screen.getByRole("button", { name }).textContent)).toEqual(["Choose another", "Restore", "Back"]);
   expect(document.activeElement).toBe(screen.getByRole("heading", { level: 1, name: "Where it goes" }));
   // Choose another sends only the choice; the shell opens its own picker. A closed one leaves the folder.
@@ -370,7 +370,7 @@ test("a_vault_with_this_ones_id_in_the_folder_says_it_asks_before_replacing", as
   await screen.findByLabelText(/^Password for /);
   await restoreFromTheLockScreen();
   await toTheFolder();
-  expect(screen.getByText("My vault is already in this folder. Lockbox asks before replacing it, and keeps your current one beside it.")).toBeTruthy();
+  expect(screen.getByText("My vault is already in this folder. Petalock asks before replacing it, and keeps your current one beside it.")).toBeTruthy();
 });
 
 test("progress_and_cancel_until_the_swap", async () => {
@@ -468,7 +468,7 @@ test("twenty_four_d_says_what_cancels_it", async () => {
   await onTheLockScreen();
   await restoreFromTheLockScreen();
   await toTheReplaceQuestion();
-  expect(screen.getByText("This waits for your answer, however long you take. Lock all, closing Lockbox, or Windows locking or sleeping cancels it.")).toBeTruthy();
+  expect(screen.getByText("This waits for your answer, however long you take. Lock all, closing Petalock, or Windows locking or sleeping cancels it.")).toBeTruthy();
   expect(document.body.textContent).not.toContain("Only Windows");
   expect(document.body.textContent).not.toMatch(/idle/i);
 });
@@ -585,7 +585,7 @@ test("each_restore_refusal_shows_its_design_message", async () => {
   await heading("This restore can't go ahead");
   expect(
     onScreen(
-      "That folder holds more than one copy of this vault, so Lockbox can't tell which one to replace. Choose another folder, or move the extra copies out of it first.",
+      "That folder holds more than one copy of this vault, so Petalock can't tell which one to replace. Choose another folder, or move the extra copies out of it first.",
     ),
   ).toBeTruthy();
   press("OK");
@@ -953,7 +953,7 @@ test("every_name_after_the_copy_is_the_one_the_copy_answered_not_the_one_the_che
   shell.restoreIs({ replaces: true });
   await toTheFolder();
   // Before the copy the name is the check's (24b and the bar); the copy opened the archive again and says what it is called.
-  expect(screen.getByText("My vault is already in this folder. Lockbox asks before replacing it, and keeps your current one beside it.")).toBeTruthy();
+  expect(screen.getByText("My vault is already in this folder. Petalock asks before replacing it, and keeps your current one beside it.")).toBeTruthy();
   const release = shell.holdRestoreCopy();
   shell.restoreCopyNames("My vault, renamed");
   press("Restore");
@@ -1211,7 +1211,7 @@ test("no_command_carries_a_path_or_a_name_the_page_chose", async () => {
   await heading("My vault is restored");
   for (const cmd of ["restore_pick", "restore_check", "restore_choose_folder", "restore_prepare", "restore_commit"]) {
     for (const args of sent(cmd)) {
-      expect(JSON.stringify(args), cmd).not.toMatch(/[A-Z]:[\\/]|\\Users|lockbox-backup/);
+      expect(JSON.stringify(args), cmd).not.toMatch(/[A-Z]:[\\/]|\\Users|petalock-backup/);
     }
   }
 });

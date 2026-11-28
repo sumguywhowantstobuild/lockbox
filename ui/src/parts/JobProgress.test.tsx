@@ -32,12 +32,12 @@ function spoken(): string {
 /** Starts a job for a request, as the shell does, and gives its operation. */
 function start(operation: number, kind = "import"): number {
   const request = jobs.nextRequest();
-  emit("lockbox://job-started", { request, operation, scope: SESSION, kind });
+  emit("petalock://job-started", { request, operation, scope: SESSION, kind });
   return request;
 }
 
 function move(operation: number, done: number, total: number, finished = false, kind = "import"): void {
-  emit("lockbox://progress", { operation, scope: SESSION, kind, done, total, finished });
+  emit("petalock://progress", { operation, scope: SESSION, kind, done, total, finished });
 }
 
 beforeEach(async () => {
@@ -149,9 +149,9 @@ test("restore_bar_keeps_its_percent_beside_the_name", () => {
   // Under a heading that already names the job (Open a backup's step, "Opening …"), the first line keeps only its per cent and the figure.
   cleanup();
   start(2, "open_backup");
-  render(<JobProgress operation={2} label="Opening demo.lockbox-backup" heading={false} layout="step" stopWord="Stop" />);
+  render(<JobProgress operation={2} label="Opening demo.petalock-backup" heading={false} layout="step" stopWord="Stop" />);
   move(2, 750 * 1024 ** 2, Math.round(1.2 * GB), false, "open_backup");
-  const opening = screen.getByRole("region", { name: "Opening demo.lockbox-backup" });
+  const opening = screen.getByRole("region", { name: "Opening demo.petalock-backup" });
   expect(opening.querySelector(".jhead")?.textContent).toBe("61%");
   expect(screen.getByText("750 MB of 1.2 GB")).toBeTruthy();
   expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();

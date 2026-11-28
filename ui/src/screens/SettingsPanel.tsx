@@ -310,9 +310,9 @@ export function SettingsPanel({ data }: { data: SessionData }) {
   const turnedOff = startup.state?.turned_off_in_windows === true;
   const startsWithWindows = startup.wanted ?? (startup.state?.on === true && !turnedOff);
   const startupHint = turnedOff
-    ? "Turned off in Windows' Startup settings. Turn Lockbox on there to start it with Windows."
+    ? "Turned off in Windows' Startup settings. Turn Petalock on there to start it with Windows."
     : startup.state === null
-      ? "Lockbox can't tell right now whether it starts with Windows."
+      ? "Petalock can't tell right now whether it starts with Windows."
       : "Starts locked, by the clock.";
   // The refusal of the shortcut, naming the combination that was tried.
   let shortcutError: string | null = null;
@@ -392,7 +392,7 @@ export function SettingsPanel({ data }: { data: SessionData }) {
         <div className="grp">
           <SettingsRow
             label="Save shortcut"
-            hint="Works while Lockbox is by the clock."
+            hint="Works while Petalock is by the clock."
             error={shortcutError}
             // Windows keeps a combination another app holds from reaching the page, so silence is all the page sees of it.
             note={listening === null ? null : "If nothing happens, another app is using those keys. Try a different combination."}
@@ -572,7 +572,7 @@ export function SettingsPanel({ data }: { data: SessionData }) {
           <SettingsRow
             label="Keep out of screen capture"
             labelFor={`${id}-capture`}
-            hint="Screenshots, recordings and screen sharing show Lockbox blank. Windows doesn't guarantee this."
+            hint="Screenshots, recordings and screen sharing show Petalock blank. Windows doesn't guarantee this."
             hintId={`${id}-capture-hint`}
             error={errorOf("capture")}
           >
@@ -594,7 +594,7 @@ export function SettingsPanel({ data }: { data: SessionData }) {
       <section className="gp">
         <h3 className="gh">About</h3>
         <div className="grp">
-          <SettingsRow label="Lockbox">{version === null ? null : <span className="fval">{`Version ${version}`}</span>}</SettingsRow>
+          <SettingsRow label="Petalock">{version === null ? null : <span className="fval">{`Version ${version}`}</span>}</SettingsRow>
           {/* The guide, in the browser (task 36). Every vault has it, a read-only one too: it opens nothing of the vault's. */}
           <button
             type="button"

@@ -2,7 +2,7 @@
 // login, open its site, copy the username and copy the password, counting every key and click a person would make; at most
 // six. Each copy is checked on the clipboard. Opening the site hands a made-up address (a reserved .example name, which
 // never resolves) to the PC's browser. The clipboard and the browser are this PC's: the measured steps run on CI, and on a
-// PC only with LOCKBOX_E2E_PC_FREE=1 (the vault's setup still runs, and the skip is said with its reason).
+// PC only with PETALOCK_E2E_PC_FREE=1 (the vault's setup still runs, and the skip is said with its reason).
 
 import assert from "node:assert/strict";
 

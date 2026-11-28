@@ -6,13 +6,15 @@ import { expect, test } from "vitest";
 import { listBelow, readBeside } from "./testing/files";
 
 const DESIGN = "../../docs/design/2026-11-05-user-interface-design.md";
-const DESKTOP = "../../crates/lockbox-desktop/src/";
+const DESKTOP = "../../crates/petalock-desktop/src/";
 
 type Row = { moment: string; message: string; buttons: string[] };
 
 /** The table under "### The app's questions": one row each, buttons split on commas ("none" is no buttons). */
 function designRows(): Row[] {
-  const design = readBeside(import.meta.url, DESIGN);
+  // The design keeps its original wording (its note of 2026-11-25 says the product is now Petalock), so its table still
+  // says Lockbox where the app says Petalock: the product's name is the one word read as renamed.
+  const design = readBeside(import.meta.url, DESIGN).replaceAll("Lockbox", "Petalock");
   const start = design.indexOf("### The app's questions");
   const section = design.slice(start, design.indexOf("\n### ", start + 1));
   return section

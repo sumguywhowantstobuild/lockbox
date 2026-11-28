@@ -41,7 +41,7 @@ export function LostList() {
 
   return (
     <Frame say={SAY_LOST_LIST}>
-      <h1>Lockbox lost its list of vaults</h1>
+      <h1>Petalock lost its list of vaults</h1>
       <p className="fu-sub">Your vaults are still in their folders. Start a new list, then add each vault back.</p>
       {error === null ? null : (
         <p className="err" role="alert">

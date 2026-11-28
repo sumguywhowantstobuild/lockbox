@@ -18,7 +18,7 @@ function focusWhenShown(heading: HTMLHeadingElement | null): void {
 
 /**
  * The recovery key step (21c for a new vault, 21f for one whose earlier step never finished, 29b for a key the person asked for): the key as 24 numbered
- * words in two columns, headed as what it is (a Lockbox key, not a crypto wallet phrase), shown for as long as the vault
+ * words in two columns, headed as what it is (a Petalock key, not a crypto wallet phrase), shown for as long as the vault
  * stays unlocked, and what losing it means. It is the store's, so any lock takes it off the screen and the
  * next unlock makes a new one. It can be printed or saved as a PDF (`KeyActions`); what goes on paper is the one element
  * marked `data-print-only` (the heading, the words and the warning), and `print.css` hides the rest.
@@ -28,7 +28,7 @@ export function RecoveryKey({ data }: { data: SessionData }) {
   // The print that is running, if any. Continue waits for it: going on takes the key off the page, and the page is what
   // the printer captures.
   const [printing, setPrinting] = useState<PrintRun>(null);
-  // Lockbox stays out of screen capture unless the person turned that off in Settings: the sentence about screenshots follows it.
+  // Petalock stays out of screen capture unless the person turned that off in Settings: the sentence about screenshots follows it.
   const { capture_protected: keptOutOfCapture } = useSettings();
   // Like every secret on the page, the key is kept from a native copy, cut or drag (and is not selectable): that would put it on the
   // clipboard without the marks that keep it out of Windows' clipboard history, its timer and its clear at a lock. It is written down
@@ -110,7 +110,7 @@ export function RecoveryKey({ data }: { data: SessionData }) {
         </p>
       ) : null}
       <div className="fu-print" data-print-only>
-        <h2 className="fu-kind">Lockbox recovery key, not a crypto wallet phrase</h2>
+        <h2 className="fu-kind">Petalock recovery key, not a crypto wallet phrase</h2>
         <div
           ref={keyBox}
           className="fu-key m"
@@ -127,7 +127,7 @@ export function RecoveryKey({ data }: { data: SessionData }) {
       <p className="fu-hint">
         Don&apos;t keep the saved key on this PC. Writing it down by hand is fine.{" "}
         {keptOutOfCapture
-          ? "Screenshots won't work, because Lockbox stays out of screen capture."
+          ? "Screenshots won't work, because Petalock stays out of screen capture."
           : "Don't take a screenshot of it: that would be a readable copy."}
       </p>
       <div className="fu-row">

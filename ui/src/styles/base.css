@@ -108,7 +108,7 @@ body {
   stroke-linejoin: round;
 }
 
-/* A password is shown only through Lockbox's own Show buttons: WebView2's reveal eye and clear cross never appear in a box. */
+/* A password is shown only through Petalock's own Show buttons: WebView2's reveal eye and clear cross never appear in a box. */
 input::-ms-reveal,
 input::-ms-clear {
   display: none;

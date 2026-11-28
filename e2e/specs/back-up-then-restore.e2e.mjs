@@ -20,12 +20,12 @@ const stamp = String(Date.now());
 const PASSWORD = ["MU", "e2e", "restore", stamp].join("-");
 const KEPT = { title: "MU-e2e kept login", username: "MU-e2e-kept-user", password: ["MU", "e2e", "kept", stamp].join("-") };
 const LATER = { title: "MU-e2e later login", username: "MU-e2e-later-user", password: ["MU", "e2e", "later", stamp].join("-") };
-const BACKUP = join(env.LOCKBOX_E2E_FILES_FOLDER ?? "", "MU-e2e.lockbox-backup");
+const BACKUP = join(env.PETALOCK_E2E_FILES_FOLDER ?? "", "MU-e2e.petalock-backup");
 const pid = () => browser.capabilities["goog:processID"];
 
 describe("back_up_then_restore", () => {
   before(async () => {
-    assert.deepEqual(readdirSync(env.LOCKBOX_E2E_FILES_FOLDER), [], "the files folder the run made starts empty");
+    assert.deepEqual(readdirSync(env.PETALOCK_E2E_FILES_FOLDER), [], "the files folder the run made starts empty");
     await attach();
   });
 
@@ -40,11 +40,11 @@ describe("back_up_then_restore", () => {
     await app.press("Back up");
     await see("heading", "Back up");
     await app.press("Back up");
-    await pickFile({ title: "Back up this vault", pid: pid(), file: BACKUP, runRoot: env.LOCKBOX_E2E_RUN_ROOT, locations });
+    await pickFile({ title: "Back up this vault", pid: pid(), file: BACKUP, runRoot: env.PETALOCK_E2E_RUN_ROOT, locations });
     await see("button", "Done", 120_000);
     // a Save box can seem to take a name and save elsewhere: the backup must be where it was asked to go
     // counts only, never names (R5): what the two folders hold says where a misdirected save went
-    const where = () => `the files folder holds ${String(readdirSync(env.LOCKBOX_E2E_FILES_FOLDER).length)} entries, the vault folder ${String(readdirSync(env.LOCKBOX_E2E_VAULT_FOLDER).length)}`;
+    const where = () => `the files folder holds ${String(readdirSync(env.PETALOCK_E2E_FILES_FOLDER).length)} entries, the vault folder ${String(readdirSync(env.PETALOCK_E2E_VAULT_FOLDER).length)}`;
     assert.equal(existsSync(BACKUP), true, `the backup is in the run's files folder (${where()})`);
     assert.ok(statSync(BACKUP).size > 0, "the backup has something in it");
     await app.press("Done");
@@ -59,7 +59,7 @@ describe("back_up_then_restore", () => {
     await see("heading", "Settings");
     // the Windows picker comes first; the restore's steps show once a backup is picked
     await app.press("Restore a backup");
-    await pickFile({ title: "Restore a backup", pid: pid(), file: BACKUP, runRoot: env.LOCKBOX_E2E_RUN_ROOT, locations });
+    await pickFile({ title: "Restore a backup", pid: pid(), file: BACKUP, runRoot: env.PETALOCK_E2E_RUN_ROOT, locations });
     await see("heading", "Restore a backup");
     await see("button", "Pick another");
     await app.typeInto(app.named("Password or recovery key from when it was made"), PASSWORD);
@@ -68,7 +68,7 @@ describe("back_up_then_restore", () => {
     // into the spec's own vault folder, where the vault is (the usual vaults folder is never used by a run): there the
     // restore replaces the vault, after asking
     await app.press("Choose another");
-    await pickFolder({ title: "Restore into this folder", pid: pid(), folder: env.LOCKBOX_E2E_VAULT_FOLDER, runRoot: env.LOCKBOX_E2E_RUN_ROOT, locations });
+    await pickFolder({ title: "Restore into this folder", pid: pid(), folder: env.PETALOCK_E2E_VAULT_FOLDER, runRoot: env.PETALOCK_E2E_RUN_ROOT, locations });
     await browser.waitUntil(async () => (await browser.execute(() => document.body.innerText)).includes(`${VAULT} is already in this folder`), {
       timeout: 30_000,
       timeoutMsg: "the restore did not say it would replace the vault in its folder",

@@ -35,7 +35,7 @@ export function CloudQuestion({
       {step === undefined ? null : <p className="fu-step">{step}</p>}
       <h1>This folder is synced to the cloud</h1>
       <p className="fu-sub strong" id={sentenceId}>
-        A cloud service syncs this folder. Lockbox doesn&apos;t support vaults in cloud folders. Choose a folder on this PC,
+        A cloud service syncs this folder. Petalock doesn&apos;t support vaults in cloud folders. Choose a folder on this PC,
         or continue anyway.
       </p>
       {!chooseAnother ? null : (

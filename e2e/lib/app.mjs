@@ -2,14 +2,14 @@
 //
 // How the real app is driven (read from tauri-driver 2.1.0, tauri-runtime-wry 2.12.3 and observed, Windows):
 //   - the binary is the release build with `custom-protocol`, as shipped, started by Microsoft Edge WebDriver
-//     (msedgedriver) on behalf of `tauri-driver`, which this run starts (`startLockbox`) with its own ports;
+//     (msedgedriver) on behalf of `tauri-driver`, which this run starts (`startPetalock`) with its own ports;
 //   - msedgedriver starts the app with WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS holding `--remote-debugging-port=0` and
 //     WEBVIEW2_USER_DATA_FOLDER set to a temporary folder of its own (inside TEMP, which this run points at a folder it
 //     made), and tauri-driver adds TAURI_AUTOMATION and TAURI_WEBVIEW_AUTOMATION. All of that is on the app's process
 //     alone: nothing is set for the machine, and the app started any other way has none of it;
 //   - except on the GitHub job, which runs elevated: WebView2 (Runtime 150 on) ignores WEBVIEW2_* settings in an
-//     elevated app, so there `startLockbox` sets the debugging switch as WebView2's machine policy for lockbox-desktop.exe
-//     and `stopLockbox` removes it. An elevated msedgedriver also keeps its folder in Windows' SystemTemp, whatever TEMP
+//     elevated app, so there `startPetalock` sets the debugging switch as WebView2's machine policy for petalock.exe
+//     and `stopPetalock` removes it. An elevated msedgedriver also keeps its folder in Windows' SystemTemp, whatever TEMP
 //     says. An elevated run anywhere else is refused, so a PC's policy is never touched;
 //   - the debugging port is opened by the app's own web-view process, on 127.0.0.1, only in that driven launch.
 // The processes of a run are found and stopped by process ID (a creation time guards against a reused ID), never by
@@ -21,7 +21,7 @@ import net from "node:net";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { systemTool } from "./state.mjs";
+import { PROGRAM, systemTool } from "./state.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -243,7 +243,7 @@ export const POLICY_KEYS = [
   "HKLM\\SOFTWARE\\Policies\\Microsoft\\Edge\\WebView2",
   "HKLM\\SOFTWARE\\Policies\\Microsoft\\Edge\\WebView2\\AdditionalBrowserArguments",
 ];
-export const POLICY_VALUE = "lockbox-desktop.exe";
+export const POLICY_VALUE = PROGRAM;
 export const POLICY_DATA = "--remote-debugging-port=0";
 
 /**
@@ -272,7 +272,7 @@ function withPolicyLeft(error, left) {
 }
 
 /**
- * Sets the debugging switch as WebView2's machine policy for lockbox-desktop.exe, refusing when the machine already has
+ * Sets the debugging switch as WebView2's machine policy for petalock.exe, refusing when the machine already has
  * one for it (it is left as it is). Returns what `removeDebuggingPolicy` undoes: the keys this made. `reg` runs reg.exe.
  */
 export function setDebuggingPolicy(reg = runReg) {
@@ -299,12 +299,12 @@ export function removeDebuggingPolicy(undo, reg = runReg) {
 
 /**
  * Starts tauri-driver (and so, in time, msedgedriver and the app) with ports of its own, for this run only. Returns the
- * handle `stopLockbox` takes. The app itself starts when a session is created. Elevated on the GitHub job, it also sets
- * WebView2's machine policy for the driven launch (the handle's `policy` says what `stopLockbox` removes); elevated
+ * handle `stopPetalock` takes. The app itself starts when a session is created. Elevated on the GitHub job, it also sets
+ * WebView2's machine policy for the driven launch (the handle's `policy` says what `stopPetalock` removes); elevated
  * anywhere else, it refuses before anything starts. `reg` runs reg.exe (a fake in tests).
  */
-export async function startLockbox({ tauriDriver, nativeDriver, tempDir, webviewDir, logFile, base = process.env, elevated = isElevated(), reg = runReg }) {
-  const needs = drivenLaunchNeeds({ elevated, ci: base.LOCKBOX_E2E_CI === "1" });
+export async function startPetalock({ tauriDriver, nativeDriver, tempDir, webviewDir, logFile, base = process.env, elevated = isElevated(), reg = runReg }) {
+  const needs = drivenLaunchNeeds({ elevated, ci: base.PETALOCK_E2E_CI === "1" });
   mkdirSync(tempDir, { recursive: true });
   mkdirSync(webviewDir, { recursive: true });
   const port = await freePort();
@@ -345,7 +345,7 @@ export async function startLockbox({ tauriDriver, nativeDriver, tempDir, webview
  * the machine policy the run set, if any, even when stopping failed. `remaining` lists the IDs still running and any
  * policy key or value left.
  */
-export function stopLockbox(handle, { stop = stopTree, removePolicy = removeDebuggingPolicy } = {}) {
+export function stopPetalock(handle, { stop = stopTree, removePolicy = removeDebuggingPolicy } = {}) {
   if (handle.policy === undefined) return stop([{ pid: handle.pid, created: handle.created }]);
   let outcome;
   try {
@@ -360,13 +360,13 @@ export function stopLockbox(handle, { stop = stopTree, removePolicy = removeDebu
 
 /**
  * Whether the steps that use the clipboard (and the keyboard shortcut) run. They change what is on the PC's clipboard,
- * so they run on the GitHub end-to-end job (which sets LOCKBOX_E2E_CI=1 itself; the generic CI=true that shells and local
- * tools set grants nothing), and on a PC only when its owner has said it is free (LOCKBOX_E2E_PC_FREE=1).
+ * so they run on the GitHub end-to-end job (which sets PETALOCK_E2E_CI=1 itself; the generic CI=true that shells and local
+ * tools set grants nothing), and on a PC only when its owner has said it is free (PETALOCK_E2E_PC_FREE=1).
  */
 export function clipboardSteps(env) {
-  if (env.LOCKBOX_E2E_CI === "1") return { run: true, why: "on the GitHub end-to-end job" };
-  if (env.LOCKBOX_E2E_PC_FREE === "1") return { run: true, why: "LOCKBOX_E2E_PC_FREE=1" };
-  return { run: false, why: "skipped here: they use the clipboard of this PC; set LOCKBOX_E2E_PC_FREE=1 when it is free" };
+  if (env.PETALOCK_E2E_CI === "1") return { run: true, why: "on the GitHub end-to-end job" };
+  if (env.PETALOCK_E2E_PC_FREE === "1") return { run: true, why: "PETALOCK_E2E_PC_FREE=1" };
+  return { run: false, why: "skipped here: they use the clipboard of this PC; set PETALOCK_E2E_PC_FREE=1 when it is free" };
 }
 
 // ---- the clipboard ------------------------------------------------------------------------------------------------
@@ -408,7 +408,7 @@ export function writeClipboard(text) {
 // ---- the keyboard -------------------------------------------------------------------------------------------------
 
 /**
- * Presses the save shortcut (Ctrl+Shift+L, the default) as real keyboard input: Windows gives it to Lockbox wherever its
+ * Presses the save shortcut (Ctrl+Shift+L, the default) as real keyboard input: Windows gives it to Petalock wherever its
  * window is. Only for steps `clipboardSteps` allows: it is this PC's keyboard.
  */
 export function pressSaveShortcut() {
@@ -420,7 +420,7 @@ export function pressSaveShortcut() {
 // ---- the idle clock -----------------------------------------------------------------------------------------------
 
 /**
- * Lockbox locks when Windows says the session has had no keyboard or mouse input for the auto-lock time, however
+ * Petalock locks when Windows says the session has had no keyboard or mouse input for the auto-lock time, however
  * recently the vault was unlocked (it reads GetLastInputInfo). On a PC nobody has touched for minutes, and on CI's
  * runner, an unlocked vault would lock within one tick of the 5-second timer. WebDriver's events are not input to Windows,
  * so a run starts the idle clock from zero by sending one mouse event that moves nothing (no key, no click, no move).

@@ -1,0 +1,9 @@
+{
+  "name": "petalock-site-deploy",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Wrangler, pinned, for the workflow that uploads the site to Cloudflare Pages (.github/workflows/site.yml). Not part of the site.",
+  "dependencies": {
+    "wrangler": "4.168.0"
+  }
+}

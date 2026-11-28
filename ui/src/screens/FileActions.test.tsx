@@ -43,9 +43,9 @@ const OPENED_NOTE =
 const SAVED_NOTE = "Saved a copy. It isn't encrypted. Delete it when you're finished.";
 /** What an add that finished while the person was on another item says, as one message (the panel that would have said it is gone). */
 const ADDED_AWAY =
-  "1 file added. The original is still unprotected on your PC. Lockbox didn't change or delete it, so remove it yourself if you no longer need it.";
+  "1 file added. The original is still unprotected on your PC. Petalock didn't change or delete it, so remove it yourself if you no longer need it.";
 const ORIGINAL_STAYS =
-  "The original is still unprotected on your PC. Lockbox didn't change or delete it, so remove it yourself if you no longer need it.";
+  "The original is still unprotected on your PC. Petalock didn't change or delete it, so remove it yourself if you no longer need it.";
 /** The auto-lock note's first sentence, whichever form the note takes: the whole of 5d's words, or beside a progress card, this sentence alone. */
 const PAUSE = /^Auto-lock is waiting until this finishes\./;
 /** 5d's whole note, as a job with no progress card (Open, Replace file) shows it. */
@@ -302,7 +302,7 @@ test("still_open_at_lock_offers_retry", async () => {
   shell.refuseNext("retry_open_cleanup", { code: "core", kind: "io" });
   fireEvent.click(screen.getByRole("button", { name: "Retry" }));
   const refused = await screen.findByRole("alert");
-  expect(refused.textContent).toBe("Lockbox couldn't reach that folder or file. Check that the drive is connected, then try again.");
+  expect(refused.textContent).toBe("Petalock couldn't reach that folder or file. Check that the drive is connected, then try again.");
   expect(screen.getByText("Couldn't remove 1 opened file.")).toBeTruthy();
 });
 
@@ -362,7 +362,7 @@ test("replace_warns_first", async () => {
   fireEvent.click(replace);
   const dialog = await screen.findByRole("dialog", { name: "Replace contract-demo.pdf?" });
   expect(dialog.textContent).toContain(
-    "Lockbox will delete the stored file and keep the new one in its place. Backups you already made still hold the old one.",
+    "Petalock will delete the stored file and keep the new one in its place. Backups you already made still hold the old one.",
   );
   // Nothing is sent, and no file is chosen, until the person says so.
   expect(sent("replace_file")).toEqual([]);
@@ -846,7 +846,7 @@ test("a_late_refusal_that_is_not_about_the_file_is_said_only_where_it_began", as
     release();
   });
   const refusal = await screen.findByRole("alert");
-  expect(refusal.textContent).toContain("Lockbox couldn't reach that folder or file. Check that the drive is connected, then try again.");
+  expect(refusal.textContent).toContain("Petalock couldn't reach that folder or file. Check that the drive is connected, then try again.");
   expect(refusal.textContent).not.toContain("io");
   fireEvent.click(within(refusal).getByRole("button", { name: "Dismiss message" }));
 
@@ -1383,7 +1383,7 @@ const GB = 1024 ** 3;
 const KEEP_OPEN = "Keep the laptop open. Windows locking or sleeping cancels this, and files not finished aren't added.";
 const KEEP_OPEN_COPY = "Keep the laptop open. Windows locking or sleeping cancels this, and a copy not finished isn't saved.";
 
-/** The one job the shell says is running, which the page has not been given except through `lockbox://job-started`. */
+/** The one job the shell says is running, which the page has not been given except through `petalock://job-started`. */
 function theJob(): { request: number; operation: number; scope: { type: string; session: number; generation: number }; kind: string } {
   const [job, ...others] = shell.runningJobs();
   expect(others).toEqual([]);
@@ -1396,7 +1396,7 @@ test("one_file_add_shows_progress_and_stop", async () => {
   const release = shell.holdFiles();
   shell.pickNext("big-demo.zip", 3 * GB);
   await addOneFile();
-  // The shell says the job started (by `lockbox://job-started`, matched to the request the page sent) and the bar is on screen, as 9b draws it.
+  // The shell says the job started (by `petalock://job-started`, matched to the request the page sent) and the bar is on screen, as 9b draws it.
   const place = (await screen.findByRole("region", { name: "Adding files" })).closest("aside") as HTMLElement;
   const job = theJob();
   expect(job.kind).toBe("import");

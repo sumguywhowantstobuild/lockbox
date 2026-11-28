@@ -20,7 +20,7 @@ beforeEach(() => {
   listen.mockReset();
 });
 
-const HEADING = "Lockbox lost its list of vaults";
+const HEADING = "Petalock lost its list of vaults";
 const SAY = "Your vaults are safe. Only the list of where they are was damaged.";
 const SUB = "Your vaults are still in their folders. Start a new list, then add each vault back.";
 const BUTTON = "Start a new list";
@@ -65,7 +65,7 @@ test("a_damaged_vault_list_shows_its_own_screen_with_the_approved_words", async 
 test("start_a_new_list_asks_once_then_reads_the_list_again_and_shows_welcome", async () => {
   startDamaged();
   fireEvent.click(await screen.findByRole("button", { name: BUTTON }));
-  expect(await screen.findByRole("heading", { level: 1, name: "Welcome to Lockbox" })).toBeTruthy();
+  expect(await screen.findByRole("heading", { level: 1, name: "Welcome to Petalock" })).toBeTruthy();
   const sent = commandsSent().filter((cmd) => !cmd.startsWith("listen:"));
   // The list was refused at the start, the command ran once, and the list was read again.
   expect(sent.filter((cmd) => cmd === "start_new_vault_list")).toHaveLength(1);
@@ -79,7 +79,7 @@ test("the_vaults_are_added_back_from_the_first_screen_after_a_new_list", async (
   startDamaged();
   shell.offerExisting({ id: 40, name: "Old vault", items: sampleItems() });
   fireEvent.click(await screen.findByRole("button", { name: BUTTON }));
-  await screen.findByRole("heading", { level: 1, name: "Welcome to Lockbox" });
+  await screen.findByRole("heading", { level: 1, name: "Welcome to Petalock" });
   fireEvent.click(screen.getByRole("button", { name: "I already have a vault or a backup" }));
   await screen.findByRole("heading", { level: 1, name: "What do you have?" });
   fireEvent.click(screen.getByRole("button", { name: "A vault folder" }));
@@ -104,7 +104,7 @@ test("the_button_is_busy_while_it_runs_and_a_second_press_sends_nothing_more", a
   act(() => {
     release();
   });
-  expect(await screen.findByRole("heading", { level: 1, name: "Welcome to Lockbox" })).toBeTruthy();
+  expect(await screen.findByRole("heading", { level: 1, name: "Welcome to Petalock" })).toBeTruthy();
   expect(commandsSent().filter((cmd) => cmd === "start_new_vault_list")).toHaveLength(1);
 });
 
@@ -127,7 +127,7 @@ test("a_refusal_is_said_in_words_on_the_screen_and_the_button_works_again", asyn
   await expectNoAxe(container);
   // The next press works, and the refusal goes.
   fireEvent.click(button);
-  expect(await screen.findByRole("heading", { level: 1, name: "Welcome to Lockbox" })).toBeTruthy();
+  expect(await screen.findByRole("heading", { level: 1, name: "Welcome to Petalock" })).toBeTruthy();
   expect(screen.queryByRole("alert")).toBeNull();
   expect(commandsSent().filter((cmd) => cmd === "start_new_vault_list")).toHaveLength(2);
 });
@@ -154,7 +154,7 @@ test("a_move_that_worked_but_a_new_list_that_was_not_written_still_leaves_for_we
   // The shell set the damaged file aside, could not write the new list, and said so: the list now reads as empty.
   shell.startNewListFailsAfterMoveNext({ code: "core", kind: "io" });
   fireEvent.click(await screen.findByRole("button", { name: BUTTON }));
-  expect(await screen.findByRole("heading", { level: 1, name: "Welcome to Lockbox" })).toBeTruthy();
+  expect(await screen.findByRole("heading", { level: 1, name: "Welcome to Petalock" })).toBeTruthy();
   expect(screen.queryByText(HEADING)).toBeNull();
   expect(screen.queryByRole("alert")).toBeNull();
   expect(commandsSent().filter((cmd) => cmd === "start_new_vault_list")).toHaveLength(1);

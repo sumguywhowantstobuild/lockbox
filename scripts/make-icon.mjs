@@ -1,0 +1,272 @@
+// Draws Petalock's app icon, the three petals in slate blue, from the same formula as the page's line drawings
+// (ui/src/parts/Pattern.tsx), and writes crates/petalock-desktop/icons/icon.ico, icon.png and icon-dark-taskbar.ico.
+//
+//   node scripts/make-icon.mjs            writes the three files
+//   node scripts/make-icon.mjs --check    exits 1 when the files differ from what the script draws
+//
+// Each frame of the .ico is drawn at its own size rather than shrunk from a big picture, so the small ones stay
+// sharp: 16 to 64 pixels take the solid trefoil, 256 the fourteen-line pattern. Windows picks the frame for each place
+// and scaling: 16, 20, 24 and 32 by the clock and in lists at 100 to 200 %, 32, 40, 48 and 64 for the window, the
+// taskbar and Alt+Tab, 256 in Explorer's large views. So the tray, the title bar, the taskbar button and Alt+Tab all
+// show one shape (Ariel's pick on board H, 2026-11-25: the two crossing lines read as six loops on the taskbar button).
+// Two colours, one for each Windows taskbar, which the app picks from Windows' own light or dark setting (`app_icon.rs`):
+// icon.ico in the design's slate blue #5B7BA8 (3.9 to 1 on the light taskbar, #F3F3F3), which is also the program's
+// own icon in Explorer, and icon-dark-taskbar.ico in the light slate blue #BCD0EC (10.4 to 1 on the dark one, #202020;
+// the slate blue there measured 3.8 and looked dull beside other apps' icons, and Ariel picked the brighter of board H's
+// three light blues, 2026-11-25).
+//
+// No package is used: a pixel's colour is how much of it the drawing covers (64 samples a pixel), and the PNG and
+// ICO files are written by hand (zlib comes with Node). The same input always gives the same bytes.
+
+import { readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { deflateSync, inflateSync } from "node:zlib";
+
+/** The icon's colour for a light taskbar, and the program's own icon. */
+export const COLOUR = [0x5b, 0x7b, 0xa8];
+/** The icon's colour for a dark taskbar: the colour the app's dark side draws the mark in (`--field-mark`). */
+export const COLOUR_ON_DARK = [0xbc, 0xd0, 0xec];
+const ICONS = join(dirname(fileURLToPath(import.meta.url)), "..", "crates", "petalock-desktop", "icons");
+
+// The drawings, in the formula's own units (a circle of 62 in a 200 square): radius = 100 (base + amp sin(points
+// angle + phase)) for each line. `pattern` is the lock screen's fourteen lines.
+const DRAWINGS = {
+  pattern: { base: 0.62, lines: Array.from({ length: 14 }, (_, i) => ({ amp: 0.16 + i * 0.012, phase: (i * Math.PI) / 14 })) },
+  // Board D's "solid": one deep trefoil, filled, with a round hole of 15 in the middle (see-through here).
+  solid: { base: 0.56, lines: [{ amp: 0.34, phase: 0 }], fill: true, hole: 15 },
+};
+
+/** Each frame: its size in pixels, its drawing and the width of its lines in pixels (tuned by eye at each size). */
+export const FRAMES = [
+  // Up to 64 the solid trefoil: two crossing lines run into a grid at 16 and 20 and read as six loops at 24 to 64.
+  { size: 16, drawing: "solid", stroke: 0 },
+  { size: 20, drawing: "solid", stroke: 0 },
+  { size: 24, drawing: "solid", stroke: 0 },
+  { size: 32, drawing: "solid", stroke: 0 },
+  { size: 40, drawing: "solid", stroke: 0 },
+  { size: 48, drawing: "solid", stroke: 0 },
+  { size: 64, drawing: "solid", stroke: 0 },
+  { size: 256, drawing: "pattern", stroke: 1.9 },
+];
+
+/** The large picture beside the .ico (Tauri's bundle lists it): the pattern at 512 pixels. */
+export const PNG_FRAME = { size: 512, drawing: "pattern", stroke: 3.2 };
+
+const POINTS = 3;
+const SAMPLES = 8;
+
+/**
+ * How far a point is from one line, in the formula's units: the gap between its radius and the line's at its angle,
+ * turned toward the line's normal (a polar curve r = R(angle) leans by R' / R there). Exact on the line, and close
+ * within a pixel of it, which is all the edge's shading needs.
+ */
+function distance(r, angle, base, { amp, phase }) {
+  const R = 100 * (base + amp * Math.sin(POINTS * angle + phase));
+  const slope = 100 * amp * POINTS * Math.cos(POINTS * angle + phase);
+  return (Math.abs(r - R) * R) / Math.hypot(R, slope);
+}
+
+/** The frame's pixels, top row first, as how much of each the drawing covers (0 to 1). */
+export function coverage({ size, drawing, stroke }) {
+  const { base, lines, fill = false, hole = 0 } = DRAWINGS[drawing];
+  const half = (stroke / 2) * (200 / size);
+  const inside = fill
+    ? (r, angle) => r >= hole && r <= 100 * (base + lines[0].amp * Math.sin(POINTS * angle + lines[0].phase))
+    : (r, angle) => lines.some((line) => distance(r, angle, base, line) <= half);
+  const out = new Float64Array(size * size);
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      let hits = 0;
+      for (let sy = 0; sy < SAMPLES; sy += 1) {
+        for (let sx = 0; sx < SAMPLES; sx += 1) {
+          const dx = ((x + (sx + 0.5) / SAMPLES) * 200) / size - 100;
+          const dy = ((y + (sy + 0.5) / SAMPLES) * 200) / size - 100;
+          const r = Math.hypot(dx, dy);
+          const angle = Math.atan2(dy, dx);
+          if (inside(r, angle)) hits += 1;
+        }
+      }
+      out[y * size + x] = hits / (SAMPLES * SAMPLES);
+    }
+  }
+  return out;
+}
+
+const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
+  let c = n;
+  for (let k = 0; k < 8; k += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+  return c >>> 0;
+});
+
+function crc32(bytes) {
+  let c = 0xffffffff;
+  for (const byte of bytes) c = CRC_TABLE[(c ^ byte) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+function chunk(type, data) {
+  const head = Buffer.alloc(8);
+  head.writeUInt32BE(data.length, 0);
+  head.write(type, 4, "ascii");
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(crc32(Buffer.concat([head.subarray(4), data])), 0);
+  return Buffer.concat([head, data, crc]);
+}
+
+/**
+ * A frame's pixels as a PNG holds them before compression: each row a filter byte (0, none) then red, green, blue and
+ * alpha per pixel, the icon's colour everywhere and its cover as the alpha (straight, not premultiplied, as PNG wants).
+ */
+export function rawRows(frame, colour = COLOUR) {
+  const { size } = frame;
+  const cover = coveredOnce(frame);
+  const rows = Buffer.alloc(size * (1 + size * 4));
+  for (let y = 0; y < size; y += 1) {
+    const row = y * (1 + size * 4);
+    rows[row] = 0;
+    for (let x = 0; x < size; x += 1) {
+      const at = row + 1 + x * 4;
+      const alpha = Math.round((cover[y * size + x] ?? 0) * 255);
+      rows[at] = alpha === 0 ? 0 : colour[0];
+      rows[at + 1] = alpha === 0 ? 0 : colour[1];
+      rows[at + 2] = alpha === 0 ? 0 : colour[2];
+      rows[at + 3] = alpha;
+    }
+  }
+  return rows;
+}
+
+const covered = new Map();
+
+/** [`coverage`], worked out once per frame: both colours of an icon share each frame's drawing. */
+function coveredOnce(frame) {
+  const key = `${String(frame.size)}/${frame.drawing}/${String(frame.stroke)}`;
+  let cover = covered.get(key);
+  if (cover === undefined) {
+    cover = coverage(frame);
+    covered.set(key, cover);
+  }
+  return cover;
+}
+
+/** A frame as a PNG file, in `colour`. */
+export function png(frame, colour = COLOUR) {
+  const { size } = frame;
+  const rows = rawRows(frame, colour);
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(size, 0);
+  header.writeUInt32BE(size, 4);
+  header[8] = 8; // bits per channel
+  header[9] = 6; // red, green, blue and alpha
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk("IHDR", header),
+    chunk("IDAT", deflateSync(rows, { level: 9 })),
+    chunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+/** The .ico: every frame as a PNG inside it (Windows reads PNG frames since Vista), smallest first. */
+export function ico(frames = FRAMES, colour = COLOUR) {
+  const images = frames.map((frame) => png(frame, colour));
+  const head = Buffer.alloc(6 + 16 * frames.length);
+  head.writeUInt16LE(0, 0);
+  head.writeUInt16LE(1, 2); // an icon
+  head.writeUInt16LE(frames.length, 4);
+  let offset = head.length;
+  frames.forEach(({ size }, i) => {
+    const at = 6 + 16 * i;
+    head[at] = size >= 256 ? 0 : size; // 0 means 256
+    head[at + 1] = size >= 256 ? 0 : size;
+    head.writeUInt16LE(1, at + 4); // colour planes
+    head.writeUInt16LE(32, at + 6); // bits per pixel
+    head.writeUInt32LE(images[i].length, at + 8);
+    head.writeUInt32LE(offset, at + 12);
+    offset += images[i].length;
+  });
+  return Buffer.concat([head, ...images]);
+}
+
+/** What the files should hold: the icon, the large picture and the icon for a dark taskbar. */
+export function files() {
+  return {
+    "icon.ico": ico(),
+    "icon.png": png(PNG_FRAME),
+    "icon-dark-taskbar.ico": ico(FRAMES, COLOUR_ON_DARK),
+  };
+}
+
+/** A PNG file's size and its rows before compression (the IDAT chunks joined, then inflated). */
+export function readPng(bytes) {
+  if (!bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return undefined;
+  const parts = [];
+  let size = 0;
+  for (let at = 8; at + 8 <= bytes.length; ) {
+    const length = bytes.readUInt32BE(at);
+    const type = bytes.toString("ascii", at + 4, at + 8);
+    if (type === "IHDR") size = bytes.readUInt32BE(at + 8);
+    if (type === "IDAT") parts.push(bytes.subarray(at + 8, at + 8 + length));
+    at += 12 + length;
+  }
+  return { size, rows: inflateSync(Buffer.concat(parts)) };
+}
+
+/** The .ico file's frames: the size each lists (0 for 256) and its PNG's bytes, in the file's order. */
+export function icoFrames(bytes) {
+  return Array.from({ length: bytes.readUInt16LE(4) }, (_, i) => {
+    const at = 6 + 16 * i;
+    const length = bytes.readUInt32LE(at + 8);
+    const offset = bytes.readUInt32LE(at + 12);
+    return { listed: bytes[at], png: bytes.subarray(offset, offset + length) };
+  });
+}
+
+/** Why one PNG is not the frame the script draws in `colour`, or undefined when it is. */
+export function frameProblem(bytes, frame, colour = COLOUR) {
+  const read = readPng(bytes);
+  if (read === undefined || read.size !== frame.size) return `not a ${String(frame.size)} px PNG`;
+  if (!read.rows.equals(rawRows(frame, colour))) return "its pixels differ from the drawing";
+  return undefined;
+}
+
+/** Why one .ico is not the frames the script draws in `colour`, one line a problem, each starting with `name`. */
+function icoProblems(bytes, colour, name) {
+  const frames = icoFrames(bytes);
+  if (bytes.readUInt16LE(2) !== 1 || frames.length !== FRAMES.length) {
+    return [`${name}: ${String(frames.length)} frames, ${String(FRAMES.length)} drawn`];
+  }
+  return FRAMES.flatMap((frame, i) => {
+    const listed = frame.size >= 256 ? 0 : frame.size;
+    if (frames[i].listed !== listed) return [`${name} frame ${String(i + 1)}: lists ${String(frames[i].listed)}, drawn ${String(listed)}`];
+    const problem = frameProblem(frames[i].png, frame, colour);
+    return problem === undefined ? [] : [`${name} ${String(frame.size)} px: ${problem}`];
+  });
+}
+
+/**
+ * Why the committed files are not what the script draws, one line a problem, or none. The pixels are compared, not the
+ * compressed bytes: zlib's output may differ between Node builds and processors while the picture is the same.
+ */
+export function problems(icoBytes, pngBytes, darkIcoBytes) {
+  const found = icoProblems(icoBytes, COLOUR, "icon.ico");
+  const large = frameProblem(pngBytes, PNG_FRAME);
+  if (large !== undefined) found.push(`icon.png: ${large}`);
+  found.push(...icoProblems(darkIcoBytes, COLOUR_ON_DARK, "icon-dark-taskbar.ico"));
+  return found;
+}
+
+if (process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.argv[1]) {
+  if (process.argv.includes("--check")) {
+    const read = (name) => readFileSync(join(ICONS, name));
+    const found = problems(read("icon.ico"), read("icon.png"), read("icon-dark-taskbar.ico"));
+    for (const line of found) console.error(`${line}; run node scripts/make-icon.mjs to remake the icon`);
+    if (found.length === 0) console.log("icon.ico, icon.png and icon-dark-taskbar.ico match the drawing");
+    process.exit(found.length === 0 ? 0 : 1);
+  }
+  const wanted = files();
+  for (const [name, bytes] of Object.entries(wanted)) {
+    writeFileSync(join(ICONS, name), bytes);
+    console.log(`wrote ${name} (${bytes.length} bytes)`);
+  }
+}

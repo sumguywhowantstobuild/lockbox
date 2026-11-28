@@ -123,10 +123,10 @@ export function checks({ scan, areas = null }) {
   const ui = (name, ...args) => ({ name, cmd: "npm", args, cwd: join(root, "ui"), shell: true });
   // `--no-fail-fast`: one failing test program doesn't hide the others' results.
   // The engine's internal-only tests, as CI runs them (its unit tests run in `rust-tests` or `engine-tests`).
-  const engineInternal = cargo("engine-internal", "test", "-p", "lockbox-core", "--locked", "--no-fail-fast",
+  const engineInternal = cargo("engine-internal", "test", "-p", "petalock-core", "--locked", "--no-fail-fast",
     "--features", "test-internals", "--test", "*");
   // CI's "Bridge tests (release configuration)": the checks only the shipped configuration compiles.
-  const ipc = cargo("ipc", "test", "-p", "lockbox-desktop", "--locked", "--features", "custom-protocol", "--test",
+  const ipc = cargo("ipc", "test", "-p", "petalock-desktop", "--locked", "--features", "custom-protocol", "--test",
     "ipc");
   const rustTests = areas === null
     ? [
@@ -134,15 +134,15 @@ export function checks({ scan, areas = null }) {
       engineInternal,
       ipc,
       // The app as shipped, the built UI embedded, as CI builds it.
-      cargo("release-build", "build", "-p", "lockbox-desktop", "--release", "--locked", "--features",
+      cargo("release-build", "build", "-p", "petalock-desktop", "--release", "--locked", "--features",
         "custom-protocol"),
     ]
     : [
       ...(areas.has("engine")
-        ? [cargo("engine-tests", "test", "-p", "lockbox-core", "--locked", "--no-fail-fast"), engineInternal]
+        ? [cargo("engine-tests", "test", "-p", "petalock-core", "--locked", "--no-fail-fast"), engineInternal]
         : []),
       ...(areas.has("desktop")
-        ? [cargo("desktop-tests", "test", "-p", "lockbox-desktop", "--locked", "--no-fail-fast"), ipc]
+        ? [cargo("desktop-tests", "test", "-p", "petalock-desktop", "--locked", "--no-fail-fast"), ipc]
         : []),
     ];
   // Node expands the pattern itself, as CI's step does.
@@ -153,7 +153,7 @@ export function checks({ scan, areas = null }) {
       [
         cargo("fmt", "fmt", "--all", "--check"),
         cargo("clippy", "clippy", "--locked", "--all-targets", "--", "-D", "warnings"),
-        cargo("clippy-engine", "clippy", "-p", "lockbox-core", "--locked", "--all-targets", "--features",
+        cargo("clippy-engine", "clippy", "-p", "petalock-core", "--locked", "--all-targets", "--features",
           "test-internals", "--", "-D", "warnings"),
         // Builds the tests while the other lanes run, so the quiet phase only runs them.
         cargo("build-tests", "test", "--locked", "--no-run"),

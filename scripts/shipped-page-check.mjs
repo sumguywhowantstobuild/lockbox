@@ -1,4 +1,4 @@
-// Proves the page Lockbox ships holds no code from the build tools whose advisories ui/osv-scanner.toml accepts (or
+// Proves the page Petalock ships holds no code from the build tools whose advisories ui/osv-scanner.toml accepts (or
 // once accepted): picomatch, minimatch and tinyglobby. Those reach the lock file only through Vite, Vitest, ESLint and
 // typescript-eslint; this check is what makes "never shipped" in that file a tested fact rather than a claim.
 //

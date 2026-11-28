@@ -4,7 +4,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "../App";
-import { Pattern } from "../parts/Pattern";
+import { Intaglio } from "../parts/Intaglio";
 import { debugState, resetStoreForTests } from "../store";
 import { expectNoAxe } from "../testing/axe";
 import { rowReads } from "../testing/menuRows";
@@ -40,13 +40,13 @@ const TYPED = "MU-typed in the form";
 const PENDING = "MU-typed pending";
 const NOT_LISTED_INSIDE = "Your new vault is on disk but couldn't be added to the list. Use Add existing vault folder, then make a new recovery key.";
 const FIRST_RUN_NOT_LISTED = "Your new vault is on disk but couldn't be added to the list. Use “I already have a vault or a backup” on the first screen to add it.";
-const LIST_FULL = "Lockbox's list of vaults is full. It holds up to 1,000 vaults. Nothing was changed.";
-const LOCKED_BEFORE = "Your new vault was made, but it locked before Lockbox could show its recovery key. Unlock it with its password, and Lockbox will make a recovery key to write down.";
+const LIST_FULL = "Petalock's list of vaults is full. It holds up to 1,000 vaults. Nothing was changed.";
+const LOCKED_BEFORE = "Your new vault was made, but it locked before Petalock could show its recovery key. Unlock it with its password, and Petalock will make a recovery key to write down.";
 const DRIVE = "A vault can't live on a removable, FAT32 or network drive. Choose a folder on this PC.";
 // 18b and 18c's words, as the approved screens have them (design/round8-build/moved_9_18.py).
 const SAY_NEW_VAULT = "A new vault has its own password and its own recovery key.";
 const NAME_HINT = "The name isn't encrypted, so don't put secrets in it.";
-const CLOUD_WARNING = "A cloud service syncs this folder. Lockbox doesn't support vaults in cloud folders. Choose a folder on this PC, or continue anyway.";
+const CLOUD_WARNING = "A cloud service syncs this folder. Petalock doesn't support vaults in cloud folders. Choose a folder on this PC, or continue anyway.";
 const SECRETS = [PASSWORD, NEW, TYPED, PENDING, "MU-wrong"];
 
 /** A vault's menu row by its name: an open vault's row reads "<name>Unlocked" (its status line, 4C Task 13b), so either way finds it. */
@@ -257,7 +257,7 @@ test("new_vault_from_the_menu_runs_setups_two_steps", async () => {
   expect(screen.getByLabelText("Password")).toBeTruthy();
   expect(screen.getByLabelText("Repeat the password")).toBeTruthy();
   expect(screen.getByText("Where it lives")).toBeTruthy();
-  expect(screen.getByText("Kept in your Lockbox Vaults folder on this PC.")).toBeTruthy();
+  expect(screen.getByText("Kept in your Petalock Vaults folder on this PC.")).toBeTruthy();
   expect(screen.getByRole("button", { name: "Choose another" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "Continue" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "Cancel" })).toBeTruthy();
@@ -473,7 +473,7 @@ test("the_cloud_question_of_an_add_from_the_menu_takes_focus_to_its_safe_answer"
     expect(document.activeElement).toBe(safe);
   });
   const described = safe.getAttribute("aria-describedby") ?? "";
-  expect(document.getElementById(described)?.textContent).toContain("Lockbox doesn't support vaults in cloud folders.");
+  expect(document.getElementById(described)?.textContent).toContain("Petalock doesn't support vaults in cloud folders.");
 });
 
 test("cancel_and_choose_another_on_the_cloud_warning_give_focus_to_the_password_box", async () => {
@@ -552,7 +552,7 @@ test("add_existing_vault_folder_from_the_menu_asks_about_a_cloud_folder_and_says
   await unlocked([vault(7, "My vault")]);
   // A folder that is not a vault: said on the window that is up (the shell's refusal, in words), and nothing changes.
   await chooseAction("Add existing vault folder");
-  expect((await screen.findByRole("alert")).textContent).toContain("That folder isn't a Lockbox vault.");
+  expect((await screen.findByRole("alert")).textContent).toContain("That folder isn't a Petalock vault.");
   expect(debugState().addFolder).toBeNull();
   expect(screen.getByRole("button", { name: "My vault, vault menu" })).toBeTruthy();
 
@@ -756,7 +756,7 @@ test("new_vault_wipes_the_typed_passwords_pending_refused_back_and_locked", asyn
   fill("Work", TYPED);
   shell.refuseNext("create_vault", { code: "core", kind: "io" });
   create();
-  expect((await screen.findByRole("alert")).textContent).toBe("Lockbox couldn't reach that folder or file. Check that the drive is connected, then try again.");
+  expect((await screen.findByRole("alert")).textContent).toBe("Petalock couldn't reach that folder or file. Check that the drive is connected, then try again.");
   expect(passwordBox().value).toBe("");
   expect(againBox().value).toBe("");
   expect(passwordBox().readOnly).toBe(false);
@@ -873,29 +873,29 @@ test("new_vault_screens_have_no_axe_violations", async () => {
   expect(container.querySelectorAll("style, [style]")).toHaveLength(0);
 });
 
-test("the_inside_new_vault_form_draws_its_places_pattern", async () => {
-  // 18b draws the new vault's own pattern, by the place it will take at the end of the list: with two listed, the third
-  // place's six points (as the unlock step draws a vault's), on the form and on its cloud warning; the first-use screens
-  // keep the setup screens' nine.
-  const drawn = () => document.querySelector("svg.rose path")?.getAttribute("d");
-  const pattern = (points: number) => {
-    const { container, unmount } = render(<Pattern points={points} />);
-    const d = container.querySelector("path")?.getAttribute("d");
+test("the_inside_new_vault_form_draws_the_engraved_logo", async () => {
+  // 18b, its cloud warning and the first-use screens all draw Petalock's engraved logo (Plan 5 Task 9b): the new vault's
+  // shape is no longer previewed in the large picture (its small mark shows it once the vault is made).
+  const drawn = () => [...document.querySelectorAll(".field svg.rose path")].map((path) => path.getAttribute("d")).join("|");
+  const logo = (() => {
+    const { container, unmount } = render(<Intaglio />);
+    const d = [...container.querySelectorAll("path")].map((path) => path.getAttribute("d")).join("|");
     unmount();
     return d;
-  };
+  })();
+  expect(logo.split("|")).toHaveLength(26);
   await unlocked([vault(7, "My vault"), vault(8, "Home")]);
   await toTheForm();
-  expect(drawn()).toBe(pattern(6));
+  expect(drawn()).toBe(logo);
   fill("Work", NEW);
   shell.cloudNext();
   create();
   await cloudWarning();
-  expect(drawn()).toBe(pattern(6));
+  expect(drawn()).toBe(logo);
   cleanup();
   resetStoreForTests();
   render(<CreateVault onBack={() => undefined} />);
-  expect(drawn()).toBe(pattern(9));
+  expect(drawn()).toBe(logo);
 });
 
 // ---- Plan 4C Task 13b: 18c names the service and says where the folder is ----
@@ -915,11 +915,11 @@ test("the_cloud_warning_names_the_service_the_shell_found_and_where_the_folder_i
     create();
     await screen.findByRole("button", { name: "Continue anyway" });
     // 18c's words, with the service by its everyday name ("A cloud service" only when the shell can't name it), never the shell's spelling.
-    const warning = `${said} syncs this folder. Lockbox doesn't support vaults in cloud folders. Choose a folder on this PC, or continue anyway.`;
+    const warning = `${said} syncs this folder. Petalock doesn't support vaults in cloud folders. Choose a folder on this PC, or continue anyway.`;
     expect(screen.getByText(warning), provider).toBeTruthy();
     expect(document.body.textContent).not.toContain("GoogleDrive");
     // Where the path was drawn, the folder's place in words (as 18b says it), beside Choose another: here the usual folder.
-    const place = screen.getByText("Kept in your Lockbox Vaults folder.");
+    const place = screen.getByText("Kept in your Petalock Vaults folder.");
     expect(place.parentElement?.contains(screen.getByRole("button", { name: "Choose another" }))).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     await screen.findByRole("button", { name: "Continue" });
@@ -931,5 +931,5 @@ test("the_cloud_warning_names_the_service_the_shell_found_and_where_the_folder_i
   create();
   await screen.findByRole("button", { name: "Continue anyway" });
   expect(screen.getByText("Kept in the folder you picked.")).toBeTruthy();
-  expect(screen.queryByText("Kept in your Lockbox Vaults folder.")).toBeNull();
+  expect(screen.queryByText("Kept in your Petalock Vaults folder.")).toBeNull();
 });

@@ -10,7 +10,7 @@ import { emptyTrash, OLD_TRASH_DAYS, pickTrashed, purgeTrashed, restoreTrashed, 
 import type { SortChoice } from "./ListTools";
 
 /** The line under the title: nothing is removed by the app on its own. */
-export const NOTHING_REMOVED = "Nothing here is removed until you say so. Lockbox never empties the trash by itself.";
+export const NOTHING_REMOVED = "Nothing here is removed until you say so. Petalock never empties the trash by itself.";
 
 const KIND_WORD: Record<ItemKind, string> = { login: "Login", key: "Key", note: "Note", file: "File", collection: "Folder" };
 const TILE: Record<ItemKind, string> = { login: "t0", file: "t1", note: "t2", key: "t3", collection: "t4" };

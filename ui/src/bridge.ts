@@ -20,7 +20,7 @@ export interface JournalPaths {
 }
 
 /**
- * What restore recovery found (`restore_notice`, and `lockbox://notice` with `kind: "restore"`, which carries these
+ * What restore recovery found (`restore_notice`, and `petalock://notice` with `kind: "restore"`, which carries these
  * fields beside the kind): at launch, or when a restore ends in a state the user must hear about.
  */
 export type RestoreNotice =
@@ -33,7 +33,7 @@ export type RestoreNotice =
   | { state: "unclear"; journal: string; paths: JournalPaths | null };
 
 /**
- * What launch, or a running app, has to tell (`launch_notices`, and `lockbox://notice`): flat objects tagged `kind`, with
+ * What launch, or a running app, has to tell (`launch_notices`, and `petalock://notice`): flat objects tagged `kind`, with
  * counts and flags only. The output sweep's `unreadable` is true when the record of opened files could not be read.
  * `first_close` comes only as an event, never from `launch_notices`: `explain: true` when the window was closed for the
  * first time (every vault is locked and the window stayed visible: show 5b), `explain: false` once the explanation is
@@ -44,7 +44,7 @@ export type PageNotice =
   | { kind: "open_cleanup"; removed: number; still_open: number }
   | ({ kind: "restore" } & RestoreNotice)
   | { kind: "first_close"; explain: boolean }
-  /** Windows said the save shortcut (Ctrl+Shift+L unless changed in Settings) belongs to another app: it is off until Lockbox is
+  /** Windows said the save shortcut (Ctrl+Shift+L unless changed in Settings) belongs to another app: it is off until Petalock is
    * started again or another shortcut is chosen in Settings. */
   | { kind: "shortcut_taken" }
   /** The shortcut could not be turned on for a reason that is not another app holding it. */
@@ -88,7 +88,7 @@ export type Opened<T> = Tagged<T> | { Confirm: Confirm } | "Dismissed";
 
 export type LockReason = "manual" | "idle" | "windows_locked" | "sleep" | "drive_gone" | "app_closing" | "restore";
 
-/** `lockbox://locked`: the session's generation after the lock. */
+/** `petalock://locked`: the session's generation after the lock. */
 export interface LockedEvent {
   session: number;
   generation: number;
@@ -178,15 +178,15 @@ export async function open<T>(cmd: string, args?: InvokeArgs): Promise<Opened<T>
   return tagged;
 }
 
-/** Listens for `lockbox://notice`: each notice is handed over as it came (it holds no vault data, so it has no generation). */
+/** Listens for `petalock://notice`: each notice is handed over as it came (it holds no vault data, so it has no generation). */
 export function onNotice(handler: (notice: PageNotice) => void): Promise<UnlistenFn> {
-  return listen<PageNotice>("lockbox://notice", ({ payload }) => {
+  return listen<PageNotice>("petalock://notice", ({ payload }) => {
     handler(payload);
   });
 }
 
 /**
- * What the save shortcut left in the shell, as `lockbox://capture` and `capture_state` say it: the copy's id (32 lowercase hex
+ * What the save shortcut left in the shell, as `petalock://capture` and `capture_state` say it: the copy's id (32 lowercase hex
  * characters, new for every press), what the clipboard held (`value`, `empty` for no text, `too_large`), or `gone` when the copy
  * was let go. Never the value. `changed` is true when a copy was waiting and this one's value is different; `env_keys` is how many
  * keys the copy reads as when it is a `.env` of at least one key and no line that can't be read, otherwise `null`.
@@ -199,7 +199,7 @@ export interface CaptureEvent {
 }
 
 /**
- * What `lockbox://busy` says: the long operations now running for a session, by their fixed names (`import`, `save_copy`, `open`, and
+ * What `petalock://busy` says: the long operations now running for a session, by their fixed names (`import`, `save_copy`, `open`, and
  * the ones later plans add), and none when the last has ended. `session` is `null` for one that belongs to no vault. No vault data, so
  * no generation: the page keeps it in that session's record, which a lock drops.
  */
@@ -208,14 +208,14 @@ export interface BusyEvent {
   operations: string[];
 }
 
-/** Listens for `lockbox://busy`: each event is handed over as it came. */
+/** Listens for `petalock://busy`: each event is handed over as it came. */
 export function onBusy(handler: (event: BusyEvent) => void): Promise<UnlistenFn> {
-  return listen<BusyEvent>("lockbox://busy", ({ payload }) => {
+  return listen<BusyEvent>("petalock://busy", ({ payload }) => {
     handler(payload);
   });
 }
 
-/** A long job's number, unique in one launch of the app: the shell's `OperationId`. It reaches the page by `lockbox://job-started` only. */
+/** A long job's number, unique in one launch of the app: the shell's `OperationId`. It reaches the page by `petalock://job-started` only. */
 export type OperationId = number;
 
 /**
@@ -238,7 +238,7 @@ export type JobKind =
   | "replace"
   | "copy_item";
 
-/** `lockbox://job-started`: the operation the shell gave the command that took `request`, sent before its first progress and before its answer. */
+/** `petalock://job-started`: the operation the shell gave the command that took `request`, sent before its first progress and before its answer. */
 export interface JobStartedEvent {
   request: number;
   operation: OperationId;
@@ -246,7 +246,7 @@ export interface JobStartedEvent {
   kind: JobKind;
 }
 
-/** `lockbox://progress`: bytes done of the total, at most about ten a second, and one last event with `finished` when the job ends for any reason. */
+/** `petalock://progress`: bytes done of the total, at most about ten a second, and one last event with `finished` when the job ends for any reason. */
 export interface ProgressEvent {
   operation: OperationId;
   scope: JobScope;
@@ -256,29 +256,29 @@ export interface ProgressEvent {
   finished: boolean;
 }
 
-/** `lockbox://lock-epoch`: the lock epoch changed (Lock all, an idle lock, Windows locking or sleep, the app closing), even with no vault open. */
+/** `petalock://lock-epoch`: the lock epoch changed (Lock all, an idle lock, Windows locking or sleep, the app closing), even with no vault open. */
 export interface LockEpochEvent {
   epoch: number;
   reason: LockReason;
 }
 
-/** Listens for `lockbox://job-started`: each event is handed over as it came (ids only, so no generation of its own: its scope says what it belongs to). */
+/** Listens for `petalock://job-started`: each event is handed over as it came (ids only, so no generation of its own: its scope says what it belongs to). */
 export function onJobStarted(handler: (event: JobStartedEvent) => void): Promise<UnlistenFn> {
-  return listen<JobStartedEvent>("lockbox://job-started", ({ payload }) => {
+  return listen<JobStartedEvent>("petalock://job-started", ({ payload }) => {
     handler(payload);
   });
 }
 
-/** Listens for `lockbox://progress`: two numbers and ids, handed over as they came. */
+/** Listens for `petalock://progress`: two numbers and ids, handed over as they came. */
 export function onProgress(handler: (event: ProgressEvent) => void): Promise<UnlistenFn> {
-  return listen<ProgressEvent>("lockbox://progress", ({ payload }) => {
+  return listen<ProgressEvent>("petalock://progress", ({ payload }) => {
     handler(payload);
   });
 }
 
-/** Listens for `lockbox://lock-epoch`: handed over as it came. */
+/** Listens for `petalock://lock-epoch`: handed over as it came. */
 export function onLockEpoch(handler: (event: LockEpochEvent) => void): Promise<UnlistenFn> {
-  return listen<LockEpochEvent>("lockbox://lock-epoch", ({ payload }) => {
+  return listen<LockEpochEvent>("petalock://lock-epoch", ({ payload }) => {
     handler(payload);
   });
 }
@@ -287,7 +287,7 @@ export function onLockEpoch(handler: (event: LockEpochEvent) => void): Promise<U
 export type CloseReason = "close" | "quit";
 
 /**
- * `lockbox://close-asked`: a close or a Quit arrived while a job runs or a restore waits, and nothing is locked, hidden or cancelled until the question is
+ * `petalock://close-asked`: a close or a Quit arrived while a job runs or a restore waits, and nothing is locked, hidden or cancelled until the question is
  * answered (`close_answer`). `running` is the kinds of jobs, each once, in the order they began; `past_swap` is a restore that can no longer be
  * cancelled; `restore_waiting` is a finished restore waiting for its yes at 24d (nothing may run: closing ends it). `question` is the question's own
  * number, minted by the shell (1, 2, 3, ..., never reused; a repeat of the pending question carries the same one) and sent back with the answer, so
@@ -303,9 +303,9 @@ export interface CloseAskedEvent {
   question: number;
 }
 
-/** Listens for `lockbox://close-asked`: handed over as it came (it holds no vault data, so it has no generation). */
+/** Listens for `petalock://close-asked`: handed over as it came (it holds no vault data, so it has no generation). */
 export function onCloseAsked(handler: (event: CloseAskedEvent) => void): Promise<UnlistenFn> {
-  return listen<CloseAskedEvent>("lockbox://close-asked", ({ payload }) => {
+  return listen<CloseAskedEvent>("petalock://close-asked", ({ payload }) => {
     handler(payload);
   });
 }
@@ -315,9 +315,9 @@ export function isSessionCurrent(session: number, generation: number): boolean {
   return generations.get(session) === generation;
 }
 
-/** Listens for `lockbox://capture`: each event is handed over as it came (it holds no vault data, so it has no generation). */
+/** Listens for `petalock://capture`: each event is handed over as it came (it holds no vault data, so it has no generation). */
 export function onCapture(handler: (event: CaptureEvent) => void): Promise<UnlistenFn> {
-  return listen<CaptureEvent>("lockbox://capture", ({ payload }) => {
+  return listen<CaptureEvent>("petalock://capture", ({ payload }) => {
     handler(payload);
   });
 }
@@ -327,7 +327,7 @@ export function onCapture(handler: (event: CaptureEvent) => void): Promise<Unlis
  * event older than what the bridge has seen (it arrived after the session was unlocked again) is ignored.
  */
 export function onLocked(handler?: (event: LockedEvent) => void): Promise<UnlistenFn> {
-  return listen<LockedEvent>("lockbox://locked", ({ payload }) => {
+  return listen<LockedEvent>("petalock://locked", ({ payload }) => {
     if (advance(payload.session, payload.generation)) handler?.(payload);
   });
 }

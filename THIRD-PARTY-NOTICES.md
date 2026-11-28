@@ -2,18 +2,18 @@
 
 ## EFF Large Wordlist for Passphrases
 
-- File: `crates/lockbox-core/wordlists/eff_large_wordlist.txt` (7,776 words, stored unchanged, byte for byte)
+- File: `crates/petalock-core/wordlists/eff_large_wordlist.txt` (7,776 words, stored unchanged, byte for byte)
 - Author: Electronic Frontier Foundation (EFF), 2016
 - Source: https://www.eff.org/files/2016/07/18/eff_large_wordlist.txt
 - Downloaded: 2026-10-13
 - SHA-256: `addd35536511597a02fa0a9ff1e5284677b8883b83e986e43f15a3db996b903e`
 - Licence: Creative Commons Attribution 3.0 United States (CC BY 3.0 US), https://creativecommons.org/licenses/by/3.0/us/
 
-Used by the passphrase generator (`crates/lockbox-core/src/generator.rs`). The list is used as published; Lockbox does not modify it. This credit is required by the licence.
+Used by the passphrase generator (`crates/petalock-core/src/generator.rs`). The list is used as published; Petalock does not modify it. This credit is required by the licence.
 
 ## BIP39 English word list (the recovery key's words)
 
-- File: `crates/lockbox-core/src/wordlist/english.txt` (2,048 words, stored unchanged, byte for byte, LF endings)
+- File: `crates/petalock-core/src/wordlist/english.txt` (2,048 words, stored unchanged, byte for byte, LF endings)
 - Source: `src/mnemonic/wordlist/english.txt` of Trezor's `python-mnemonic`, https://github.com/trezor/python-mnemonic
   (last changed in that repository 2021-07-27). The same list is published as `bip-0039/english.txt` in
   https://github.com/bitcoin/bips; the two files were compared when this one was added and are byte-identical.
@@ -38,13 +38,43 @@ Used by the passphrase generator (`crates/lockbox-core/src/generator.rs`). The l
 > COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
 > OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-Used by the recovery key (`crates/lockbox-core/src/recovery.rs`): its 24 words are written from this list. The list is
-used as published; Lockbox does not modify it.
+Used by the recovery key (`crates/petalock-core/src/recovery.rs`): its 24 words are written from this list. The list is
+used as published; Petalock does not modify it.
+
+## nsis_tauri_utils (inside the installer)
+
+- File: `nsis_tauri_utils.dll` 0.5.3, an installer plugin built into Setup itself (unpacked to a temporary folder while
+  Setup runs; not installed). The installer's build tool (`tauri-cli` 2.12.5, through `tauri-bundler` 2.10.5) fetches
+  that exact release and checks its digest.
+- Source: https://github.com/tauri-apps/nsis-tauri-utils (tag `nsis_tauri_utils-v0.5.3`)
+- Licence: MIT or Apache-2.0, at the user's choice; Petalock uses it under MIT. The notice that must stay with it:
+
+> MIT License
+>
+> Copyright (c) 2019 - 2022 Tauri Programme within The Commons Conservancy
+>
+> Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
+> documentation files (the "Software"), to deal in the Software without restriction, including without limitation the
+> rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit
+> persons to whom the Software is furnished to do so, subject to the following conditions:
+>
+> The above copyright notice and this permission notice shall be included in all copies or substantial portions of the
+> Software.
+>
+> THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE
+> WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+> COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+> OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+Setup itself is made with NSIS (Nullsoft Scriptable Install System, zlib/libpng licence, which asks for no notice in a
+program built with it).
 
 ## Libraries the desktop app uses directly
 
 Exact versions are pinned in `Cargo.lock` and `ui/package-lock.json`. The full licence texts of these libraries and of
-what they depend on ship with the installer (Plan 5); nothing is distributed before then.
+what they depend on ship with the installer, as `THIRD-PARTY-NOTICES.txt` in the install folder: the installer's build
+makes it from the two lock files (`scripts/licences.mjs`, with `about.toml`) and it is never committed. It also carries the
+two word lists' notices and the installer plugin's notice above.
 
 | Library | Version | Licence | Used for |
 |---|---|---|---|

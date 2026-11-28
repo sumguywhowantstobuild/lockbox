@@ -20,7 +20,7 @@ const LOGIN_PASSWORD = ["MU", "e2e", "login", stamp].join("-");
 
 const clipboard = app.clipboardSteps(env);
 // the GitHub e2e job (its own marker; the generic CI=true counts for nothing)
-const onCi = env.LOCKBOX_E2E_CI === "1";
+const onCi = env.PETALOCK_E2E_CI === "1";
 // the clipboard clears itself after this long, once the password is copied: the lock must be seen well before
 const CLIPBOARD_SECONDS = 300;
 // the lock comes a minute after the last input (the shortest setting), on the app's 5-second clock; this is the allowance on top
