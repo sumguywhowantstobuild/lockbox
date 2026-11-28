@@ -694,18 +694,125 @@ test("build_installer_clears_a_restored_bundler_folder_before_it_provisions_the_
   assert.match(provisionClearProblems("nothing").join("\n"), /not found/);
 });
 
+/**
+ * Task 9g: what is wrong with how the build checks the WebView2 bootstrapper. Microsoft repoints fwlink 2124703 at each new
+ * build of the file, so a pinned SHA-256 breaks every build without warning (run 46090576875). The check is Microsoft's
+ * Authenticode signature: valid, signed by Microsoft Corporation, on a chain that ends at a Microsoft root; the digest of the
+ * file actually checked is logged and re-checked after the build. Problems found, as sentences.
+ */
+export function webviewSignatureProblems(workflow) {
+  const problems = [];
+  const start = workflow.indexOf("Provision the bundler's packaging inputs");
+  const end = workflow.indexOf("Provision cargo-about");
+  if (start < 0 || end < start) return ["the provisioning step was not found"];
+  const step = workflow.slice(start, end);
+  // Any WEBVIEW2_SHA256 key in YAML (quoted, upper case, anything) is a pin; the GITHUB_ENV hand-off is not YAML.
+  if (/^\s*WEBVIEW2_SHA256\s*:/m.test(workflow)) problems.push("the bootstrapper still has a pinned SHA-256, which breaks on Microsoft's next build");
+  if (/Get-Verified \$env:WEBVIEW2_URL/.test(step)) problems.push("the bootstrapper is still checked against a fixed digest");
+  const sig = step.indexOf("Get-AuthenticodeSignature -LiteralPath $wv");
+  if (sig < 0) problems.push("the bootstrapper's signature is not read");
+  // Each refusal on its own: its condition is there and its own block throws.
+  const guards = [
+    ["$sig.Status -ne 'Valid'", "a signature that is not Valid"],
+    ["$sig.SignerCertificate.Subject -cnotmatch '^CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US$'", "a signer other than Microsoft Corporation, exactly,"],
+    ["-not $chain.Build($sig.SignerCertificate)", "a signer whose chain does not build"],
+    ["$root.Subject -cnotmatch '^CN=Microsoft Root Certificate Authority 20(10|11), O=Microsoft Corporation, L=Redmond, S=Washington, C=US$'", "a chain that does not end at a Microsoft root by name"],
+    ["$microsoftRoots -cnotcontains $rootSha256", "a root whose fingerprint is not a Microsoft root's"],
+  ];
+  let lastGuardEnd = -1;
+  for (const [condition, what] of guards) {
+    const at = step.indexOf(condition);
+    if (at < 0) { problems.push(`${what} is not refused (its check is missing)`); continue; }
+    const open = step.indexOf("{", at + condition.length);
+    let depth = 0, close = -1;
+    for (let i = open; open >= 0 && i < step.length; i++) {
+      if (step[i] === "{") depth++;
+      else if (step[i] === "}" && --depth === 0) { close = i; break; }
+    }
+    if (open < 0 || close < 0 || !/\bthrow\b/.test(step.slice(open, close))) problems.push(`${what} is not refused (its block does not stop the build)`);
+    lastGuardEnd = Math.max(lastGuardEnd, close);
+  }
+  for (const fp of ["847DF6A78497943F27FC72EB93F9A637320A02B561D0A91B09E87A7807ED7C61", "DF545BF919A2439C36983B54CDFC903DFA4F37D3996D8D84B4C31EEC6F3C163E"]) {
+    if (!step.includes(`'${fp}'`)) problems.push(`the Microsoft root fingerprint ${fp.slice(0, 8)}... is not in the accepted list`);
+  }
+  if (!/\$rootSha256 = \[System\.Convert\]::ToHexString\(\[System\.Security\.Cryptography\.SHA256\]::HashData\(\$root\.RawData\)\)/.test(step)) problems.push("the root's fingerprint is not taken from the root itself");
+  const ignoreTime = step.indexOf("$chain.ChainPolicy.VerificationFlags = [System.Security.Cryptography.X509Certificates.X509VerificationFlags]::IgnoreNotTimeValid");
+  const build = step.indexOf("$chain.Build(");
+  if (ignoreTime < 0 || build < 0 || ignoreTime > build) problems.push("an expired but timestamped signer would stop the build (time validity is not set aside before the chain is built)");
+  if (/AllowUnknownCertificateAuthority|AllFlags|NoFlag\b/.test(step)) problems.push("the chain policy sets aside more than time validity");
+  if (!/"WEBVIEW2_SHA256=\$wvHash" >> \$env:GITHUB_ENV/.test(step)) problems.push("the checked file's digest is not handed to the re-check after the build");
+  const hash = step.indexOf("$wvHash = (Get-FileHash $wv -Algorithm SHA256).Hash");
+  if (hash < 0) problems.push("the checked file's digest is not taken");
+  else if (sig < 0 || hash < lastGuardEnd) problems.push("the digest is taken before every certificate check has passed");
+  if (!/^\s*"WebView2 bootstrapper: SHA-256 \$wvHash, signed by .*root \$\(\$root\.Subject\) \(\$rootSha256\)/m.test(step)) problems.push("the checked file's digest, signer and root are not written to the log");
+  // After the build: the hand-off value compared, and a mismatch stops the run.
+  const cargo = workflow.indexOf("cargo tauri build");
+  const recheck = workflow.indexOf("(Join-Path $tools 'MicrosoftEdgeWebview2Setup.exe') = $env:WEBVIEW2_SHA256");
+  const compare = workflow.indexOf("if ((Get-FileHash $path -Algorithm SHA256).Hash -ne $again[$path]) { throw \"a packaging input changed during the build: $path\" }");
+  if (recheck < 0 || recheck < end || cargo < 0 || recheck < cargo) problems.push("the bootstrapper is not re-checked after the build");
+  else if (compare < recheck) problems.push("a bootstrapper changed during the build does not stop the run");
+  return problems;
+}
+
+test("build_installer_checks_the_webview2_bootstrapper_by_microsofts_signature_not_a_stale_digest", () => {
+  const text = read(BUILD);
+  assert.deepEqual(webviewSignatureProblems(text), []);
+  // The check fires on the old pinned form, and on each part taken away.
+  const pinned = text.replace("      WEBVIEW2_URL: https://go.microsoft.com/fwlink/p/?LinkId=2124703\n", "      WEBVIEW2_URL: https://go.microsoft.com/fwlink/p/?LinkId=2124703\n      WEBVIEW2_SHA256: " + "a".repeat(64) + "\n");
+  assert.match(webviewSignatureProblems(pinned).join("\n"), /pinned SHA-256/);
+  const quoted = pinned.replace("WEBVIEW2_SHA256: " + "a".repeat(64), "WEBVIEW2_SHA256: '" + "A".repeat(64) + "'");
+  assert.match(webviewSignatureProblems(quoted).join("\n"), /pinned SHA-256/, "a quoted upper-case pin is a pin");
+  const problemsOf = (from, to) => {
+    assert.ok(text.includes(from), `the mutation's text is in the workflow: ${from}`);
+    return webviewSignatureProblems(text.replace(from, to)).join("\n");
+  };
+  assert.match(problemsOf("$sig.Status -ne 'Valid'", "$false"), /not Valid is not refused/);
+  assert.match(problemsOf("-cnotmatch '^CN=Microsoft Corporation,", "-notmatch '^CN=Microsoft Corporation,"), /Microsoft Corporation, exactly, is not refused/);
+  assert.match(problemsOf("$root.Subject -cnotmatch", "$root.Subject -cmatch"), /Microsoft root by name is not refused/);
+  assert.match(problemsOf("$microsoftRoots -cnotcontains $rootSha256", "$false"), /fingerprint is not a Microsoft root's is not refused/);
+  // Each refusal taken away on its own (the comparison left in place) is caught by itself.
+  for (const [from, what] of [
+    ['{ throw "WebView2 bootstrapper: signature', /not Valid is not refused \(its block/],
+    ['throw "WebView2 bootstrapper: signed by', /Microsoft Corporation, exactly, is not refused \(its block/],
+    ['{ throw "WebView2 bootstrapper: the signer\'s chain', /chain does not build is not refused \(its block/],
+    ['throw "WebView2 bootstrapper: the chain ends at', /Microsoft root by name is not refused \(its block/],
+    ['{ throw "WebView2 bootstrapper: the root\'s fingerprint', /fingerprint is not a Microsoft root's is not refused \(its block/],
+  ]) {
+    const to = from.replace("throw ", "");
+    const got = problemsOf(from, to);
+    assert.match(got, what, `removing ${from} is caught`);
+    assert.equal(got.split("\n").length, 1, `removing ${from} is the only problem: ${got}`);
+  }
+  assert.match(problemsOf("'847DF6A78497943F27FC72EB93F9A637320A02B561D0A91B09E87A7807ED7C61'", "'00'"), /847DF6A7\.\.\. is not in the accepted list/);
+  assert.match(problemsOf("          $chain.ChainPolicy.VerificationFlags = [System.Security.Cryptography.X509Certificates.X509VerificationFlags]::IgnoreNotTimeValid\n", ""), /expired but timestamped/);
+  assert.match(problemsOf("::IgnoreNotTimeValid", "::AllFlags"), /more than time validity/);
+  assert.match(problemsOf('"WEBVIEW2_SHA256=$wvHash" >> $env:GITHUB_ENV', ""), /re-check after the build/);
+  // The digest moved up, right after the signature read, is caught; so is its log line taken away.
+  const hashLine = "          $wvHash = (Get-FileHash $wv -Algorithm SHA256).Hash\n";
+  const sigLine = "          $sig = Get-AuthenticodeSignature -LiteralPath $wv\n";
+  assert.ok(text.includes(hashLine) && text.includes(sigLine));
+  assert.match(webviewSignatureProblems(text.replace(hashLine, "").replace(sigLine, sigLine + hashLine)).join("\n"), /before every certificate check/);
+  assert.match(problemsOf('"WebView2 bootstrapper: SHA-256 $wvHash', '"WebView2 bootstrapper: $wvHash'), /not written to the log/);
+  // After the build: the comparison loop taken away, or its refusal, is caught.
+  assert.match(problemsOf('{ throw "a packaging input changed during the build: $path" }', '{ "a packaging input changed during the build: $path" }'), /changed during the build does not stop the run/);
+  assert.match(webviewSignatureProblems("nothing").join("\n"), /not found/);
+});
+
 test("build_installer_pins_the_tool_and_every_packaging_input_and_checks_each_digest_before_use", () => {
   const text = read(BUILD);
   // The CLI: one exact version, installed locked, cached by that version.
   assert.match(text, /cargo install tauri-cli --locked --version 2\.12\.5\b/);
   assert.match(text, /key: tauri-cli-2\.12\.5-/);
   assert.ok(!/tauri-cli[^\n]*[\^~]/.test(text), "no range");
-  // The three inputs the bundler downloads (tauri-bundler 2.10.5, windows/nsis/mod.rs:38-44 and windows/util.rs:19).
+  // The three inputs the bundler downloads (tauri-bundler 2.10.5, windows/nsis/mod.rs:38-44 and windows/util.rs:19). The two
+  // versioned ones carry a pinned SHA-256; the WebView2 bootstrapper sits behind a link Microsoft repoints at each new build,
+  // so it is checked by Microsoft's signature instead (below).
   const inputs = [
     { name: "NSIS 3.13", url: "https://github.com/tauri-apps/binary-releases/releases/download/nsis-3.13/nsis-3.13.zip" },
     { name: "nsis_tauri_utils 0.5.3", url: "https://github.com/tauri-apps/nsis-tauri-utils/releases/download/nsis_tauri_utils-v0.5.3/nsis_tauri_utils.dll" },
-    { name: "WebView2 bootstrapper", url: "https://go.microsoft.com/fwlink/p/?LinkId=2124703" },
   ];
+  assert.match(text, /WEBVIEW2_URL: https:\/\/go\.microsoft\.com\/fwlink\/p\/\?LinkId=2124703\n/);
+  assert.deepEqual(webviewSignatureProblems(text), []);
   const lines = text.split("\n");
   for (const input of inputs) {
     const at = lines.findIndex((line) => line.includes(input.url));

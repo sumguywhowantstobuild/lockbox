@@ -7,10 +7,11 @@ name: Build installer
 # smoke-tested.
 #
 # The Tauri CLI is pinned to an exact version (2.12.5, published 2026-11-16) and installed with its own lock file. Every
-# packaging input the CLI's bundler would download is provisioned here first, pinned and checked against a SHA-256 before it
-# is used, so the bundler finds each one in place and fetches nothing: NSIS 3.13, its nsis_tauri_utils plugin 0.5.3 and
-# Microsoft's WebView2 bootstrapper (tauri-bundler 2.10.5 pins the first two by SHA-1 only and the third by nothing;
-# windows/nsis/mod.rs:38-44, windows/util.rs:19). The build's log is searched for any download or rebuild of its own, and the
+# packaging input the CLI's bundler would download is provisioned here first and checked before it is used, so the bundler
+# finds each one in place and fetches nothing: NSIS 3.13 and its nsis_tauri_utils plugin 0.5.3 against pinned SHA-256s, and
+# Microsoft's WebView2 bootstrapper, whose link Microsoft repoints at each new build, by Microsoft's Authenticode signature
+# (signer, and a root pinned by fingerprint), its digest recorded after that check (tauri-bundler 2.10.5 pins the first two
+# by SHA-1 only and the third by nothing; windows/nsis/mod.rs:38-44, windows/util.rs:19). The build's log is searched for any download or rebuild of its own, and the
 # inputs are checked again after the build. The installer also carries the open-source licence texts (THIRD-PARTY-NOTICES.txt,
 # Plan 5 Task 3): made here by scripts/licences.mjs with the pinned cargo-about, bundled from tauri.notices.conf.json, and read
 # back from the installed copy by the smoke checks.
@@ -49,14 +50,15 @@ jobs:
       sha256: ${{ steps.digest.outputs.sha256 }}
       artifact: petalock-installer
     env:
-      # The packaging inputs, each with the SHA-256 it must have. The three values are the ones the bundler would
-      # download itself; a new bundler version is a reviewed change to this list.
+      # The packaging inputs the bundler would download itself; a new bundler version is a reviewed change to this list. The
+      # two versioned files carry the SHA-256 they must have. The WebView2 bootstrapper sits behind a link Microsoft repoints
+      # at each new build of it, so a pinned digest breaks without warning: it is checked by Microsoft's signature instead,
+      # and the digest of the file checked goes to the log and to the re-check after the build.
       NSIS_URL: https://github.com/tauri-apps/binary-releases/releases/download/nsis-3.13/nsis-3.13.zip
       NSIS_SHA256: ba63dffc4410ee89193e1cb5a41989991bd77c61068da17e3156d136b7b0b3d8
       UTILS_URL: https://github.com/tauri-apps/nsis-tauri-utils/releases/download/nsis_tauri_utils-v0.5.3/nsis_tauri_utils.dll
       UTILS_SHA256: 5ba143b5db4a87d32d6e7802e033330aae56cbceabe0d1e3ba41948385ad4709
       WEBVIEW2_URL: https://go.microsoft.com/fwlink/p/?LinkId=2124703
-      WEBVIEW2_SHA256: fc2972da71d43e0c57b8d85a5cb9b200ed221f723cf43052d08ca722eb0bb22e
       # The tool that writes the licence notices the installer ships (scripts/licences.mjs): cargo-about 0.9.3 (EmbarkStudios,
       # published 2026-10-26), the release's own binary. The digest is that of the archive, as GitHub records it for the asset and
       # as the .sha256 file beside it says. Never cargo install from a moving index, and never a cache.
@@ -108,7 +110,7 @@ jobs:
         run: cargo install tauri-cli --locked --version 2.12.5
       - name: Show the Tauri CLI's version
         run: cargo tauri --version
-      - name: Provision the bundler's packaging inputs (pinned, SHA-256 checked before use)
+      - name: Provision the bundler's packaging inputs (pinned or signature-checked before use)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -133,7 +135,36 @@ jobs:
           $plugins = Join-Path $tools 'NSIS\Plugins\x86-unicode\additional'
           New-Item -ItemType Directory -Force $plugins | Out-Null
           Get-Verified $env:UTILS_URL $env:UTILS_SHA256 (Join-Path $plugins 'nsis_tauri_utils.dll')
-          Get-Verified $env:WEBVIEW2_URL $env:WEBVIEW2_SHA256 (Join-Path $tools 'MicrosoftEdgeWebview2Setup.exe')
+          # The bootstrapper: Microsoft's valid Authenticode signature, by Microsoft Corporation exactly, on a chain that ends at
+          # a Microsoft code-signing root. The digest is taken of the file that passed, logged, and re-checked after the build.
+          $wv = Join-Path $tools 'MicrosoftEdgeWebview2Setup.exe'
+          Invoke-WebRequest $env:WEBVIEW2_URL -OutFile $wv
+          $sig = Get-AuthenticodeSignature -LiteralPath $wv
+          if ($sig.Status -ne 'Valid' -or $null -eq $sig.SignerCertificate) { throw "WebView2 bootstrapper: signature $($sig.Status)" }
+          if ($sig.SignerCertificate.Subject -cnotmatch '^CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US$') {
+            throw "WebView2 bootstrapper: signed by $($sig.SignerCertificate.Subject), not Microsoft Corporation"
+          }
+          # The chain is built only to find its root. Authenticode's Valid above already checked the signing time against the
+          # timestamp, so a signer certificate that has since expired is not a reason to refuse here (time validity ignored;
+          # trust is not).
+          $chain = [System.Security.Cryptography.X509Certificates.X509Chain]::new()
+          $chain.ChainPolicy.VerificationFlags = [System.Security.Cryptography.X509Certificates.X509VerificationFlags]::IgnoreNotTimeValid
+          if (-not $chain.Build($sig.SignerCertificate)) { throw "WebView2 bootstrapper: the signer's chain does not build" }
+          $root = $chain.ChainElements[$chain.ChainElements.Count - 1].Certificate
+          if ($root.Subject -cnotmatch '^CN=Microsoft Root Certificate Authority 20(10|11), O=Microsoft Corporation, L=Redmond, S=Washington, C=US$') {
+            throw "WebView2 bootstrapper: the chain ends at $($root.Subject), not a Microsoft root"
+          }
+          # The root by its SHA-256 fingerprint too, not by name alone (read from Windows' trust store, 2026-11-28).
+          $microsoftRoots = @(
+            '847DF6A78497943F27FC72EB93F9A637320A02B561D0A91B09E87A7807ED7C61', # Microsoft Root Certificate Authority 2011
+            'DF545BF919A2439C36983B54CDFC903DFA4F37D3996D8D84B4C31EEC6F3C163E'  # Microsoft Root Certificate Authority 2010
+          )
+          $rootSha256 = [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($root.RawData))
+          if ($microsoftRoots -cnotcontains $rootSha256) { throw "WebView2 bootstrapper: the root's fingerprint $rootSha256 is not a Microsoft root's" }
+          $wvHash = (Get-FileHash $wv -Algorithm SHA256).Hash
+          $info = (Get-Item -LiteralPath $wv).VersionInfo
+          "WebView2 bootstrapper: SHA-256 $wvHash, signed by $($sig.SignerCertificate.Subject) ($($sig.SignerCertificate.Thumbprint)), root $($root.Subject) ($rootSha256), product '$($info.ProductName)', file '$($info.OriginalFilename)' $($info.FileVersion)"
+          "WEBVIEW2_SHA256=$wvHash" >> $env:GITHUB_ENV
           Get-ChildItem $tools | Select-Object Name | Format-Table -HideTableHeaders
       # The open-source licence texts the installer ships. The tool is the pinned release binary, its archive checked against
       # the SHA-256 above before it is opened.
