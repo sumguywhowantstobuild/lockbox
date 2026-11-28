@@ -1387,6 +1387,19 @@ describe("in a real browser", { skip: driver ? false : "no Edge WebDriver given 
         await open(url, { width, height: 800 });
         const [scrollWidth, clientWidth] = await browser.run("return [document.documentElement.scrollWidth, document.documentElement.clientWidth]");
         assert.ok(scrollWidth <= clientWidth, `${name} at ${String(width)}: the page is ${String(scrollWidth)} wide in a window of ${String(clientWidth)}`);
+        // Task 12: the words keep the side margin (16 px on a phone, more above), never touching the window's edge
+        const [checked, touching] = await browser.run(
+          `const out = []; let n = 0;
+           for (const e of document.querySelectorAll('main p, main h1, main h2, main h3, main li, .hc p, .hc h1, .ghero h1, .ghero p, footer p, footer a')) {
+             // the lines of words themselves (a range over the element's contents), not the box that holds them and its padding
+             const range = document.createRange(); range.selectNodeContents(e);
+             const lines = [...range.getClientRects()].filter((r) => r.width > 0 && r.height > 0); if (lines.length === 0) continue; n += 1;
+             for (const r of lines) if (r.left < 16 || r.right > document.documentElement.clientWidth - 16) { out.push(e.textContent.trim().slice(0, 30) + ' ' + Math.round(r.left) + '..' + Math.round(r.right)); break; }
+           }
+           return [n, out.slice(0, 3)];`,
+        );
+        assert.ok(checked >= (name === "notfound" ? 2 : 5), `${name} at ${String(width)}: only ${String(checked)} blocks of words were measured`);
+        assert.deepEqual(touching, [], `${name} at ${String(width)}: words touch the window's edge`);
         looked += 1;
         if (name === "guide") {
           const shown = await browser.run("const p = document.querySelector('.ghero .ht'); return p !== null && getComputedStyle(p).display !== 'none'");
