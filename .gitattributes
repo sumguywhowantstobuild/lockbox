@@ -1,5 +1,6 @@
 * text=auto eol=lf
 *.png binary
+*.bmp binary
 
 # The EFF wordlist must stay byte-for-byte as published (see THIRD-PARTY-NOTICES.md).
 crates/petalock-core/wordlists/eff_large_wordlist.txt -text
