@@ -49,14 +49,15 @@ jobs:
       sha256: ${{ steps.digest.outputs.sha256 }}
       artifact: petalock-installer
     env:
-      # The packaging inputs, each with the SHA-256 it must have. The three values are the ones the bundler would
-      # download itself; a new bundler version is a reviewed change to this list.
+      # The packaging inputs the bundler would download itself; a new bundler version is a reviewed change to this list. The
+      # two versioned files carry the SHA-256 they must have. The WebView2 bootstrapper sits behind a link Microsoft repoints
+      # at each new build of it, so a pinned digest breaks without warning: it is checked by Microsoft's signature instead,
+      # and the digest of the file checked goes to the log and to the re-check after the build.
       NSIS_URL: https://github.com/tauri-apps/binary-releases/releases/download/nsis-3.13/nsis-3.13.zip
       NSIS_SHA256: ba63dffc4410ee89193e1cb5a41989991bd77c61068da17e3156d136b7b0b3d8
       UTILS_URL: https://github.com/tauri-apps/nsis-tauri-utils/releases/download/nsis_tauri_utils-v0.5.3/nsis_tauri_utils.dll
       UTILS_SHA256: 5ba143b5db4a87d32d6e7802e033330aae56cbceabe0d1e3ba41948385ad4709
       WEBVIEW2_URL: https://go.microsoft.com/fwlink/p/?LinkId=2124703
-      WEBVIEW2_SHA256: fc2972da71d43e0c57b8d85a5cb9b200ed221f723cf43052d08ca722eb0bb22e
       # The tool that writes the licence notices the installer ships (scripts/licences.mjs): cargo-about 0.9.3 (EmbarkStudios,
       # published 2026-10-26), the release's own binary. The digest is that of the archive, as GitHub records it for the asset and
       # as the .sha256 file beside it says. Never cargo install from a moving index, and never a cache.
@@ -108,7 +109,7 @@ jobs:
         run: cargo install tauri-cli --locked --version 2.12.5
       - name: Show the Tauri CLI's version
         run: cargo tauri --version
-      - name: Provision the bundler's packaging inputs (pinned, SHA-256 checked before use)
+      - name: Provision the bundler's packaging inputs (pinned or signature-checked before use)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -133,7 +134,24 @@ jobs:
           $plugins = Join-Path $tools 'NSIS\Plugins\x86-unicode\additional'
           New-Item -ItemType Directory -Force $plugins | Out-Null
           Get-Verified $env:UTILS_URL $env:UTILS_SHA256 (Join-Path $plugins 'nsis_tauri_utils.dll')
-          Get-Verified $env:WEBVIEW2_URL $env:WEBVIEW2_SHA256 (Join-Path $tools 'MicrosoftEdgeWebview2Setup.exe')
+          # The bootstrapper: Microsoft's valid Authenticode signature, by Microsoft Corporation exactly, on a chain that ends at
+          # a Microsoft code-signing root. The digest is taken of the file that passed, logged, and re-checked after the build.
+          $wv = Join-Path $tools 'MicrosoftEdgeWebview2Setup.exe'
+          Invoke-WebRequest $env:WEBVIEW2_URL -OutFile $wv
+          $sig = Get-AuthenticodeSignature -LiteralPath $wv
+          if ($sig.Status -ne 'Valid' -or $null -eq $sig.SignerCertificate) { throw "WebView2 bootstrapper: signature $($sig.Status)" }
+          if ($sig.SignerCertificate.Subject -cnotmatch '^CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US$') {
+            throw "WebView2 bootstrapper: signed by $($sig.SignerCertificate.Subject), not Microsoft Corporation"
+          }
+          $chain = [System.Security.Cryptography.X509Certificates.X509Chain]::new()
+          if (-not $chain.Build($sig.SignerCertificate)) { throw "WebView2 bootstrapper: the signer's chain does not build" }
+          $root = $chain.ChainElements[$chain.ChainElements.Count - 1].Certificate
+          if ($root.Subject -cnotmatch '^CN=Microsoft Root Certificate Authority 20(10|11), O=Microsoft Corporation, L=Redmond, S=Washington, C=US$') {
+            throw "WebView2 bootstrapper: the chain ends at $($root.Subject), not a Microsoft root"
+          }
+          $wvHash = (Get-FileHash $wv -Algorithm SHA256).Hash
+          "WebView2 bootstrapper: SHA-256 $wvHash, signed by $($sig.SignerCertificate.Subject) ($($sig.SignerCertificate.Thumbprint)), root $($root.Subject)"
+          "WEBVIEW2_SHA256=$wvHash" >> $env:GITHUB_ENV
           Get-ChildItem $tools | Select-Object Name | Format-Table -HideTableHeaders
       # The open-source licence texts the installer ships. The tool is the pinned release binary, its archive checked against
       # the SHA-256 above before it is opened.
@@ -272,7 +290,7 @@ jobs:
         env:
           SMOKE_LOG: ${{ runner.temp }}\installer-smoke\upgrade.log
         run: |
-          "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%GITHUB_WORKSPACE%\scripts\installer-smoke.ps1" -Installer "%EARLIER%" -Upgrade "%LATER%" -Only upgrade_keeps_vaults_list_settings_and_state,candidate_versions_upgrade_in_order,downgrade_behaviour_is_the_specified_one,uninstall_after_upgrade_is_clean,interactive_upgrade_keeps_start_with_windows,upgrade_page_defaults_to_install_over -LogPath "%SMOKE_LOG%"
+          "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%GITHUB_WORKSPACE%\scripts\installer-smoke.ps1" -Installer "%EARLIER%" -Upgrade "%LATER%" -Only upgrade_keeps_vaults_list_settings_and_state,candidate_versions_upgrade_in_order,downgrade_behaviour_is_the_specified_one,uninstall_after_upgrade_is_clean,interactive_upgrade_keeps_start_with_windows,upgrade_page_defaults_to_install_over,remove_first_with_an_added_file_leaves_the_install_intact,keyboard_tab_order_and_default_buttons_on_the_real_dialog -LogPath "%SMOKE_LOG%"
       # A run that did not pass leaves the smoke log (and a picture of the screen where a dialog was driven) to read why:
       # made-up test state only.
       - name: Keep the smoke log

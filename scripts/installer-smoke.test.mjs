@@ -37,6 +37,17 @@ export const NAMED = [
   "running_petalock_is_never_ended_and_silent_refuses_first",
   "uninstall_says_where_vaults_stay",
   "installed_copy_has_the_notices_file",
+  // Plan 5, Task 9e: the one screen in Petalock's look.
+  "quick_install_default_folder_and_receipt",
+  "quick_install_folder_from_options",
+  "quick_install_folder_from_d",
+  "quiet_installs_return_exit_codes_and_launch_nothing",
+  // The review fix round.
+  "a_write_that_is_denied_is_a_failure_not_a_receipt",
+  "interactive_update_mode_offers_no_uninstall_choice",
+  // The second fix round.
+  "a_completed_step_puts_words_in_the_status_line",
+  "a_refused_registration_keeps_everything_but_the_files_this_attempt_wrote",
 ];
 
 /** Plan 5, Task 4: the checks that need two versions of the same code (-Installer the earlier, -Upgrade the later). */
@@ -48,6 +59,9 @@ export const UPGRADE_NAMED = [
   // Plan 5, Task 4b: an upgrade keeps "start with Windows", and the reinstall page installs over by default.
   "interactive_upgrade_keeps_start_with_windows",
   "upgrade_page_defaults_to_install_over",
+  // Task 9e review fix round.
+  "remove_first_with_an_added_file_leaves_the_install_intact",
+  "keyboard_tab_order_and_default_buttons_on_the_real_dialog",
 ];
 
 const read = (path) => readFileSync(join(ROOT, path), "utf8").replace(/\r\n/g, "\n");
@@ -66,7 +80,11 @@ function between(text, start, end, what) {
 const code = (text) => text.split("\n").map((line) => line.replace(/^\s*[;#].*$/, "").trimEnd()).filter((line) => line.trim() !== "");
 
 const template = () => read(TEMPLATE);
-const hooks = () => read(HOOKS);
+// Plan 5, Task 9e: hooks.nsh includes setup-ui.nsh (the one screen), so every rule that reads "the hooks" reads both: a delete,
+// a run or a registry write added there is held to the same lists as one in the template.
+const UI = "crates/petalock-desktop/windows/setup-ui.nsh";
+const ui = () => (existsSync(join(ROOT, UI)) ? read(UI) : "");
+const hooks = () => read(HOOKS) + "\n" + ui();
 
 /**
  * The lines of the template that are built when the install mode is `currentUser`: the branches of `!if "${INSTALLMODE}"
@@ -111,7 +129,7 @@ export function builtLines(text, mode = "currentUser") {
 }
 
 /** Where the installer must check the folder and for a running copy: each problem found, as a sentence. */
-export function placementProblems(text) {
+export function placementProblems(text, uiText = ui()) {
   const problems = [];
   const onInit = between(text, /^Function \.onInit$/m, /^FunctionEnd$/m, ".onInit");
   const lastFolder = Math.max(onInit.lastIndexOf("Call RestorePreviousInstallLocation"), onInit.lastIndexOf("StrCpy $INSTDIR"));
@@ -137,13 +155,19 @@ export function placementProblems(text) {
   if (unCheck < 0 || unCheck > firstDelete) problems.push("Section Uninstall checks after it began to delete");
   if (clean < 0 || clean < unCheck || clean > firstDelete) problems.push("open\\ is not cleaned first, right after the check");
 
-  if (!/!define MUI_PAGE_CUSTOMFUNCTION_LEAVE PetalockLeaveDirectory\n!insertmacro MUI_PAGE_DIRECTORY/.test(text)) {
-    problems.push("the folder page does not check the folder when it is left");
-  }
-  const leave = between(text, /^Function PageLeaveReinstall$/m, /^FunctionEnd$/m, "PageLeaveReinstall");
-  const check = leave.indexOf("Call PetalockBeforeOldUninstaller");
-  const run = leave.indexOf("ExecWait '$R1' $0");
+  // Plan 5, Task 9e: the folder page is the one custom page; it checks the folder (the same guard, `PetalockCheckAll` runs
+  // `PetalockGuardFolder`) when it is left, and stays when it is refused. The old uninstaller an upgrade runs is the first
+  // section, and its command is built and checked before it runs.
+  const pageLeave = between(uiText, /^Function PetalockMainLeave$/m, /^FunctionEnd$/m, "PetalockMainLeave");
+  if (!/^Page custom PetalockMainShow PetalockMainLeave$/m.test(text)) problems.push("the page's leave is not the template's custom page");
+  if (!pageLeave.includes("Call PetalockCheckAll")) problems.push("the folder page does not check the folder when it is left");
+  const guardCall = between(uiText, /^Function PetalockCheckAll$/m, /^FunctionEnd$/m, "PetalockCheckAll");
+  if (!guardCall.includes("Call PetalockGuardFolder")) problems.push("the page's checks do not run the folder guard");
+  const remove = code(between(text, /^Section PetalockRemoveOld$/m, /^SectionEnd$/m, "Section PetalockRemoveOld")).join("\n");
+  const check = remove.indexOf("Call PetalockBeforeOldUninstaller");
+  const run = remove.indexOf("ExecWait '$R1' $0");
   if (check < 0 || run < 0 || check > run) problems.push("the old uninstaller is run before the folder is checked");
+  if (code(between(text, /^Section PetalockRemoveOld$/m, /^SectionEnd$/m, "Section PetalockRemoveOld"))[1]?.trim() !== "Call PetalockPreflight") problems.push("the old-uninstaller section does not start with the check");
   return problems;
 }
 
@@ -197,8 +221,10 @@ test("placement of the checks fails when one is missing, and finds none missing 
   assert.ok(placementProblems(without).length >= 3, "a template with no check must be refused");
   const late = text.replace("Call un.PetalockCleanOpen", "Delete \"$INSTDIR\\x\"\n  Call un.PetalockCleanOpen");
   assert.ok(placementProblems(late).length >= 1, "a delete before the clean-up must be refused");
-  const noLeave = text.replace("!define MUI_PAGE_CUSTOMFUNCTION_LEAVE PetalockLeaveDirectory\n", "");
-  assert.ok(placementProblems(noLeave).length >= 1, "a folder page without its check must be refused");
+  const noLeave = ui().replace("Call PetalockCheckAll", "; removed");
+  assert.ok(placementProblems(text, noLeave).length >= 1, "a folder page without its check must be refused");
+  const lateOld = text.replace("Call PetalockBeforeOldUninstaller", "; removed");
+  assert.ok(placementProblems(lateOld).length >= 1, "an old uninstaller run with no check before it must be refused");
 });
 
 test("files_added_after_install_survive_upgrade_and_uninstall", () => {
@@ -364,7 +390,7 @@ test("the template says what it changed, and keeps the rest of Tauri's", () => {
   assert.match(text, /Tauri's NSIS template/);
   assert.match(text, /tauri-bundler 2\.10\.5/);
   // Anchors of the upstream file that the changes sit between: if the pinned tool changes, a person compares again.
-  for (const anchor of ["{{compression}}", "{{installer_hooks}}", "{{#each resources}}", "nsis_tauri_utils::SemverCompare", "!insertmacro MUI_PAGE_DIRECTORY", "Section Uninstall"]) {
+  for (const anchor of ["{{compression}}", "{{installer_hooks}}", "{{#each resources}}", "nsis_tauri_utils::SemverCompare", "!insertmacro MUI_PAGE_INSTFILES", "Section Uninstall"]) {
     assert.ok(text.includes(anchor), `${anchor} is kept`);
   }
 });
@@ -435,8 +461,6 @@ test("a_registry_value_never_names_a_file_setup_deletes", () => {
     /^Delete "\$4\\uninstall\.exe"$/,
     /^Delete "\$SMPROGRAMS\\(\$AppStartMenuFolder\\)?\$\{PRODUCTNAME\}\.lnk"$/,
     /^Delete "\$DESKTOP\\\$\{PRODUCTNAME\}\.lnk"$/,
-    /^Delete "\$TEMP\\MicrosoftEdgeWebview2Setup\.exe"$/,
-    /^Delete "\$TEMP\\MicrosoftEdgeWebView2RuntimeInstaller\.exe"$/,
     /^Delete "\$INSTDIR\\\\\{\{this(\.\[1\])?\}\}"$/, // the bundler's resource lists (empty for Petalock)
   ];
   const unknown = deletes.filter((line) => !allowed.some((re) => re.test(line)));
@@ -522,14 +546,14 @@ test("uninstall_cleans_open_copies_with_update_too", () => {
 
 // Finding 9: nothing read from the registry is executed.
 test("the_old_uninstaller_command_is_built_from_the_verified_folder", () => {
-  const leave = code(between(template(), /^Function PageLeaveReinstall$/m, /^FunctionEnd$/m, "PageLeaveReinstall")).join("\n");
+  const leave = code(between(template(), /^Section PetalockRemoveOld$/m, /^SectionEnd$/m, "Section PetalockRemoveOld")).join("\n");
   assert.ok(!/ReadRegStr \$R1/.test(leave), "the command is not read from the registry");
   assert.ok(!/ReadRegStr \$4/.test(leave), "the folder is not read here either");
   assert.ok(leave.indexOf("Call PetalockBeforeOldUninstaller") < leave.indexOf("ExecWait '$R1' $0"));
   const before = code(between(hooks(), /^Function PetalockBeforeOldUninstaller$/m, /^FunctionEnd$/m, "BeforeOld")).join("\n");
   assert.match(before, /StrCpy \$R1 '"\$4\\uninstall\.exe"'/);
   assert.match(before, /PetalockRecordedLocation/);
-  // The only read of UninstallString is the page's "is there an installation" test.
+  // The only read of UninstallString is the decision's "is there an installation" test (PetalockDecide, no page controls).
   const reads = code(template()).concat(code(hooks())).filter((line) => /ReadRegStr[^\n]*"UninstallString"/.test(line));
   assert.equal(reads.length, 1, reads.join("; "));
   assert.match(read(SMOKE), /A command planted in UninstallString|the command planted in UninstallString was run/);
@@ -544,6 +568,9 @@ test("no_machine_wide_uninstall_is_run", () => {
   const exec = all.split("\n").filter((line) => /^\s*ExecWait\b/.test(line)).map((line) => line.trim());
   assert.ok(exec.length >= 3, `found ${exec.length} ExecWait lines`);
   for (const line of exec) assert.ok(/^ExecWait '\$R1' \$0$|^ExecWait '"\$6" \$\{WEBVIEW2INSTALLERARGS\} \/install' \$1$|^ExecWait `"\$R1" \/install appguid=/.test(line), `an unexpected ExecWait: ${line}`);
+  // Plan 5, Task 9e: both places that run the old uninstaller (the update's remove-first section, and the same version's
+  // "Uninstall Petalock instead" link) run the command PetalockBeforeOldUninstaller built, and nothing else.
+  assert.equal(exec.filter((line) => line === "ExecWait '$R1' $0").length, 2);
 });
 
 // Finding 11: no second registry key.
@@ -667,18 +694,64 @@ test("build_installer_clears_a_restored_bundler_folder_before_it_provisions_the_
   assert.match(provisionClearProblems("nothing").join("\n"), /not found/);
 });
 
+/**
+ * Task 9g: what is wrong with how the build checks the WebView2 bootstrapper. Microsoft repoints fwlink 2124703 at each new
+ * build of the file, so a pinned SHA-256 breaks every build without warning (run 46090576875). The check is Microsoft's
+ * Authenticode signature: valid, signed by Microsoft Corporation, on a chain that ends at a Microsoft root; the digest of the
+ * file actually checked is logged and re-checked after the build. Problems found, as sentences.
+ */
+export function webviewSignatureProblems(workflow) {
+  const problems = [];
+  const start = workflow.indexOf("Provision the bundler's packaging inputs");
+  const end = workflow.indexOf("Provision cargo-about");
+  if (start < 0 || end < start) return ["the provisioning step was not found"];
+  const step = workflow.slice(start, end);
+  if (/WEBVIEW2_SHA256:\s*[0-9a-f]{64}/.test(workflow)) problems.push("the bootstrapper still has a pinned SHA-256, which breaks on Microsoft's next build");
+  if (/Get-Verified \$env:WEBVIEW2_URL/.test(step)) problems.push("the bootstrapper is still checked against a fixed digest");
+  const sig = step.indexOf("Get-AuthenticodeSignature -LiteralPath $wv");
+  if (sig < 0) problems.push("the bootstrapper's signature is not read");
+  if (!/\$sig\.Status -ne 'Valid'/.test(step)) problems.push("a signature that is not Valid is not refused");
+  if (!/\$sig\.SignerCertificate\.Subject -cnotmatch '\^CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US\$'/.test(step)) problems.push("the signer is not required to be Microsoft Corporation, exactly");
+  if (!/\$root\.Subject -cnotmatch '\^CN=Microsoft Root Certificate Authority 20\(10\|11\), O=Microsoft Corporation, L=Redmond, S=Washington, C=US\$'/.test(step)) problems.push("the chain is not required to end at a Microsoft root");
+  if (!/\$chain\.Build\(\$sig\.SignerCertificate\)/.test(step)) problems.push("the signer's chain is not built");
+  if (!/"WEBVIEW2_SHA256=\$wvHash" >> \$env:GITHUB_ENV/.test(step)) problems.push("the checked file's digest is not handed to the re-check after the build");
+  const hash = step.indexOf("$wvHash = (Get-FileHash $wv -Algorithm SHA256).Hash");
+  if (hash < 0) problems.push("the checked file's digest is not taken");
+  else if (sig < 0 || hash < sig) problems.push("the digest is taken before the signature is checked");
+  if (!/throw "WebView2 bootstrapper/.test(step)) problems.push("a failed check does not stop the build");
+  const recheck = workflow.indexOf("(Join-Path $tools 'MicrosoftEdgeWebview2Setup.exe') = $env:WEBVIEW2_SHA256");
+  if (recheck < 0 || recheck < end) problems.push("the bootstrapper is not re-checked after the build");
+  return problems;
+}
+
+test("build_installer_checks_the_webview2_bootstrapper_by_microsofts_signature_not_a_stale_digest", () => {
+  const text = read(BUILD);
+  assert.deepEqual(webviewSignatureProblems(text), []);
+  // The check fires on the old pinned form, and on each part taken away.
+  const pinned = text.replace("      WEBVIEW2_URL: https://go.microsoft.com/fwlink/p/?LinkId=2124703\n", "      WEBVIEW2_URL: https://go.microsoft.com/fwlink/p/?LinkId=2124703\n      WEBVIEW2_SHA256: " + "a".repeat(64) + "\n");
+  assert.match(webviewSignatureProblems(pinned).join("\n"), /pinned SHA-256/);
+  assert.match(webviewSignatureProblems(text.replace("$sig.Status -ne 'Valid'", "$false")).join("\n"), /not Valid/);
+  assert.match(webviewSignatureProblems(text.replace("-cnotmatch '^CN=Microsoft Corporation,", "-notmatch 'Microsoft")).join("\n"), /Microsoft Corporation, exactly/);
+  assert.match(webviewSignatureProblems(text.replace("$root.Subject -cnotmatch", "$root.Subject -cmatch")).join("\n"), /Microsoft root/);
+  assert.match(webviewSignatureProblems(text.replace('"WEBVIEW2_SHA256=$wvHash" >> $env:GITHUB_ENV', "")).join("\n"), /re-check after the build/);
+  assert.match(webviewSignatureProblems("nothing").join("\n"), /not found/);
+});
+
 test("build_installer_pins_the_tool_and_every_packaging_input_and_checks_each_digest_before_use", () => {
   const text = read(BUILD);
   // The CLI: one exact version, installed locked, cached by that version.
   assert.match(text, /cargo install tauri-cli --locked --version 2\.12\.5\b/);
   assert.match(text, /key: tauri-cli-2\.12\.5-/);
   assert.ok(!/tauri-cli[^\n]*[\^~]/.test(text), "no range");
-  // The three inputs the bundler downloads (tauri-bundler 2.10.5, windows/nsis/mod.rs:38-44 and windows/util.rs:19).
+  // The three inputs the bundler downloads (tauri-bundler 2.10.5, windows/nsis/mod.rs:38-44 and windows/util.rs:19). The two
+  // versioned ones carry a pinned SHA-256; the WebView2 bootstrapper sits behind a link Microsoft repoints at each new build,
+  // so it is checked by Microsoft's signature instead (below).
   const inputs = [
     { name: "NSIS 3.13", url: "https://github.com/tauri-apps/binary-releases/releases/download/nsis-3.13/nsis-3.13.zip" },
     { name: "nsis_tauri_utils 0.5.3", url: "https://github.com/tauri-apps/nsis-tauri-utils/releases/download/nsis_tauri_utils-v0.5.3/nsis_tauri_utils.dll" },
-    { name: "WebView2 bootstrapper", url: "https://go.microsoft.com/fwlink/p/?LinkId=2124703" },
   ];
+  assert.match(text, /WEBVIEW2_URL: https:\/\/go\.microsoft\.com\/fwlink\/p\/\?LinkId=2124703\n/);
+  assert.deepEqual(webviewSignatureProblems(text), []);
   const lines = text.split("\n");
   for (const input of inputs) {
     const at = lines.findIndex((line) => line.includes(input.url));
@@ -752,10 +825,16 @@ test("wizard_buttons_are_pressed_as_a_posted_wm_command_to_the_outer_dialog", ()
   const skip = wizard.indexOf("if ($innerWnd -eq [IntPtr]::Zero) { continue }");
   assert.ok(skip > 0 && skip < wizard.indexOf("if ($innerWnd -ne $pageWnd)"), "no visible page: skipped before the page state is reset");
   assert.doesNotMatch(wizard, /TotalSeconds -gt 5/);
-  // The reinstall page's choice is a real click, must read as ticked before Next, and must have been made at all.
-  assert.match(wizard, /\[SmokeDlg\]::GetCheck\(\$radio\.Handle\) -eq 1/);
+  // The main page's other way (Task 9e: "Other choices", then the box "Remove ... before installing ...") is a real click, must
+  // read as ticked before Install, and must have been made at all; the same version's link is clicked, not read.
+  assert.match(wizard, /\[SmokeDlg\]::GetCheck\(\$remove\.Handle\) -eq 1/);
   assert.match(wizard, /did not take/);
+  assert.match(wizard, /\$_\.Text -like 'Remove\*before installing\*'/);
+  assert.match(wizard, /\$_\.Text -like 'Uninstall Petalock instead\*'/);
+  assert.match(wizard, /\$_\.Text -eq 'Other choices'/);
   assert.match(wizard, /if \(\$UninstallFirst -and -not \$chosen\) \{ throw/);
+  // The last page's box is cleared: "Open Petalock" (this task), and the older boxes.
+  assert.match(wizard, /\$_\.Text -like 'Open Petalock\*'/);
   // Runner trial 4: "uninstall first" shows the old uninstaller's own window from a child process: driven too.
   assert.match(wizard, /@\(\[int\]\$Process\.Id\) \+ @\(Get-ChildIds \(\[int\]\$Process\.Id\)\)/);
   assert.match(text, /\[wmisearcher\]"SELECT ProcessId FROM Win32_Process WHERE ParentProcessId = \$ParentId"/);
@@ -943,20 +1022,21 @@ test("upgrade_keeps_vaults_list_settings_and_state", () => {
 test("candidate_versions_upgrade_in_order", () => {
   const check = checkBody("candidate_versions_upgrade_in_order");
   // The versions the two files carry are read back and are plain x.y.z, the earlier first; then the registered version
-  // before and after, on the silent path and through the window, whose reinstall page must call the installed one older.
+  // before and after, on the silent path and through the window, whose main page must say which version is installed and to
+  // which it updates (Task 9e: the words come from the two versions).
   assert.match(check, /Assert-VersionPair/);
   assert.match(check, /Install-Silent \$Upgrade ''/);
   assert.match(check, /Assert-OneInstallation \$DefaultDir \$FromVersion/);
   assert.match(check, /Assert-OneInstallation \$DefaultDir \$ToVersion/);
-  assert.match(check, /Read-ReinstallPage \$Upgrade/);
-  assert.match(check, /An older version of Petalock is installed/);
+  assert.match(check, /Read-MainPage \$Upgrade/);
+  assert.match(check, /Petalock \$FromVersion is on this PC\. This updates it to \$ToVersion\./);
   assert.match(check, /\$page\.Exit -ne 0/);
-  // Runner trial 1 (run 45781912591): the reinstall page comes after the Welcome page, so the page is read while Drive-Wizard
-  // presses through the window (each new page shown to -OnPage once), never by a separate wait that presses nothing.
+  // Runner trial 1 (run 45781912591): the first page comes before the progress, so the page is read while Drive-Wizard presses
+  // through the window (each new page shown to -OnPage once), never by a separate wait that presses nothing.
   const smokeText = read(SMOKE);
-  const reader = between(smokeText, /^function Read-ReinstallPage/m, /^\}$/m, "Read-ReinstallPage");
+  const reader = between(smokeText, /^function Read-MainPage/m, /^\}$/m, "Read-MainPage");
   assert.match(reader, /Drive-Wizard \$p 'install' \$false '' \$null 240 \$false \$reader/);
-  assert.match(reader, /the window went through no reinstall page/);
+  assert.match(reader, /the window went through no page that says what Setup will do/);
   const driver = between(smokeText, /^function Drive-Wizard/m, /^\}$/m, "Drive-Wizard");
   assert.match(driver, /\[scriptblock\]\$OnPage = \$null\) \{/);
   assert.match(driver, /if \(\$innerWnd -ne \$pageWnd\) \{\n(?:.*\n){1,3}?\s+if \(\$OnPage\) \{ & \$OnPage \$d \}/);
@@ -973,13 +1053,14 @@ test("downgrade_behaviour_is_the_specified_one", () => {
   const check = checkBody("downgrade_behaviour_is_the_specified_one");
   // Specified (Task 4, from the template and Tauri's default allowDowngrades = true; the page links older versions): a silent
   // downgrade installs over and keeps the state; through the window the page says a newer version is installed and offers
-  // both choices, and the earlier version ends up installed with the state kept (open\ aside: an uninstall-first run cleans it).
+  // both ways (Downgrade, and 'Remove ... before installing ...' under 'Other choices'), and the earlier version ends up
+  // installed with the state kept (open\ aside: an uninstall-first run cleans it).
   assert.match(check, /Install-Silent \$Upgrade ''[\s\S]*Install-Silent \$Installer ''/);
   assert.match(check, /Assert-OneInstallation \$DefaultDir \$FromVersion/);
   assert.match(check, /Assert-Unchanged \$planted \(Get-Listing \$State -Hash\)/);
-  assert.match(check, /A newer version of Petalock is already installed/);
-  assert.match(check, /'Do not uninstall'/);
-  assert.match(check, /'Uninstall before installing'/);
+  assert.match(check, /A newer Petalock, \$ToVersion, is on this PC\./);
+  assert.match(check, /\$page\.Next -ne 'Downgrade'/);
+  assert.match(check, /Remove\*before installing\*/);
   assert.match(check, /Assert-Unchanged \(Without-Open \$planted\) \(Without-Open \(Get-Listing \$State -Hash\)\)/);
   // The template still allows it: a change to the setting must change this test too.
   assert.doesNotMatch(read(CONFIG), /allowDowngrades/);
@@ -1013,149 +1094,113 @@ test("uninstall_after_upgrade_is_clean", () => {
 /** The body of one NSIS function in `text`'s code lines (comments dropped), or "" when it is not there. */
 const functionBody = (text, name) => code(text).join("\n").match(new RegExp(`Function ${name}(?: ;[^\\n]*)?\\n([\\s\\S]*?)\\nFunctionEnd`))?.[1] ?? "";
 
-/** What the reinstall page must do for B, as problems found in `text` (empty when all hold). */
-export function reinstallDefaultProblems(text) {
+/**
+ * What the main page must do for B (Task 4b, kept by Task 9e): an update, a downgrade or an unknown version installs over by
+ * default, and the way that removes first is a box, hidden under "Other choices", never ticked by the page and never set by
+ * the page's leave. Problems found in the UI file `uiText` (empty when all hold).
+ */
+export function reinstallDefaultProblems(uiText) {
   const problems = [];
-  const page = functionBody(text, "PageReinstall");
-  const select = functionBody(text, "PageReinstallUpdateSelection");
-  if (page === "") return ["the reinstall page is not in the template"];
-  const passive = page.search(/\$\{If\} \$PassiveMode = 1\n\s*Call PageLeaveReinstall\n\s*\$\{Else\}/);
-  const own = page.indexOf("nsDialogs::Create 1018");
-  const firstEntry = page.search(/\$\{If\} \$ReinstallPageCheck = 0\n\s*\$\{AndIf\} \$R0 <> 0\n\s*StrCpy \$ReinstallPageCheck 2\n/);
-  const tick = page.indexOf("${If} $ReinstallPageCheck <> 2");
-  if (firstEntry < 0) problems.push("an upgrade or a downgrade page does not open on its second button, 'Do not uninstall', the first time it is shown");
-  else if (!(passive >= 0 && own > passive && firstEntry > own && firstEntry < tick)) {
-    problems.push("the default is not set inside the page's own branch, after the passive call and before the tick");
+  const decide = functionBody(uiText, "PetalockDecide");
+  const show = functionBody(uiText, "PetalockMainShow");
+  const render = functionBody(uiText, "PetalockRender");
+  const leave = functionBody(uiText, "PetalockMainLeave");
+  const other = functionBody(uiText, "PetalockOnOther");
+  const check = functionBody(uiText, "PetalockOnCheck");
+  if (decide === "" || show === "" || render === "") return ["the main page is not in the UI file"];
+  if (!/StrCpy \$PetalockRemoveFirst 0\n\s*ReadRegStr/.test(decide)) problems.push("the decision does not start with nothing removed first");
+  if (/\$\{NSD_Check\} \$PetalockHCheck|\$\{NSD_SetState\} \$PetalockHCheck \$\{BST_CHECKED\}|SendMessage \$PetalockHCheck \$\{BM_SETCHECK\} (1|\$\{BST_CHECKED\})/.test(show + render)) problems.push("the page ticks the remove-first box itself");
+  if (/StrCpy \$PetalockRemoveFirst 1/.test(show + render + leave + decide)) problems.push("something but the box sets remove-first");
+  if (!/\$\{If\} \$0 = \$\{BST_CHECKED\}\n\s*StrCpy \$PetalockRemoveFirst 1/.test(check)) problems.push("the box does not set remove-first when it is ticked");
+  if (!/StrCpy \$PetalockRemoveFirst 0\n\s*\$\{NSD_SetState\} \$PetalockHCheck \$\{BST_UNCHECKED\}/.test(other)) problems.push("hiding the other choices does not clear the box");
+  // The box is shown only while "Other choices" is open, and the update-ish cases only.
+  if (!/\$\{If\} \$PetalockOtherOpen = 1\n[^\n]*\n\s*SendMessage \$PetalockHCheck \$\{WM_SETTEXT\}[^\n]*\n\s*ShowWindow \$PetalockHCheck \$\{SW_SHOW\}/.test(render)) problems.push("the box is not shown only under 'Other choices'");
+  // The default action of each case.
+  for (const [kase, word] of [["update", "Update"], ["reinstall", "Reinstall"], ["newer", "Downgrade"], ["unknown", "Replace"]]) {
+    if (!new RegExp(`\\$PetalockCase == "${kase}"\\n\\s*StrCpy \\$PetalockB "${word}"`).test(render)) problems.push(`the ${kase} case does not offer '${word}'`);
   }
-  // A downgrade the build forbids has that button disabled: it must not be the one ticked.
-  if (!/StrCpy \$ReinstallPageCheck 2\n\s*!if "\$\{ALLOWDOWNGRADES\}" == "false"\n\s*\$\{IfThen\} \$R0 = -1 \$\{\|\} StrCpy \$ReinstallPageCheck 1 \$\{\|\}\n\s*!endif/.test(page)) {
-    problems.push("a downgrade that is disabled would open with its disabled button ticked");
-  }
-  // The person's last choice still wins (the default is set only while nothing has been chosen), through the same tick and the same remembering.
-  // Tauri's tick lines, each followed by the focus on the button just ticked (finding 4 of the review: Tauri focuses the first
-  // button whichever is ticked, so a keyboard user's Space picked 'Uninstall before installing'). One focus call per branch, none after.
-  if (!/\$\{If\} \$ReinstallPageCheck <> 2\n\s*SendMessage \$R2 \$\{BM_SETCHECK\} \$\{BST_CHECKED\} 0\n\s*\$\{NSD_SetFocus\} \$R2\n\s*\$\{Else\}\n\s*SendMessage \$R3 \$\{BM_SETCHECK\} \$\{BST_CHECKED\} 0\n\s*\$\{NSD_SetFocus\} \$R3\n\s*\$\{EndIf\}/.test(page)) {
-    problems.push("the focus does not go to the button that is ticked, in each branch");
-  }
-  if ((page.match(/\$\{NSD_SetFocus\}/g) ?? []).length !== 2) problems.push("the page sets the focus somewhere else than in the two tick branches");
-  if (!/\$\{NSD_GetState\} \$R2 \$R1\n\s*\$\{If\} \$R1 == \$\{BST_CHECKED\}\n\s*StrCpy \$ReinstallPageCheck 1\n\s*\$\{Else\}\n\s*StrCpy \$ReinstallPageCheck 2/.test(select)) problems.push("the choice is not remembered as 1 (first button) or 2 (second)");
-  // The second button is 'Do not uninstall' on an upgrade and a downgrade, and the same-version page keeps its order.
-  if (!/\$\{If\} \$R0 = 0\n\s*StrCpy \$R1 "\$\(alreadyInstalledLong\)"\n\s*StrCpy \$R2 "\$\(addOrReinstall\)"\n\s*StrCpy \$R3 "\$\(uninstallApp\)"/.test(page)) problems.push("the same-version page is not Tauri's (reinstall first, uninstall second)");
-  if (!/\$\{ElseIf\} \$R0 = 1\n\s*StrCpy \$R1 "\$\(olderOrUnknownVersionInstalled\)"\n\s*StrCpy \$R2 "\$\(uninstallBeforeInstalling\)"\n\s*StrCpy \$R3 "\$\(dontUninstall\)"/.test(page)) problems.push("the upgrade page's buttons are not 'Uninstall before installing' then 'Do not uninstall'");
-  if (!/\$\{ElseIf\} \$R0 = -1\n\s*StrCpy \$R1 "\$\(newerVersionInstalled\)"\n\s*StrCpy \$R2 "\$\(uninstallBeforeInstalling\)"\n\s*!if "\$\{ALLOWDOWNGRADES\}" == "true"\n\s*StrCpy \$R3 "\$\(dontUninstall\)"/.test(page)) problems.push("the downgrade page's buttons are not 'Uninstall before installing' then 'Do not uninstall'");
   return problems;
 }
 
-/** What the uninstall-first path must do for A, as problems found in the template `text` and in `hooksText`. */
-export function oldUninstallerProblems(text, hooksText) {
+/**
+ * What the remove-first path must do for A (Task 4b, kept by Task 9e), as problems found in the template `text`, the UI file and
+ * `hooksText`: the old uninstaller runs with /UPDATE exactly when the installed version is older, newer or unknown, `_?=` stays
+ * last, the command is built and checked before it runs, and nothing but the decision writes the case.
+ */
+export function oldUninstallerProblems(text, uiText, hooksText) {
   const problems = [];
-  const leave = functionBody(text, "PageLeaveReinstall");
-  const at = leave.indexOf("reinst_uninstall:");
-  if (at < 0) return ["the uninstall-first path is not in the template"];
-  const path = leave.slice(at);
-  const before = path.indexOf("Call PetalockBeforeOldUninstaller");
-  const exec = path.indexOf("ExecWait '$R1' $0");
-  const appends = path.split("\n").filter((line) => line.includes("/UPDATE"));
-  const mine = appends.filter((line) => /\$R0/.test(line));
+  const section = code(text).join("\n").match(/Section PetalockRemoveOld\n([\s\S]*?)\nSectionEnd/)?.[1] ?? "";
+  if (section === "") return ["the remove-first section is not in the template"];
+  const before = section.indexOf("Call PetalockBeforeOldUninstaller");
+  const exec = section.indexOf("ExecWait '$R1' $0");
+  const appends = section.split("\n").filter((line) => line.includes("/UPDATE"));
+  const mine = appends.filter((line) => /\$PetalockCase/.test(line));
   if (before < 0 || exec < before) problems.push("the old uninstaller's command is not built before it is run");
-  if (mine.length !== 1 || !/^\s*\$\{IfThen\} \$R0 <> 0 \$\{\|\} StrCpy \$R1 "\$R1 \/UPDATE" \$\{\|\}$/.test(mine[0])) {
-    problems.push("the old uninstaller does not get /UPDATE exactly when the installed version is older or newer ($R0 <> 0)");
+  if (mine.length !== 1 || !/^\s*\$\{IfThen\} \$PetalockCase != "reinstall" \$\{\|\} StrCpy \$R1 "\$R1 \/UPDATE" \$\{\|\}$/.test(mine[0])) {
+    problems.push("the old uninstaller does not get /UPDATE exactly when the installed version is older, newer or unknown (not the same)");
   } else {
-    const line = path.indexOf(mine[0]);
+    const line = section.indexOf(mine[0]);
     if (!(line > before && line < exec)) problems.push("the /UPDATE line is not between the command being built and its run");
   }
   if (appends.length !== 2 || !appends.some((line) => /\$UpdateMode = 1/.test(line))) problems.push("another /UPDATE is added on this path (only the update mode's and the version rule's are allowed)");
-  // $R0 (the comparison's answer) must still hold it when the line reads it.
-  if (/(?:StrCpy|Pop|ReadRegStr|ReadRegDWORD|IntOp|ReadEnvStr|Exch|GetFullPathName)\s+\$R0\b/.test(path)) problems.push("$R0 is written on the uninstall-first path before /UPDATE reads it");
-  if (/\$R0\b/.test(code(hooksText).join("\n"))) problems.push("hooks.nsh uses $R0, which the uninstall-first path reads after the hook that builds the command");
   // `_?=` must stay the last argument (NSIS reads everything after it as the folder), so /UPDATE comes before it.
-  const folderArg = path.indexOf('StrCpy $R1 "$R1 _?=$4"');
+  const folderArg = section.indexOf('StrCpy $R1 "$R1 _?=$4"');
   if (folderArg < 0) problems.push("the uninstaller's `_?=` folder argument is not added");
-  else if (mine.length === 1 && path.indexOf(mine[0]) > folderArg) problems.push("/UPDATE is added after `_?=`, where the uninstaller would read it as part of the folder");
-  // Passive and /UPDATE runs call this function without the page's controls (the first button reads as not ticked): an upgrade or
-  // a downgrade then installs over, and update mode never uninstalls. Neither changes.
-  const bare = leave.replace(/[ \t]+;.*$/gm, "");
-  for (const version of ["1", "-1"]) {
-    if (!new RegExp(`\\$\\{ElseIf\\} \\$R0 = ${version}\\n\\s*\\$\\{If\\} \\$R1 = 1\\n\\s*Goto reinst_uninstall\\n\\s*\\$\\{Else\\}\\n\\s*Goto reinst_done`).test(bare)) {
-      problems.push(`a run without the page's controls no longer installs over when $R0 = ${version}`);
-    }
-  }
-  if (!/\$\{If\} \$UpdateMode = 1\n\s*Goto reinst_done\n\s*\$\{EndIf\}/.test(bare)) problems.push("update mode no longer proceeds without uninstalling");
+  else if (mine.length === 1 && section.indexOf(mine[0]) > folderArg) problems.push("/UPDATE is added after `_?=`, where the uninstaller would read it as part of the folder");
+  // The case is decided once, before any page or section: nothing else writes it.
+  const writes = code(uiText + "\n" + hooksText + "\n" + text).filter((line) => /StrCpy \$PetalockCase /.test(line));
+  const outside = functionBody(uiText, "PetalockDecide").split("\n").filter((line) => /StrCpy \$PetalockCase /.test(line)).length;
+  if (writes.length !== outside) problems.push("the case is written somewhere but the decision");
+  // $R1 and $4 (the command and its folder) are set by the hook and used straight after: nothing in the section in between uses them.
+  const between = section.slice(before, exec);
+  if (/(?:StrCpy|Pop|ReadRegStr)\s+\$(?:R1|4)\b(?!\s+"\$R1)/.test(between.replace(/\$\{IfThen\}[^\n]*/g, ""))) problems.push("$R1 or $4 is rewritten between building the command and running it");
+  // A run without the page (silent, passive, /UPDATE) never removes first: the section does nothing unless the person ticked the box.
+  if (!/\$\{If\} \$PetalockRemoveFirst = 1/.test(section)) problems.push("the section no longer runs only when remove-first was chosen");
   return problems;
 }
 
 test("upgrade_page_defaults_to_install_over", () => {
-  const text = template();
-  assert.deepEqual(reinstallDefaultProblems(text), []);
-  // Each rule fails on a template that breaks it, and the pass above is not a pass on nothing.
-  const block = [
-    "    ${If} $ReinstallPageCheck = 0",
-    "    ${AndIf} $R0 <> 0",
-    "      StrCpy $ReinstallPageCheck 2",
-    '      !if "${ALLOWDOWNGRADES}" == "false"',
-    "        ${IfThen} $R0 = -1 ${|} StrCpy $ReinstallPageCheck 1 ${|}",
-    "      !endif",
-    "    ${EndIf}",
-    "",
-  ].join("\n");
-  assert.ok(text.includes(block), "the default's lines are in the template as written here");
+  const uiText = ui();
+  assert.deepEqual(reinstallDefaultProblems(uiText), []);
+  // Each rule fails on a UI file that breaks it, and the pass above is not a pass on nothing.
   const mutants = [
-    [block, ""], // no default at all: Tauri's first button, which is 'Uninstall before installing' on an upgrade
-    ["${AndIf} $R0 <> 0", "${AndIf} $R0 = 1"], // a downgrade left out
-    ["${AndIf} $R0 <> 0", "${AndIf} $R0 <> 99"], // the same version taken too
-    ["${If} $ReinstallPageCheck = 0\n", "${If} 1 = 1\n"], // the person's choice overwritten on Back
-    ["StrCpy $ReinstallPageCheck 1 ${|}", "StrCpy $ReinstallPageCheck 2 ${|}"], // a disabled button ticked
-    ["${If} $ReinstallPageCheck <> 2\n      SendMessage $R2", "${If} $ReinstallPageCheck <> 1\n      SendMessage $R2"],
-    ["StrCpy $R3 \"$(dontUninstall)\"\n    !insertmacro MUI_HEADER_TEXT \"$(alreadyInstalled)\" \"$R5\"\n  ; Downgrading", "StrCpy $R3 \"$(uninstallApp)\"\n    !insertmacro MUI_HEADER_TEXT \"$(alreadyInstalled)\" \"$R5\"\n  ; Downgrading"],
+    ["  StrCpy $PetalockRemoveFirst 0\n  ReadRegStr $0 SHCTX", "  ReadRegStr $0 SHCTX"], // the decision no longer starts with nothing removed
+    ["  Call PetalockRender\n  ${If} $PetalockCase == \"newer\"", "  ${NSD_Check} $PetalockHCheck\n  Call PetalockRender\n  ${If} $PetalockCase == \"newer\""], // the page ticks the box
+    ['    StrCpy $PetalockRemoveFirst 0\n    ${NSD_SetState} $PetalockHCheck ${BST_UNCHECKED}', "    ${NSD_SetState} $PetalockHCheck ${BST_UNCHECKED}"], // hiding keeps the tick
+    ['StrCpy $PetalockB "Downgrade"', 'StrCpy $PetalockB "Update"'], // a newer version offered as an update
+    ['${If} $0 = ${BST_CHECKED}\n    StrCpy $PetalockRemoveFirst 1', '${If} $0 = ${BST_UNCHECKED}\n    StrCpy $PetalockRemoveFirst 1'], // the box sets remove-first the wrong way round
   ];
   for (const [from, to] of mutants) {
-    assert.ok(text.includes(from), `the mutant's anchor is in the template: ${from}`);
-    assert.ok(reinstallDefaultProblems(text.replace(from, to)).length >= 1, `must be refused: ${from} -> ${to}`);
+    assert.ok(uiText.includes(from), `the mutant's anchor is in the UI file: ${from}`);
+    assert.ok(reinstallDefaultProblems(uiText.replace(from, to)).length >= 1, `must be refused: ${from} -> ${to}`);
   }
-  // Unchanged around it: the same-version page and the page's text.
-  assert.match(text, /\$\{If\} \$R0 = 0\n    StrCpy \$R1 "\$\(alreadyInstalledLong\)"/);
-  // The smoke check on the runner: the page read on an upgrade and a downgrade (both choices offered, 'Do not uninstall' ticked),
-  // and on the same version (Tauri's order kept).
+  // A page of nothing at all is refused too (a check that finds nothing wrong in an empty file would pass on any text).
+  assert.deepEqual(reinstallDefaultProblems(""), ["the main page is not in the UI file"]);
+  // The smoke check on the runner: the page read on an upgrade and a downgrade (it installs over by default, and the other way
+  // is offered), and on the same version (Reinstall, and a link to the full uninstall).
   const check = checkBody("upgrade_page_defaults_to_install_over");
-  assert.match(check, /Read-ReinstallPage \$Upgrade/);
-  assert.match(check, /Read-ReinstallPage \$Installer/);
+  assert.match(check, /Read-MainPage \$Upgrade/);
+  assert.match(check, /Read-MainPage \$Installer/);
   assert.match(check, /Assert-InstallOverDefault \$page "an upgrade from/);
   assert.match(check, /Assert-InstallOverDefault \$page "a downgrade from/);
-  assert.match(check, /Assert-ReinstallDefaultIsFirst \$page/);
+  assert.match(check, /Assert-ReinstallPage \$page/);
   const over = between(read(SMOKE), /^function Assert-InstallOverDefault/m, /^\}$/m, "Assert-InstallOverDefault");
-  assert.match(over, /\$_\.Text -eq 'Do not uninstall'/);
-  assert.match(over, /\$_\.Text -eq 'Uninstall before installing'/);
-  assert.match(over, /-not \$stay\.Checked/);
-  assert.match(over, /\$first\.Checked/);
-  assert.match(over, /-not \$first\.Enabled/);
-  // Fix round, finding 4: the keyboard focus is on the ticked button (a Space then keeps it), read with the tick.
-  assert.match(over, /-not \$stay\.Focused/);
-  assert.match(over, /\$first\.Focused/);
-  const same = between(read(SMOKE), /^function Assert-ReinstallDefaultIsFirst/m, /^\}$/m, "Assert-ReinstallDefaultIsFirst");
-  assert.match(same, /Add\/Reinstall components/);
-  assert.match(same, /Uninstall Petalock/);
-  assert.match(same, /-not \$add\.Checked/);
-  assert.match(same, /-not \$add\.Focused/);
-  assert.match(same, /\$gone\.Focused/);
-  // The focus rule's mutants: each of these templates breaks it and must be refused.
-  const focusLine = "      ${NSD_SetFocus} $R3\n";
-  assert.ok(text.includes(focusLine), "the second branch's focus line is in the template");
-  for (const [from, to] of [
-    [focusLine, ""], // the checked second button has no focus: Tauri's first-button focus remains
-    [focusLine, "      ${NSD_SetFocus} $R2\n"], // the wrong button focused
-    ["    nsDialogs::Show", "    ${NSD_SetFocus} $R2\n    nsDialogs::Show"], // a focus after the branches overrides them
-  ]) {
-    assert.ok(text.includes(from), `the mutant's anchor is in the template: ${from.trim()}`);
-    assert.ok(reinstallDefaultProblems(text.replace(from, to)).length >= 1, `must be refused: ${from.trim()} -> ${to.trim()}`);
-  }
-  // The reader takes the same-version page too: it is found by either page's uninstall choice.
-  const reader = between(read(SMOKE), /^function Read-ReinstallPage/m, /^\}$/m, "Read-ReinstallPage");
-  assert.match(reader, /Uninstall before installing/);
-  assert.match(reader, /Uninstall Petalock/);
-  assert.match(reader, /Add\/Reinstall components/);
-  // Focus is read from the window's own thread (the thread's focus window), beside the tick.
-  assert.match(read(SMOKE), /GetGUIThreadInfo/);
-  assert.match(reader, /Focused = \(\[SmokeDlg\]::FocusOf\(\$d\.Handle\) -eq \$_\.Handle\)/);
+  assert.match(over, /\$Page\.Next -notin @\('Update', 'Downgrade', 'Replace'\)/);
+  assert.match(over, /\$Page\.Links -notcontains 'Other choices'/);
+  assert.match(over, /\$_\.Text -like 'Remove\*before installing\*'/);
+  assert.match(over, /-not \$remove\.Enabled/);
+  assert.match(over, /\$remove\.Checked/);
+  const same = between(read(SMOKE), /^function Assert-ReinstallPage/m, /^\}$/m, "Assert-ReinstallPage");
+  assert.match(same, /\$Page\.Next -ne 'Reinstall'/);
+  assert.match(same, /Uninstall Petalock instead/);
+  assert.match(same, /\$Page\.Choices\)\.Count -ne 0/);
+  // The reader finds the page by its words, reads the default button and the links, then opens "Other choices" for the box.
+  const reader = between(read(SMOKE), /^function Read-MainPage/m, /^\}$/m, "Read-MainPage");
+  assert.match(reader, /What Setup will do/);
+  assert.match(reader, /\[SmokeDlg\]::Item\(\$d\.Handle, 1\)/);
+  assert.match(reader, /\$_\.Text -eq 'Other choices'/);
+  assert.match(reader, /Remove\*before installing\*/);
+  assert.match(reader, /GetCheck/);
 });
 
 /** What the uninstaller's confirm page must do for finding 3, as problems found in the template `text`. */
@@ -1165,7 +1210,7 @@ export function confirmBoxProblems(text) {
   const leave = functionBody(text, "un\\.ConfirmLeave");
   const skip = show.search(/^\s*\$\{If\} \$UpdateMode = 1\n\s*Return\n\s*\$\{EndIf\}/m);
   const create = show.indexOf("CreateWindowEx");
-  if (create < 0 || !show.includes('w "$(deleteAppData)"')) problems.push("a full uninstall no longer gets the app-data box");
+  if (create < 0 || !show.includes('w "Delete the application data.')) problems.push("a full uninstall no longer gets the app-data box");
   if (skip < 0 || (create >= 0 && skip > create) || (show.indexOf("FindWindow") >= 0 && skip > show.indexOf("FindWindow"))) {
     problems.push("under /UPDATE the box is still created (the page must return before it makes anything)");
   }
@@ -1188,7 +1233,7 @@ test("the_app_data_box_is_not_offered_when_the_uninstaller_runs_with_update", ()
   const moved = text.replace(guard, "").replace("  Pop $DeleteAppDataCheckbox\n", `  Pop $DeleteAppDataCheckbox\n${guard}`);
   assert.ok(confirmBoxProblems(moved).length >= 1, "a guard after the box is made is refused");
   assert.ok(confirmBoxProblems(text.replace("$UpdateMode = 1\n    Return", "$UpdateMode = 0\n    Return")).length >= 1, "a guard on the wrong value is refused");
-  assert.ok(confirmBoxProblems(text.replace("w \"$(deleteAppData)\"", "w \"x\"")).length >= 1, "a full uninstall that loses the box is refused");
+  assert.ok(confirmBoxProblems(text.replace('w "Delete the application data.', 'w "x')).length >= 1, "a full uninstall that loses the box is refused");
   assert.ok(confirmBoxProblems(text.replace("${AndIf} $UpdateMode <> 1\n    SetShellVarContext", "${AndIf} 1 = 1\n    SetShellVarContext")).length >= 1, "a deletion that no longer needs the update-mode check is refused");
   // The child-dialog smoke check (the uninstall-first choices of interactive_upgrade_keeps_start_with_windows): the confirm page of the old
   // uninstaller is seen exactly once and offers no deletion; and the same-version full uninstall's page does (the reader finds the box).
@@ -1210,29 +1255,32 @@ test("the_app_data_box_is_not_offered_when_the_uninstaller_runs_with_update", ()
 
 test("interactive_upgrade_keeps_start_with_windows", () => {
   const text = template();
-  const hooksText = hooks();
-  assert.deepEqual(oldUninstallerProblems(text, hooksText), []);
-  const line = '${IfThen} $R0 <> 0 ${|} StrCpy $R1 "$R1 /UPDATE" ${|}';
+  const uiText = ui();
+  const hooksText = read(HOOKS);
+  assert.deepEqual(oldUninstallerProblems(text, uiText, hooksText), []);
+  const line = '${IfThen} $PetalockCase != "reinstall" ${|} StrCpy $R1 "$R1 /UPDATE" ${|}';
   assert.ok(text.includes(line), "the version rule's /UPDATE line is in the template");
   const mutants = [
     [line, ""], // the old uninstaller runs without /UPDATE and deletes the Run value
-    [line, 'StrCpy $R1 "$R1 /UPDATE"'], // every uninstall-first run, the same version's included
-    [line, '${IfThen} $R0 = 1 ${|} StrCpy $R1 "$R1 /UPDATE" ${|}'], // a downgrade left out
-    [line, '${IfThen} $R0 = 0 ${|} StrCpy $R1 "$R1 /UPDATE" ${|}'], // only the same version
-    [line, '${IfThen} $R1 <> 0 ${|} StrCpy $R1 "$R1 /UPDATE" ${|}'], // the wrong variable
+    [line, 'StrCpy $R1 "$R1 /UPDATE"'], // every remove-first run, the same version's included
+    [line, '${IfThen} $PetalockCase == "update" ${|} StrCpy $R1 "$R1 /UPDATE" ${|}'], // a downgrade and an unknown version left out
+    [line, '${IfThen} $PetalockCase == "reinstall" ${|} StrCpy $R1 "$R1 /UPDATE" ${|}'], // only the same version
+    [line, '${IfThen} $PetalockOldVer != "reinstall" ${|} StrCpy $R1 "$R1 /UPDATE" ${|}'], // the wrong variable
   ];
-  for (const [from, to] of mutants) assert.ok(oldUninstallerProblems(text.replace(from, to), hooksText).length >= 1, `must be refused: ${to || "(line removed)"}`);
+  for (const [from, to] of mutants) assert.ok(oldUninstallerProblems(text.replace(from, to), uiText, hooksText).length >= 1, `must be refused: ${to || "(line removed)"}`);
   // Where the line sits matters: before the command is built it is wiped (the hook sets $R1), and after `_?=` the uninstaller
   // would read it as part of the folder.
   const run = "    ExecWait '$R1' $0\n";
   assert.ok(text.includes(run));
-  assert.ok(oldUninstallerProblems(text.replace(`    ${line}\n`, "").replace(run, `    ${line}\n${run}`), hooksText).length >= 1, "a line after `_?=` is refused");
-  assert.ok(oldUninstallerProblems(text.replace(`    ${line}\n`, "").replace("    Call PetalockBeforeOldUninstaller\n", `    ${line}\n    Call PetalockBeforeOldUninstaller\n`), hooksText).length >= 1, "a line before the command is built is refused");
-  assert.ok(oldUninstallerProblems(text.replace(run, `    StrCpy $R0 0\n${run}`), hooksText).length >= 1, "a $R0 written before the line reads it is refused");
-  assert.ok(oldUninstallerProblems(text, `${hooksText}\nStrCpy $R0 0\n`).length >= 1, "a hook that uses $R0 is refused");
+  assert.ok(oldUninstallerProblems(text.replace(`    ${line}\n`, "").replace(run, `    ${line}\n${run}`), uiText, hooksText).length >= 1, "a line after `_?=` is refused");
+  assert.ok(oldUninstallerProblems(text.replace(`    ${line}\n`, "").replace("    Call PetalockBeforeOldUninstaller\n", `    ${line}\n    Call PetalockBeforeOldUninstaller\n`), uiText, hooksText).length >= 1, "a line before the command is built is refused");
+  // Nothing but the decision writes the case, and a section that no longer waits for the choice is refused.
+  assert.ok(oldUninstallerProblems(text, `${uiText}\nStrCpy $PetalockCase "reinstall"\n`, hooksText).length >= 1, "a second writer of the case is refused");
+  assert.ok(oldUninstallerProblems(text.replace("${If} $PetalockRemoveFirst = 1", "${If} 1 = 1"), uiText, hooksText).length >= 1, "a section that always removes first is refused");
+  assert.deepEqual(oldUninstallerProblems("", "", ""), ["the remove-first section is not in the template"]);
   // The smoke check on the runner (the plan's wording): 0.1.1 installed with its Run value, 0.1.2 through the window with the
   // page's default and then with the other choice, the value unchanged both times; and the downgrade, and the same version
-  // as the control that still removes it.
+  // as the control that still removes it (Task 9e: and now ends Setup, so nothing is installed afterwards).
   const check = checkBody("interactive_upgrade_keeps_start_with_windows");
   assert.match(check, /foreach \(\$uninstallFirst in @\(\$false, \$true\)\)/);
   assert.match(check, /Invoke-WindowOver \$Installer \$Upgrade \$uninstallFirst/);
@@ -1242,6 +1290,7 @@ test("interactive_upgrade_keeps_start_with_windows", () => {
   assert.match(check, /\$null -ne \(Get-RegValue \$RunKey 'Petalock'\)/);
   assert.match(check, /Assert-OneInstallation \$DefaultDir \$ToVersion/);
   assert.match(check, /Assert-OneInstallation \$DefaultDir \$FromVersion/);
+  assert.match(check, /\[System\.IO\.File\]::Exists\(\(Join-Path \$DefaultDir 'petalock\.exe'\)\)\) \{ throw "the same-version 'Uninstall Petalock instead' left petalock\.exe" \}/);
   const helper = between(read(SMOKE), /^function Invoke-WindowOver/m, /^\}$/m, "Invoke-WindowOver");
   assert.match(helper, /Install-Silent \$First ''/);
   assert.match(helper, /\$planted = New-StateFixture/);
@@ -1259,22 +1308,26 @@ test("interactive_upgrade_keeps_start_with_windows", () => {
 test("the_template_lists_its_numbered_changes_including_the_reinstall_page_two", () => {
   const header = template().split("\nUnicode true")[0];
   const numbers = [...header.matchAll(/^; {1,3}(\d+)\. /gm)].map((m) => Number(m[1]));
-  assert.ok(numbers.length >= 12, `found ${numbers.length} numbered changes`);
+  assert.ok(numbers.length >= 13, `found ${numbers.length} numbered changes`);
   assert.deepEqual(numbers, numbers.map((_, i) => i + 1), "numbered in order, none missing");
   const item = (n) => header.match(new RegExp(`^; {1,3}${n}\\. ([\\s\\S]*?)(?=\\n; {1,3}\\d+\\. |(?![\\s\\S]))`, "m"))?.[1].replace(/\n;\s+/g, " ") ?? "";
-  assert.match(item(11), /reinstall page/i);
+  // Task 9e: item 11 is the one screen (the reinstall page it replaced is named), 12 the remove-first path, 13 the plugin folder
+  // and the band picture.
+  assert.match(item(11), /one custom page/i);
+  assert.match(item(11), /reinstall/i);
   assert.match(item(11), /Do not uninstall/);
+  assert.match(item(11), /focus/i);
   assert.match(item(12), /\/UPDATE/);
   assert.match(item(12), /Run\\Petalock/);
-  // Fix round (review findings 3 and 4): the focus follows the tick (11), and the app-data box is not offered under /UPDATE (12).
-  assert.match(item(11), /focus/i);
   assert.match(item(12), /Delete the application data/);
+  assert.match(item(13), /addplugindir|additional plugin/i);
+  assert.match(item(13), /headerImage/);
   // Each is marked where it is made, as the others are.
   const lines = template().split("\n");
-  assert.ok(lines.some((line) => /^\s*; Petalock: .*focus/.test(line)), "the focus is marked where it is made");
   assert.ok(lines.some((line) => /^\s*; Petalock: .*Delete the application data/.test(line)), "the hidden box is marked where it is made");
-  assert.ok(lines.some((line) => /^\s*; Petalock: .*Do not uninstall/.test(line)), "the default is marked where it is made");
-  assert.ok(lines.some((line) => /^\s*; Petalock: .*\/UPDATE/.test(line)), "the /UPDATE line is marked where it is made");
+  assert.ok(lines.some((line) => /^\s*; Petalock: .*one custom page/.test(line)), "the one screen is marked where it is made");
+  assert.ok(lines.some((line) => /^\s*; Petalock: .*addplugindir|^\s*; Petalock: the additional plugins/.test(line)), "the plugin folder is marked where it is made");
+  assert.ok(lines.some((line) => /^\s*; \/UPDATE for an update that removes first/.test(line)), "the /UPDATE line is marked where it is made");
 });
 
 // Task 1 re-check new 6: the uninstall-first upgrade must show that the old uninstaller really ran: an opened copy planted
@@ -1405,4 +1458,173 @@ test("the smoke script's comparisons fire on a wrong result and on no change at 
   // The installed notices against the build's: the same file passes, and every wrong copy and every unusable build file fails.
   assert.match(out, /selftest: ok: an installed notices file that is the build's passes/);
   assert.match(out, /selftest: ok: a changed, cut, absent or empty installed copy fails, and so does a build file that is empty, cut or missing/);
+  // The status line's texts (second fix round): words with an outcome pass; a window handle, nothing read and no outcome fail.
+  assert.match(out, /selftest: ok: the status line check passes words with an outcome, and fails a handle, nothing read and no outcome/);
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Plan 5, Task 9e: the one screen. The smoke checks that drive it run only on the runner; these read their bodies.
+// ---------------------------------------------------------------------------------------------------------------------
+
+test("quick_install_default_folder_and_receipt", () => {
+  const check = checkBody("quick_install_default_folder_and_receipt");
+  // Through the window, default folder: every sentence the design gives (plan, then receipt), the version from the build, the
+  // program installed with that version, and Petalock not started (the driver clears the box on the last page).
+  assert.match(check, /Install-Interactive \$Installer ''/);
+  for (const sentence of ["What Setup will do", "Check for Microsoft WebView2", "Install Petalock for this Windows account", "Add it to the Start menu and to Installed apps", "What Setup did", "Petalock is installed for this Windows account", "Added to the Start menu and to Installed apps"]) {
+    assert.ok(check.includes(`'${sentence}'`), `the check looks for: ${sentence}`);
+  }
+  assert.match(check, /Already installed.*Installed by Setup/);
+  assert.match(check, /Get-EmbeddedVersion \$Installer/);
+  assert.match(check, /\*Version \$want\*/);
+  assert.match(check, /Test-Installed \$DefaultDir/);
+  assert.match(check, /Assert-OneInstallation \$DefaultDir \$want/);
+  assert.match(check, /Get-Process -Name 'petalock'/);
+  // The collected words are the statics of every page, so the receipt's words are the real last page's (not the plan's):
+  // "Petalock is installed for this Windows account" is the receipt's row 2, the plan's is "Install Petalock for ...".
+  assert.notEqual("Petalock is installed for this Windows account", "Install Petalock for this Windows account");
+});
+
+test("quick_install_folder_from_options", () => {
+  const check = checkBody("quick_install_folder_from_options");
+  // Review fix round, finding 19, and the second fix round (runner trial 3: the system's folder dialog is the tree-style
+  // "Browse For Folder", with no Folder box): Browse is driven from a launch with no /D=. The dialog opens on the (empty) default
+  // folder and a folder made beside it is chosen by typing its name into the tree; the page must then show that folder, and the
+  // install lands there and nowhere else; the uninstall takes the program, the uninstaller and the entry away.
+  assert.match(check, /Start-Tracked \$Installer @\(\)/);
+  assert.match(check, /\$_\.Text -eq 'Options'/);
+  assert.match(check, /\$_\.Class -eq 'Edit'/);
+  assert.match(check, /Browse\*/);
+  assert.match(check, /\$pickName = 'MU-picked-folder'/);
+  assert.match(check, /Choose-Folder \$pickName/);
+  assert.match(check, /New-Item -ItemType Directory -Force \$DefaultDir/, "the dialog opens on a default folder that exists");
+  assert.match(check, /New-Item -ItemType Directory -Force \$picked/, "the folder to choose exists beside it");
+  assert.match(check, /\$optionsObs\['Field'\] -ne \$chosen/);
+  assert.match(check, /\$optionsObs\['Field'\] -eq \$DefaultDir/, "a picker that left the default must fail");
+  assert.match(check, /Test-Installed \$chosen/);
+  assert.match(check, /InstallLocation/);
+  assert.match(check, /Uninstall-AsWindowsDoes \$chosen/);
+  for (const gone of ["petalock\\.exe", "uninstall\\.exe"]) assert.match(check, new RegExp(`\\[System\\.IO\\.File\\]::Exists\\(\\(Join-Path \\$chosen '${gone}'\\)\\)`));
+  assert.match(check, /Get-UninstallValue 'DisplayName'/);
+  // A reader that saw no page must fail, never pass on an empty table.
+  assert.match(check, /if \(\$optionsObs\.Count -eq 0\) \{ Save-Screen 'no-options'; throw/);
+  // The driver finds the dialog by its owner and its tree, with no caption and no Folder box assumed.
+  const picker = between(read(SMOKE), /^function Choose-Folder\b/m, /^\}$/m, "Choose-Folder");
+  assert.match(picker, /SysTreeView32/);
+  assert.match(picker, /\[SmokeDlg\]::Owner\(/);
+  assert.doesNotMatch(picker, /'Edit'/);
+  assert.doesNotMatch(picker, /\*Petalock\*/);
+  assert.match(picker, /\[SmokeDlg\]::Item\(\$h, 1\)/);
+});
+
+test("a_completed_step_puts_words_in_the_status_line", () => {
+  const check = checkBody("a_completed_step_puts_words_in_the_status_line");
+  // A real install, the status control read by its id on every turn of a tight loop: each text it showed is kept, none may be a
+  // number (the window handle that once took the outcome's place), and at least one must be a completed step's outcome.
+  assert.match(check, /\[SmokeDlg\]::StatusText\(\$d\.Handle, 1950\)/);
+  assert.match(check, /\$statuses\.Count -eq 0/);
+  for (const outcome of ["Microsoft WebView2", "Petalock is installed for this Windows account", "Added to the Start menu and to Installed apps"]) {
+    assert.ok(check.includes(`'${outcome}'`), `the outcome the check looks for: ${outcome}`);
+  }
+  assert.match(check, /Get-StatusProblems @\(\$statuses\) \$outcomes/);
+  // The comparison counts what it found: nothing read, a number and no outcome each fail (its self-test runs these too).
+  const compare = between(read(SMOKE), /^function Get-StatusProblems\b/m, /^\}$/m, "Get-StatusProblems");
+  assert.match(compare, /@\('the status line was never read'\)/);
+  assert.match(compare, /\^\\s\*\\d\+\\s\*\$/);
+  assert.match(compare, /\$seen\.Count -eq 0/);
+  assert.match(read(SMOKE), /selftest: ok: |& \$ok 'the status line check passes words with an outcome, and fails a handle, nothing read and no outcome'/);
+  assert.match(check, /\$deadline/);
+  assert.match(check, /Test-Installed \$DefaultDir/);
+});
+
+test("a_refused_registration_keeps_everything_but_the_files_this_attempt_wrote", () => {
+  const check = checkBody("a_refused_registration_keeps_everything_but_the_files_this_attempt_wrote");
+  // Fresh: Windows refuses the new entry (the right to create the key is denied); only Setup's own files go, the sentinel beside the
+  // folder and the state folder (also named Petalock) stay, no entry exists, and the same install works once the right is back.
+  assert.match(check, /Set-RegDeny \$UninstallParent 'CreateSubKey'/);
+  assert.match(check, /MU-sentinel/);
+  assert.match(check, /\$planted = New-StateFixture/);
+  assert.match(check, /Assert-Unchanged \$planted \(Get-Listing \$State -Hash\)/);
+  assert.match(check, /Clear-RegDeny/);
+  // Update in place: the right to set the key's values is denied; nothing is removed and the earlier entry stays.
+  assert.match(check, /Set-RegDeny \$UninstallKey 'SetValue'/);
+  assert.match(check, /MU-added\.txt/);
+  assert.match(check, /Assert-OneInstallation \$DefaultDir/);
+  // Each refusal is an error exit, never zero, and is followed by a success.
+  assert.equal((check.match(/-eq 0\) \{ throw/g) ?? []).length >= 2, true);
+  assert.equal((check.match(/-ne 0\) \{ throw/g) ?? []).length >= 2, true);
+});
+
+test("quick_install_folder_from_d", () => {
+  const check = checkBody("quick_install_folder_from_d");
+  assert.match(check, /Start-Tracked \$Installer @\("\/D=\$chosen"\)/);
+  assert.match(check, /\$dObs\['Field'\] -ne \$chosen/);
+  assert.match(check, /if \(\$dObs\.Count -eq 0\) \{ Save-Screen 'no-options-d'; throw/);
+  assert.match(check, /Test-Installed \$chosen/);
+  assert.match(check, /\[System\.IO\.Directory\]::Exists\(\$DefaultDir\)/);
+});
+
+test("quiet_installs_return_exit_codes_and_launch_nothing", () => {
+  const check = checkBody("quiet_installs_return_exit_codes_and_launch_nothing");
+  // /P: ends by itself with exit 0 and starts nothing; /S: no window at all, exit 0, nothing started; both refused folders end with
+  // an error code, with the installed program unchanged.
+  assert.match(check, /Start-Tracked \$Installer @\('\/P'\)/);
+  assert.match(check, /\$deadline = \(Get-Date\)\.AddSeconds\(240\)/);
+  assert.match(check, /the \/P install exited \$code/);
+  assert.match(check, /Start-Tracked \$Installer @\('\/S', '\/R'\)/);
+  assert.match(check, /Get-Dialogs @\(\[int\]\$p\.Id\) -Owned/);
+  assert.match(check, /the \/S install showed a window/);
+  assert.match(check, /foreach \(\$flags in @\(@\('\/S'\), @\('\/P'\)\)\)/);
+  assert.match(check, /"\/D=\$State"/);
+  assert.match(check, /if \(\$code -eq 0\) \{ throw/);
+  assert.match(check, /Assert-Unchanged \$before \(Get-InstallState \$DefaultDir\)/);
+  assert.equal((check.match(/Get-Process -Name 'petalock'/g) ?? []).length, 2, "Petalock is looked for after /P and after /S");
+});
+
+test("the running check works through the window: its words, Retry and Cancel on its own buttons, the keyboard route in words", () => {
+  const script = read(SMOKE);
+  const wait = between(script, /^function Wait-RunningPage/m, /^\}$/m, "Wait-RunningPage");
+  assert.match(wait, /Close Petalock, then try again/);
+  assert.match(wait, /What Setup will do/);
+  assert.match(wait, /\[SmokeDlg\]::Press\(\$d\.Handle, \$next\)/);
+  const body = script.slice(script.indexOf('$Checks["running_petalock_is_never_ended_and_silent_refuses_first"]'), script.indexOf('$Checks["uninstall_says_where_vaults_stay"]'));
+  assert.match(body, /Wait-RunningPage \$p/);
+  assert.match(body, /Quit it from its icon near the clock/);
+  assert.match(body, /press Windows\+B/);
+  assert.match(body, /\[SmokeDlg\]::Press\(\$box\.Handle, \[SmokeDlg\]::Item\(\$box\.Handle, 2\)\)/, "Cancel is the window's own Cancel button");
+  assert.match(body, /\[SmokeDlg\]::Press\(\$box\.Handle, \[SmokeDlg\]::Item\(\$box\.Handle, 1\)\)/, "Retry is the window's own default button");
+});
+
+// Task 9e review fix round: the checks' bodies (their findings are pinned further in installer-fix-round.test.mjs).
+test("a_write_that_is_denied_is_a_failure_not_a_receipt", () => {
+  const check = checkBody("a_write_that_is_denied_is_a_failure_not_a_receipt");
+  assert.match(check, /Set-Deny \$exe 'W'/);
+  assert.match(check, /finally \{ Clear-Deny \$exe \}/);
+  assert.match(check, /if \(\$code -eq 0\) \{ throw/);
+  assert.match(check, /the install with the permission restored exited/);
+});
+
+test("interactive_update_mode_offers_no_uninstall_choice", () => {
+  const check = checkBody("interactive_update_mode_offers_no_uninstall_choice");
+  assert.match(check, /Read-MainPage \$Installer @\('\/UPDATE'\)/);
+  assert.match(check, /Set-RunValue/);
+  assert.match(check, /\$page\.Links -contains 'Other choices'/);
+  assert.match(check, /\$page\.Links -contains 'Uninstall Petalock instead'/);
+  assert.match(check, /\(Get-RegValue \$RunKey 'Petalock'\) -ne \$run/);
+});
+
+test("remove_first_with_an_added_file_leaves_the_install_intact", () => {
+  const check = checkBody("remove_first_with_an_added_file_leaves_the_install_intact");
+  assert.match(check, /MU-added\.txt/);
+  assert.match(check, /be removed first/);
+  assert.match(check, /the program was removed before the added file was noticed/);
+  assert.match(check, /Assert-OneInstallation \$DefaultDir \$FromVersion/);
+});
+
+test("keyboard_tab_order_and_default_buttons_on_the_real_dialog", () => {
+  const check = checkBody("keyboard_tab_order_and_default_buttons_on_the_real_dialog");
+  assert.match(check, /Send-Key \$d 0x09/);
+  assert.match(check, /Send-Key \$d 0x0D/);
+  assert.match(check, /\$p\.WaitForExit\(60000\)/);
+  assert.match(check, /Enter on the newer-version screen did not end Setup/);
 });

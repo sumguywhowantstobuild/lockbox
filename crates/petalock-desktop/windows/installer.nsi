@@ -22,21 +22,36 @@
 ;      in the recorded install folder, run by a command built from that folder (not read from the registry).
 ;   9. Tauri's "remove the old main binary named by a registry value" and its shortcut migration are removed.
 ;  10. The WebView2 bootstrapper's path is quoted when it is run.
-;  11. On an upgrade or a downgrade the reinstall page opens with "Do not uninstall" ticked (Tauri's opens on "Uninstall before
-;      installing"); "Uninstall before installing" is still offered, the person's last choice is kept on Back and Next, and the
-;      same-version page is Tauri's. The keyboard focus goes to the button that is ticked, on every page kind (Tauri focuses the
-;      first button whichever is ticked).
-;  12. "Uninstall before installing" on an upgrade or a downgrade runs the old uninstaller with /UPDATE, so it keeps the
+;  11. Plan 5, Task 9e (design D, "Plain terms"): the welcome, licence, install-mode, reinstall (the one that offered "Do not
+;      uninstall"), folder and start-menu pages and the finish page are replaced by one custom page (PetalockMainShow, in
+;      setup-ui.nsh) that says in three lines what Setup will do, the stock progress page restyled as the same three lines
+;      (Done / Now / Next), and a custom last page (the receipt, or where Setup stopped). An update installs over by default
+;      (the same policy as before: nothing is uninstalled first unless the person ticks "Remove ... before installing" under
+;      "Other choices"); the keyboard focus and the tab order follow the design's notes. The installer's /D, remembered folder
+;      and per-user default are unchanged, and no Nullsoft line is shown (BrandingText " ").
+;  12. The old uninstaller an update runs (the remove-first choice, now the first section) gets /UPDATE, so it keeps the
 ;      Run\Petalock value (the app keeps no other copy of "start with Windows"), the shortcuts and the app data; it still
-;      cleans open\ first. The same version's "Uninstall Petalock" stays a full uninstall. Under /UPDATE the uninstaller's
-;      "Delete the application data" box is not offered (the uninstall ignores it there); a full uninstall keeps it.
+;      cleans open\ first. The same version's "Uninstall Petalock instead" link is a full uninstall that ends Setup. Under
+;      /UPDATE the uninstaller's "Delete the application data" box is not offered (the uninstall ignores it there); a full
+;      uninstall keeps it, with words that say what it removes and that the vaults stay.
+;  13. The additional plugin folder is added before hooks.nsh is included (setup-ui.nsh calls nsis_tauri_utils), and the
+;      installer's band picture is the build's header image (bundle.windows.nsis.headerImage), unpacked to $PLUGINSDIR; the
+;      Licence link opens bundle.licenseFile from there.
+;  14. When Windows refuses the Installed apps entry after the files were written, a FRESH attempt (the folder was provably empty
+;      at its start) removes exactly the files it wrote, by name and never a folder (PetalockRollBackFreshFiles), so running
+;      Setup again is not refused for a folder that holds files and no entry; an update removes nothing. The page's advice never
+;      says to delete a folder.
 Unicode true
 ManifestDPIAware true
 ; Add in `dpiAwareness` `PerMonitorV2` to manifest for Windows 10 1607+ (note this should not affect lower versions since they should be able to ignore this and pick up `dpiAware` `true` set by `ManifestDPIAware true`)
 ; Currently undocumented on NSIS's website but is in the Docs folder of source tree, see
 ; https://github.com/kichik/nsis/blob/5fc0b87b819a9eec006df4967d08e522ddd651c9/Docs/src/attributes.but#L286-L300
 ; https://github.com/tauri-apps/tauri/pull/10106
-ManifestDPIAwareness PerMonitorV2
+; Petalock (review fix round, finding 17): `ManifestDPIAwareness PerMonitorV2` is not set. NSIS has no per-monitor re-layout (a window
+; made at one scale keeps its pixel sizes when it is dragged to a screen with another), so the installer is system-DPI aware (the
+; line above): its layout is worked out once from the system's scale and the message font's size (larger Windows text included),
+; and when the window is moved to a screen with a different scale Windows scales the whole window itself, which stays correct
+; but is slightly blurred there.
 
 !if "{{compression}}" == "none"
   SetCompress off
@@ -99,13 +114,17 @@ Var PassiveMode
 Var UpdateMode
 Var NoShortcutMode
 
+; Petalock: the additional plugins (nsis_tauri_utils) are added before the hooks, which call one of them.
+!addplugindir "${ADDITIONALPLUGINSPATH}"
+
 ; Petalock: included here (Tauri includes it at the top) because it uses the variables and defines above.
 {{#if installer_hooks}}
 !include "{{installer_hooks}}"
 {{/if}}
 
 Name "${PRODUCTNAME}"
-BrandingText "${COPYRIGHT}"
+; Petalock: no "Nullsoft Install System" line at the bottom of the window (a space: an empty string brings NSIS's own back).
+BrandingText " "
 OutFile "${OUTFILE}"
 
 ; We don't actually use this value as default install path,
@@ -120,9 +139,6 @@ VIAddVersionKey "FileDescription" "${PRODUCTNAME}"
 VIAddVersionKey "LegalCopyright" "${COPYRIGHT}"
 VIAddVersionKey "FileVersion" "${VERSION}"
 VIAddVersionKey "ProductVersion" "${VERSION}"
-
-# additional plugins
-!addplugindir "${ADDITIONALPLUGINSPATH}"
 
 ; Uninstaller signing command
 !if "${UNINSTALLERSIGNCOMMAND}" != ""
@@ -165,20 +181,11 @@ VIAddVersionKey "ProductVersion" "${VERSION}"
   !define MUI_WELCOMEFINISHPAGE_BITMAP "${SIDEBARIMAGE}"
 !endif
 
-; Enable header images for installer and uninstaller pages when either image is configured.
-!if "${HEADERIMAGE}" != ""
-  !define MUI_HEADERIMAGE
-!else if "${UNINSTALLERHEADERIMAGE}" != ""
-  !define MUI_HEADERIMAGE
-!endif
-
-; Installer header image
-!if "${HEADERIMAGE}" != ""
-  !define MUI_HEADERIMAGE_BITMAP "${HEADERIMAGE}"
-!endif
-
-; Uninstaller header image
+; Petalock: the installer's header image (bundle.windows.nsis.headerImage) is the engraved band of the one screen (a 952 x 104
+; bitmap, shown at 476 x 52 and scaled with the window), unpacked by PetalockGuiInit; it is not the stock header's picture, which
+; this installer never shows. The uninstaller's header image (none is configured) is as Tauri has it.
 !if "${UNINSTALLERHEADERIMAGE}" != ""
+  !define MUI_HEADERIMAGE
   !define MUI_HEADERIMAGE_UNBITMAP "${UNINSTALLERHEADERIMAGE}"
 !endif
 
@@ -191,250 +198,40 @@ VIAddVersionKey "ProductVersion" "${VERSION}"
 ; has one language and writes nothing but its uninstall key, so the key, and every read, write and delete of it, are gone.
 
 ; Installer pages, must be ordered as they appear
-; 1. Welcome Page
-!define MUI_PAGE_CUSTOMFUNCTION_PRE SkipIfPassive
-!insertmacro MUI_PAGE_WELCOME
-
-; 2. License Page (if defined)
-!if "${LICENSE}" != ""
-  !define MUI_PAGE_CUSTOMFUNCTION_PRE SkipIfPassive
-  !insertmacro MUI_PAGE_LICENSE "${LICENSE}"
-!endif
-
-; 3. Install mode (if it is set to `both`)
-!if "${INSTALLMODE}" == "both"
-  !define MUI_PAGE_CUSTOMFUNCTION_PRE SkipIfPassive
-  !insertmacro MULTIUSER_PAGE_INSTALLMODE
-!endif
-
-; 4. Custom page to ask user if he wants to reinstall/uninstall
-;    only if a previous installation was detected
-Var ReinstallPageCheck
-Page custom PageReinstall PageLeaveReinstall
+; Petalock: 1. the one custom page (setup-ui.nsh): what Setup will do, Options, the update's choices and every blocked state.
+!define MUI_CUSTOMFUNCTION_GUIINIT PetalockGuiInit
+Page custom PetalockMainShow PetalockMainLeave
 
 ; Petalock: Tauri's discovery of an earlier WiX (MSI) install, and its machine-wide uninstall branch, are removed (no MSI
 ; was ever shipped, and the branch ran an HKLM uninstall string outside every check): FindWixInstall and $WixMode are gone.
 
-Function PageReinstall
-  ; Check if there is an existing installation, if not, abort the reinstall page
-  ReadRegStr $R0 SHCTX "${UNINSTKEY}" ""
-  ReadRegStr $R1 SHCTX "${UNINSTKEY}" "UninstallString"
-  ${IfThen} "$R0$R1" == "" ${|} Abort ${|}
-
-  ; Compare this installar version with the existing installation
-  ; and modify the messages presented to the user accordingly
-  StrCpy $R4 "$(older)"
-  ReadRegStr $R0 SHCTX "${UNINSTKEY}" "DisplayVersion"
-  ${IfThen} $R0 == "" ${|} StrCpy $R4 "$(unknown)" ${|}
-
-  nsis_tauri_utils::SemverCompare "${VERSION}" $R0
-  Pop $R0
-
-  ; Read the install choice header through $R5 so a custom language file that only
-  ; defines the misspelled `choowHowToInstall` still shows its own text
-  ; TODO: remove the `choowHowToInstall` fallback in a future major version
-  StrCpy $R5 "$(chooseHowToInstall)"
-  ${IfThen} $R5 == "" ${|} StrCpy $R5 "$(choowHowToInstall)" ${|}
-
-  ; Reinstalling the same version
-  ${If} $R0 = 0
-    StrCpy $R1 "$(alreadyInstalledLong)"
-    StrCpy $R2 "$(addOrReinstall)"
-    StrCpy $R3 "$(uninstallApp)"
-    !insertmacro MUI_HEADER_TEXT "$(alreadyInstalled)" "$(chooseMaintenanceOption)"
-  ; Upgrading
-  ${ElseIf} $R0 = 1
-    StrCpy $R1 "$(olderOrUnknownVersionInstalled)"
-    StrCpy $R2 "$(uninstallBeforeInstalling)"
-    StrCpy $R3 "$(dontUninstall)"
-    !insertmacro MUI_HEADER_TEXT "$(alreadyInstalled)" "$R5"
-  ; Downgrading
-  ${ElseIf} $R0 = -1
-    StrCpy $R1 "$(newerVersionInstalled)"
-    StrCpy $R2 "$(uninstallBeforeInstalling)"
-    !if "${ALLOWDOWNGRADES}" == "true"
-      StrCpy $R3 "$(dontUninstall)"
-    !else
-      StrCpy $R3 "$(dontUninstallDowngrade)"
-    !endif
-    !insertmacro MUI_HEADER_TEXT "$(alreadyInstalled)" "$R5"
-  ${Else}
-    Abort
-  ${EndIf}
-
-  ; Skip showing the page if passive
-  ;
-  ; Note that we don't call this earlier at the beginning
-  ; of this function because we need to populate some variables
-  ; related to current installed version if detected and whether
-  ; we are downgrading or not.
-  ${If} $PassiveMode = 1
-    Call PageLeaveReinstall
-  ${Else}
-    nsDialogs::Create 1018
-    Pop $R4
-    ${IfThen} $(^RTL) = 1 ${|} nsDialogs::SetRTL $(^RTL) ${|}
-
-    ${NSD_CreateLabel} 0 0 100% 24u $R1
-    Pop $R1
-
-    ${NSD_CreateRadioButton} 30u 50u -30u 8u $R2
-    Pop $R2
-    ${NSD_OnClick} $R2 PageReinstallUpdateSelection
-
-    ${NSD_CreateRadioButton} 30u 70u -30u 8u $R3
-    Pop $R3
-    ; Disable this radio button if downgrading and downgrades are disabled
-    !if "${ALLOWDOWNGRADES}" == "false"
-      ${IfThen} $R0 = -1 ${|} EnableWindow $R3 0 ${|}
-    !endif
-    ${NSD_OnClick} $R3 PageReinstallUpdateSelection
-
-    ; Petalock: on an upgrade or a downgrade the first time this page is shown, the second button ("Do not uninstall") is the
-    ; one ticked: Tauri's default ("Uninstall before installing") deleted the Run\Petalock value. $ReinstallPageCheck is the
-    ; person's last choice (1 first button, 2 second), so once they have chosen, Back and Next keep it. A downgrade the build
-    ; forbids has that button disabled, so it keeps the first. The same-version page is untouched ($R0 = 0).
-    ${If} $ReinstallPageCheck = 0
-    ${AndIf} $R0 <> 0
-      StrCpy $ReinstallPageCheck 2
-      !if "${ALLOWDOWNGRADES}" == "false"
-        ${IfThen} $R0 = -1 ${|} StrCpy $ReinstallPageCheck 1 ${|}
-      !endif
-    ${EndIf}
-
-    ; Check the first radio button if this the first time
-    ; we enter this page or if the second button wasn't
-    ; selected the last time we were on this page
-    ; Petalock: the keyboard focus goes to the button that is ticked (Tauri focuses the first button whichever is ticked, so on
-    ; an upgrade a keyboard user's Space would have picked "Uninstall before installing").
-    ${If} $ReinstallPageCheck <> 2
-      SendMessage $R2 ${BM_SETCHECK} ${BST_CHECKED} 0
-      ${NSD_SetFocus} $R2
-    ${Else}
-      SendMessage $R3 ${BM_SETCHECK} ${BST_CHECKED} 0
-      ${NSD_SetFocus} $R3
-    ${EndIf}
-
-    nsDialogs::Show
-  ${EndIf}
-FunctionEnd
-Function PageReinstallUpdateSelection
-  ${NSD_GetState} $R2 $R1
-  ${If} $R1 == ${BST_CHECKED}
-    StrCpy $ReinstallPageCheck 1
-  ${Else}
-    StrCpy $ReinstallPageCheck 2
-  ${EndIf}
-FunctionEnd
-Function PageLeaveReinstall
-  ${NSD_GetState} $R2 $R1
-
-  ; In update mode, always proceeds without uninstalling
-  ${If} $UpdateMode = 1
-    Goto reinst_done
-  ${EndIf}
-
-  ; $R0 holds whether same(0)/upgrading(1)/downgrading(-1) version
-  ; $R1 holds the radio buttons state:
-  ;   1 => first choice was selected
-  ;   0 => second choice was selected
-  ${If} $R0 = 0 ; Same version, proceed
-    ${If} $R1 = 1              ; User chose to add/reinstall
-      Goto reinst_done
-    ${Else}                    ; User chose to uninstall
-      Goto reinst_uninstall
-    ${EndIf}
-  ${ElseIf} $R0 = 1 ; Upgrading
-    ${If} $R1 = 1              ; User chose to uninstall
-      Goto reinst_uninstall
-    ${Else}
-      Goto reinst_done         ; User chose NOT to uninstall
-    ${EndIf}
-  ${ElseIf} $R0 = -1 ; Downgrading
-    ${If} $R1 = 1              ; User chose to uninstall
-      Goto reinst_uninstall
-    ${Else}
-      Goto reinst_done         ; User chose NOT to uninstall
-    ${EndIf}
-  ${EndIf}
-
-  reinst_uninstall:
-    HideWindow
-    ClearErrors
-
-    ; Petalock: the old uninstaller is the one in the folder the uninstall key records, checked as a maintenance folder, and
-    ; Petalock must not be running. PetalockBeforeOldUninstaller sets $4 (that folder) and $R1 (the command, built from
-    ; that folder and the fixed file name uninstall.exe: nothing read from the registry is executed).
-    Call PetalockBeforeOldUninstaller
-    ${IfThen} $UpdateMode = 1 ${|} StrCpy $R1 "$R1 /UPDATE" ${|} ; append /UPDATE
-    ; Petalock: /UPDATE for an uninstall first from an upgrade or a downgrade ($R0 = 1 or -1, still the version comparison's
-    ; answer: nothing above writes it), so the old uninstaller keeps the Run\Petalock value, the shortcuts and the app data
-    ; (it still cleans open\ first). It goes before `_?=`, which must stay last. The same version ($R0 = 0) is the person
-    ; asking to uninstall: a full one.
-    ${IfThen} $R0 <> 0 ${|} StrCpy $R1 "$R1 /UPDATE" ${|}
-    ${IfThen} $PassiveMode = 1 ${|} StrCpy $R1 "$R1 /P" ${|} ; append /P
-    StrCpy $R1 "$R1 _?=$4" ; append uninstall directory
-    ExecWait '$R1' $0
-
-    BringToFront
-
-    ${IfThen} ${Errors} ${|} StrCpy $0 2 ${|} ; ExecWait failed, set fake exit code
-
-    ${If} $0 <> 0
-    ${OrIf} ${FileExists} "$INSTDIR\${MAINBINARYNAME}.exe"
-      ; User cancelled NSIS uninstaller? return to select un/reinstall page
-      ${If} $0 = 1
-        Abort
-      ${EndIf}
-
-      ; Other errors? show generic error message and return to select un/reinstall page
-      MessageBox MB_ICONEXCLAMATION "$(unableToUninstall)"
-      Abort
-    ${EndIf}
-
-    ; The NSIS uninstaller was run in place (`_?=`), so it cannot delete itself
-    ; and the install directory, clean them up here once the uninstall succeeded
-    ; https://nsis.sourceforge.io/Docs/Chapter3.html#:~:text=path%20contains%20spaces.-,3.2.3%20Examples,-installer.exe%20/NCRC
-    ${If} $4 != ""
-      Delete "$4\uninstall.exe"
-      RMDir "$4"
-    ${EndIf}
-  reinst_done:
-FunctionEnd
-
-; 5. Choose install directory page
-; Petalock: the folder chosen is checked when the page is left, and the page stays when it is refused.
-!define MUI_PAGE_CUSTOMFUNCTION_PRE SkipIfPassive
-!define MUI_PAGE_CUSTOMFUNCTION_LEAVE PetalockLeaveDirectory
-!insertmacro MUI_PAGE_DIRECTORY
-
-; 6. Start menu shortcut page
+; 2. Start menu shortcut page (never shown: STARTMENUFOLDER is empty, so it is skipped, as Tauri's template skips it)
 Var AppStartMenuFolder
 !if "${STARTMENUFOLDER}" != ""
-  !define MUI_PAGE_CUSTOMFUNCTION_PRE SkipIfPassive
   !define MUI_STARTMENUPAGE_DEFAULTFOLDER "${STARTMENUFOLDER}"
-!else
-  !define MUI_PAGE_CUSTOMFUNCTION_PRE Skip
 !endif
+; Petalock: the one screen has no start-menu page, so it is always skipped (Tauri's template shows it when a folder is set).
+!define MUI_PAGE_CUSTOMFUNCTION_PRE Skip
 !insertmacro MUI_PAGE_STARTMENU Application $AppStartMenuFolder
 
-; 7. Installation page
+; 3. Installation page: the stock page, restyled as the same three lines (Done / Now / Next).
+!define MUI_PAGE_CUSTOMFUNCTION_SHOW PetalockProgressShow
 !insertmacro MUI_PAGE_INSTFILES
 
-; 8. Finish page
-;
-; Don't auto jump to finish page after installation page,
-; because the installation page has useful info that can be used debug any issues with the installer.
-!define MUI_FINISHPAGE_NOAUTOCLOSE
-; Use show readme button in the finish page as a button create a desktop shortcut
-!define MUI_FINISHPAGE_SHOWREADME
-!define MUI_FINISHPAGE_SHOWREADME_TEXT "$(createDesktop)"
-!define MUI_FINISHPAGE_SHOWREADME_FUNCTION CreateOrUpdateDesktopShortcut
-; Show run app after installation.
-!define MUI_FINISHPAGE_RUN
-!define MUI_FINISHPAGE_RUN_FUNCTION RunMainBinary
-!define MUI_PAGE_CUSTOMFUNCTION_PRE SkipIfPassive
-!insertmacro MUI_PAGE_FINISH
+; 4. Petalock: the last page, the receipt (or where Setup stopped). A window goes to it when the sections are done (they set
+; SetAutoClose), and /P skips it: nobody clicks Finish.
+Page custom PetalockEndShow PetalockEndLeave
+
+; Petalock: the page's own first work (the band's picture and the licence unpacked from the installer; the window's size, fonts
+; and colours) runs when the window is made.
+Function PetalockGuiInit
+  InitPluginsDir
+  File "/oname=$PLUGINSDIR\band.bmp" "${HEADERIMAGE}"
+  !if "${LICENSE}" != ""
+    File "/oname=$PLUGINSDIR\LICENSE.txt" "${LICENSE}"
+  !endif
+  Call PetalockGuiSetup
+FunctionEnd
 
 Function RunMainBinary
   nsis_tauri_utils::RunAsUser "$INSTDIR\${MAINBINARYNAME}.exe" ""
@@ -470,12 +267,15 @@ Function un.ConfirmShow ; Add add a `Delete app data` check box
   ${EndIf}
   IntOp $5 100 * $2
   IntOp $6 400 * $2
-  IntOp $7 25 * $2
+  IntOp $7 64 * $2
   IntOp $4 $4 / 96
   IntOp $5 $5 / 96
   IntOp $6 $6 / 96
   IntOp $7 $7 / 96
-  System::Call 'user32::CreateWindowEx(i r3, w "${__NSD_CheckBox_CLASS}", w "$(deleteAppData)", i ${__NSD_CheckBox_STYLE}, i r4, i r5, i r6, i r7, p r1, i0, i0, i0) i .s'
+  ; Petalock: the box's words say what it removes (the two folders named after Petalock's identifier, one in Local and one in
+  ; Roaming app data, which hold the window's cache) and what it never does. The first words are Tauri's own ("Delete the
+  ; application data"); the room is four lines, so larger Windows text still shows all of it.
+  System::Call 'user32::CreateWindowEx(i r3, w "${__NSD_CheckBox_CLASS}", w "Delete the application data. This removes Petalock’s window cache from your Local and Roaming app data folders. Your vaults, the vault list and your settings are never deleted.", i ${__NSD_CheckBox_STYLE}, i r4, i r5, i r6, i r7, p r1, i0, i0, i0) i .s'
   Pop $DeleteAppDataCheckbox
   SendMessage $HWNDPARENT ${WM_GETFONT} 0 0 $1
   SendMessage $DeleteAppDataCheckbox ${WM_SETFONT} $1 1
@@ -565,11 +365,24 @@ Function .onInit
     !insertmacro MULTIUSER_INIT
   !endif
 
-  ; Petalock: the folder in force, from /D, a remembered location or the default, is checked before anything is done, and
-  ; Petalock must not be running. A silent run that fails here exits with an error before any change.
-  Call PetalockPreflight
+  ; Petalock: what is installed decides the words and the choices (PetalockDecide touches no page control, so a silent run
+  ; has it too: it never removes first, which only a person ticking a box in the window can ask for).
+  Call PetalockDecide
 
-  ; Abort downgrades if they are disabled, in the modes that skip the reinstall page choice:
+  ; Petalock: the folder in force, from /D, a remembered location or the default, is checked before anything is done, and
+  ; Petalock must not be running. A silent or passive run that fails here exits with an error before any change; a window has
+  ; no box here: its page shows the same checks (PetalockCheckAll) with their way out, and every section checks again.
+  ${If} ${Silent}
+  ${OrIf} $PassiveMode = 1
+    Call PetalockPreflight
+  ${EndIf}
+  ; Petalock: the same control-independent checks in every mode, once the folder is settled and before anything is unpacked or
+  ; shown: the folder's rules, a running Petalock, the free space and the write access. A window keeps the answer for its first page
+  ; (the blocked state, with Retry); a silent or passive run that fails exits with an error before any change.
+  Call PetalockCheckAll
+  Call PetalockQuietChecks
+
+  ; Abort downgrades if they are disabled, in the modes that skip the page's choice:
   ; silent, passive and update
   !if "${ALLOWDOWNGRADES}" == "false"
   ${If} ${Silent}
@@ -597,9 +410,64 @@ Function .onInit
   !endif
 FunctionEnd
 
-Section WebView2
-  ; Petalock: the first thing the first section does, before WebView2's own installer can run or anything is written.
+; Petalock: the first section removes the earlier version first, only when the person ticked "Remove ... before installing" under
+; "Other choices" in the window ($PetalockRemoveFirst: a silent, passive or /UPDATE run never has it). The old uninstaller is the
+; one in the folder the uninstall key records, its command built and checked by PetalockBeforeOldUninstaller, and it runs before
+; WebView2 and before any file (the order the three lines say). Cancel, Esc and the close button go off before it starts.
+Section PetalockRemoveOld
   Call PetalockPreflight
+  ${If} $PetalockFailStep != ""
+    Return
+  ${EndIf}
+  ; Petalock: never in update mode (/UPDATE keeps the Run value, the shortcuts and the opened copies of an install in place).
+  ${If} $PetalockRemoveFirst = 1
+  ${AndIf} $UpdateMode <> 1
+    ; Files someone added to the program folder are kept by the old uninstaller, which would leave the folder non-empty and
+    ; refused by the next section, after the working program had gone: refused here, while the install is intact.
+    Call PetalockHasAddedFiles
+    ${If} $PetalockR = 1
+      !insertmacro PETALOCK_FAILED remove_old "The program folder holds files Setup did not install, so removing first would leave neither version."
+      Return
+    ${EndIf}
+    !insertmacro PETALOCK_BEGIN remove_old
+    Call PetalockLockCancel
+    Call PetalockBeforeOldUninstaller
+    ${IfThen} $UpdateMode = 1 ${|} StrCpy $R1 "$R1 /UPDATE" ${|}
+    ; /UPDATE for an update that removes first (the installed version is older, newer or unknown: not the same), so the old
+    ; uninstaller keeps the Run\Petalock value, the shortcuts and the app data (it still cleans open\ first). It goes before
+    ; `_?=`, which must stay last.
+    ${IfThen} $PetalockCase != "reinstall" ${|} StrCpy $R1 "$R1 /UPDATE" ${|}
+    ${IfThen} $PassiveMode = 1 ${|} StrCpy $R1 "$R1 /P" ${|}
+    StrCpy $R1 "$R1 _?=$4"
+    HideWindow
+    ClearErrors
+    ExecWait '$R1' $0
+    BringToFront
+    ${IfThen} ${Errors} ${|} StrCpy $0 2 ${|}
+    ${If} $0 <> 0
+    ${OrIf} ${FileExists} "$INSTDIR\${MAINBINARYNAME}.exe"
+      ; cancelled in its window, or it failed: Setup stops here, and says the old version was not removed
+      !insertmacro PETALOCK_FAILED remove_old "The earlier version was not removed."
+      Return
+    ${EndIf}
+    ; The NSIS uninstaller was run in place (`_?=`), so it cannot delete itself and the install directory: clean them up here
+    ; once the uninstall succeeded
+    ; https://nsis.sourceforge.io/Docs/Chapter3.html#:~:text=path%20contains%20spaces.-,3.2.3%20Examples,-installer.exe%20/NCRC
+    ${If} $4 != ""
+      Delete "$4\uninstall.exe"
+      RMDir "$4"
+    ${EndIf}
+    !insertmacro PETALOCK_DONE remove_old
+  ${EndIf}
+SectionEnd
+
+Section WebView2
+  ; Petalock: the first thing the section does, before WebView2's own installer can run or anything is written.
+  Call PetalockPreflight
+  ${If} $PetalockFailStep != ""
+    Return
+  ${EndIf}
+  !insertmacro PETALOCK_BEGIN webview2
   ; Check if Webview2 is already installed and skip this section
   ${If} ${RunningX64}
     ReadRegStr $4 HKLM "SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\${WEBVIEW2APPGUID}" "pv"
@@ -615,10 +483,12 @@ Section WebView2
     ;
     ; Skip if updating
     ${If} $UpdateMode <> 1
+      ; Petalock: the bootstrapper is kept in Setup's own private folder ($PLUGINSDIR, removed when Setup ends), never under a fixed
+      ; name in the person's temporary folder (where a download of theirs could be deleted, or replaced before Retry runs it).
+      InitPluginsDir
       !if "${INSTALLWEBVIEW2MODE}" == "downloadBootstrapper"
-        Delete "$TEMP\MicrosoftEdgeWebview2Setup.exe"
         DetailPrint "$(webview2Downloading)"
-        NSISdl::download "https://go.microsoft.com/fwlink/p/?LinkId=2124703" "$TEMP\MicrosoftEdgeWebview2Setup.exe"
+        NSISdl::download "https://go.microsoft.com/fwlink/p/?LinkId=2124703" "$PLUGINSDIR\MicrosoftEdgeWebview2Setup.exe"
         Pop $0
         ${If} $0 == "success"
           DetailPrint "$(webview2DownloadSuccess)"
@@ -626,23 +496,21 @@ Section WebView2
           DetailPrint "$(webview2DownloadError)"
           Abort "$(webview2AbortError)"
         ${EndIf}
-        StrCpy $6 "$TEMP\MicrosoftEdgeWebview2Setup.exe"
+        StrCpy $6 "$PLUGINSDIR\MicrosoftEdgeWebview2Setup.exe"
         Goto install_webview2
       !endif
 
       !if "${INSTALLWEBVIEW2MODE}" == "embedBootstrapper"
-        Delete "$TEMP\MicrosoftEdgeWebview2Setup.exe"
-        File "/oname=$TEMP\MicrosoftEdgeWebview2Setup.exe" "${WEBVIEW2BOOTSTRAPPERPATH}"
+        File "/oname=$PLUGINSDIR\MicrosoftEdgeWebview2Setup.exe" "${WEBVIEW2BOOTSTRAPPERPATH}"
         DetailPrint "$(installingWebview2)"
-        StrCpy $6 "$TEMP\MicrosoftEdgeWebview2Setup.exe"
+        StrCpy $6 "$PLUGINSDIR\MicrosoftEdgeWebview2Setup.exe"
         Goto install_webview2
       !endif
 
       !if "${INSTALLWEBVIEW2MODE}" == "offlineInstaller"
-        Delete "$TEMP\MicrosoftEdgeWebView2RuntimeInstaller.exe"
-        File "/oname=$TEMP\MicrosoftEdgeWebView2RuntimeInstaller.exe" "${WEBVIEW2INSTALLERPATH}"
+        File "/oname=$PLUGINSDIR\MicrosoftEdgeWebView2RuntimeInstaller.exe" "${WEBVIEW2INSTALLERPATH}"
         DetailPrint "$(installingWebview2)"
-        StrCpy $6 "$TEMP\MicrosoftEdgeWebView2RuntimeInstaller.exe"
+        StrCpy $6 "$PLUGINSDIR\MicrosoftEdgeWebView2RuntimeInstaller.exe"
         Goto install_webview2
       !endif
 
@@ -650,14 +518,42 @@ Section WebView2
 
       install_webview2:
         DetailPrint "$(installingWebview2)"
+        ; Petalock: the bootstrapper can't be stopped safely, so Cancel, Esc and the close button go off, and the row says
+        ; Setup is getting WebView2 (the bar moves without a percentage: the download reports none).
+        Call PetalockLockCancel
+        Call PetalockWebviewMissing
+        PetalockWebviewTry:
         ; $6 holds the path to the webview2 installer
         ; Petalock: the program's path is quoted, so a space in the temporary folder's path cannot pick another program.
+        ; Petalock: if the bootstrapper cannot be started at all, ExecWait leaves its output undefined and sets the error flag: that
+        ; is a failure with a code of its own (-1), never read as the 0 of success.
+        ClearErrors
         ExecWait '"$6" ${WEBVIEW2INSTALLERARGS} /install' $1
+        ${If} ${Errors}
+          StrCpy $1 -1
+        ${EndIf}
         ${If} $1 = 0
           DetailPrint "$(webview2InstallSuccess)"
+          StrCpy $PetalockWv "got"
+          !insertmacro PETALOCK_DONE webview2
         ${Else}
           DetailPrint "$(webview2InstallError)"
-          Abort "$(webview2AbortError)"
+          StrCpy $PetalockDetail $1
+          Call PetalockWebviewReason
+          ${If} ${Silent}
+          ${OrIf} $PassiveMode = 1
+            !insertmacro PETALOCK_FAILED_AS_IS webview2
+          ${EndIf}
+          ; A window: the error layout behind, and Retry runs this step again and carries on (Cancel ends Setup here: nothing
+          ; of Petalock was installed).
+          Call PetalockWebviewShowError
+          MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "Setup couldn’t get Microsoft WebView2. Petalock needs it to show its screens.$\r$\n$\r$\nConnect to the internet, then choose Retry. Cancel ends Setup; nothing of Petalock was installed." IDCANCEL PetalockWebviewGiveUp
+          Call PetalockLockCancel
+          Call PetalockWebviewMissing
+          Goto PetalockWebviewTry
+          PetalockWebviewGiveUp:
+          !insertmacro PETALOCK_FAILED_AS_IS webview2
+          Return
         ${EndIf}
       webview2_done:
     ${EndIf}
@@ -690,13 +586,31 @@ Section WebView2
       ${EndIf}
     !endif
   ${EndIf}
+  ; Petalock: "Already installed" only for a runtime that was found; an update does not fetch a missing one, and says so.
+  ${If} $PetalockWv == ""
+    ${If} $4 != ""
+      StrCpy $PetalockWv "had"
+    ${Else}
+      StrCpy $PetalockWv "missing"
+    ${EndIf}
+    !insertmacro PETALOCK_DONE webview2
+  ${EndIf}
 SectionEnd
 
 Section Install
   ; Petalock: checked again before SetOutPath, which makes the folder; and CheckIfAppIsRunning (which ends the program)
   ; is not used.
   Call PetalockPreflight
+  ${If} $PetalockFailStep != ""
+    Return
+  ${EndIf}
+  !insertmacro PETALOCK_BEGIN files
+  ; the first file: Cancel, Esc and the close button are off (if the WebView2 step did not already turn them off)
+  Call PetalockLockCancel
 
+  ; Petalock: an error in the file stage (the output folder, a payload file, the uninstaller) is caught below, before the files row
+  ; can be Done: the flag is cleared here and read after WriteUninstaller.
+  ClearErrors
   SetOutPath $INSTDIR
 
   !ifmacrodef NSIS_HOOK_PREINSTALL
@@ -736,6 +650,17 @@ Section Install
 
   ; Create uninstaller
   WriteUninstaller "$INSTDIR\uninstall.exe"
+  ; Petalock: a denied write, a full volume or a locked file left the error flag set: the row says Failed, with the words of a
+  ; file failure, and no receipt follows.
+  ${If} ${Errors}
+    !insertmacro PETALOCK_FAILED files "Setup could not write one of Petalock’s files."
+    Return
+  ${EndIf}
+  ; Petalock: the files are in place (the program, the resources and the uninstaller were written): the second line is Done
+  ; only now, and the third one begins.
+  !insertmacro PETALOCK_DONE files
+  !insertmacro PETALOCK_BEGIN entries
+  ClearErrors
 
   ; Petalock: the install location is kept only in the uninstall key's InstallLocation (below); Tauri's second key
   ; (HKCU\Software\<publisher>\<product>) is not written. Tauri's removal of an "old main binary" named by a registry value
@@ -756,6 +681,14 @@ Section Install
   WriteRegStr SHCTX "${UNINSTKEY}" "UninstallString" "$\"$INSTDIR\uninstall.exe$\""
   WriteRegDWORD SHCTX "${UNINSTKEY}" "NoModify" "1"
   WriteRegDWORD SHCTX "${UNINSTKEY}" "NoRepair" "1"
+  ; Petalock: Windows refused the Installed apps entry: the receipt must not say it was made.
+  ${If} ${Errors}
+    ; A fresh attempt takes its own files out again (nothing else), so running Setup again is not refused for a folder that holds
+    ; files and no entry; an update (the recorded installation) removes nothing.
+    Call PetalockRollBackFreshFiles
+    !insertmacro PETALOCK_FAILED entries "Windows would not take Petalock’s entry in Installed apps."
+    Return
+  ${EndIf}
 
   ${GetSize} "$INSTDIR" "/M=uninstall.exe /S=0K /G=0" $0 $1 $2
   IntOp $0 $0 + ${ESTIMATEDSIZE}
@@ -784,17 +717,47 @@ Section Install
     !insertmacro NSIS_HOOK_POSTINSTALL
   !endif
 
-  ; Auto close this page for passive mode
-  ${If} $PassiveMode = 1
-    SetAutoClose true
-  ${EndIf}
+  ; Petalock: every step has finished: the entries are Done, and the window goes straight on to the receipt (a passive run
+  ; closes: it has no last page).
+  !insertmacro PETALOCK_DONE entries
+  SetAutoClose true
 SectionEnd
 
+; Petalock (second fix round, re-check finding 1): Windows refused the Installed apps entry after the files were written. On a FRESH
+; attempt ($PetalockMode, set by PetalockPreflight at the start of Section Install: the folder was provably empty then, so
+; everything the attempt wrote is Setup's own) exactly the files this attempt wrote are removed, one by one by the names the
+; uninstaller uses: the program, the bundler's resources and binaries, the uninstaller, and the empty folders made for the
+; resources. Never a wildcard, never a recursive removal, never the program folder itself, never anything else. An attempt over
+; the recorded installation (an update) removes nothing. $PetalockRolledBack is 1 only when the program and the uninstaller are
+; both gone afterwards.
+Function PetalockRollBackFreshFiles
+  StrCpy $PetalockRolledBack 0
+  ${If} $PetalockMode != "fresh"
+    Return
+  ${EndIf}
+  Delete "$INSTDIR\${MAINBINARYNAME}.exe"
+  {{#each resources}}
+    Delete "$INSTDIR\\{{this.[1]}}"
+  {{/each}}
+  {{#each binaries}}
+    Delete "$INSTDIR\\{{this}}"
+  {{/each}}
+  Delete "$INSTDIR\uninstall.exe"
+  {{#each resources_ancestors}}
+    RMDir "$INSTDIR\\{{this}}"
+  {{/each}}
+  ${IfNot} ${FileExists} "$INSTDIR\${MAINBINARYNAME}.exe"
+  ${AndIfNot} ${FileExists} "$INSTDIR\uninstall.exe"
+    StrCpy $PetalockRolledBack 1
+  ${EndIf}
+FunctionEnd
+
 Function .onInstSuccess
-  ; Check for `/R` flag only in silent and passive installers because
+  ; Check for `/R` flag only in passive installers because
   ; GUI installer has a toggle for the user to (re)start the app
+  ; Petalock: a silent install (/S) launches nothing, whatever else is on its command line.
   ${If} $PassiveMode = 1
-  ${OrIf} ${Silent}
+  ${AndIfNot} ${Silent}
     ${GetOptions} $CMDLINE "/R" $R0
     ${IfNot} ${Errors}
       ${GetOptions} $CMDLINE "/ARGS" $R0
@@ -963,9 +926,6 @@ Function Skip
   Abort
 FunctionEnd
 
-Function SkipIfPassive
-  ${IfThen} $PassiveMode = 1  ${|} Abort ${|}
-FunctionEnd
 Function un.SkipIfPassive
   ${IfThen} $PassiveMode = 1  ${|} Abort ${|}
 FunctionEnd
@@ -974,17 +934,38 @@ Function CreateOrUpdateStartMenuShortcut
   ; Petalock: Tauri's migration of shortcuts that pointed at an earlier binary name is gone (nothing to migrate).
 
   ; Skip creating shortcut if in update mode or no shortcut mode
+  ; Petalock: what happened is kept for the receipt ($PetalockSc): skipped, kept (it was there, and is written again), added,
+  ; or failed (Windows would not make it; the Installed apps entry is a separate step and may have worked).
   ${If} $UpdateMode = 1
   ${OrIf} $NoShortcutMode = 1
+    StrCpy $PetalockSc "skipped"
     Return
   ${EndIf}
 
   !if "${STARTMENUFOLDER}" != ""
+    ${If} ${FileExists} "$SMPROGRAMS\$AppStartMenuFolder\${PRODUCTNAME}.lnk"
+      StrCpy $PetalockSc "kept"
+    ${Else}
+      StrCpy $PetalockSc "added"
+    ${EndIf}
+    ClearErrors
     CreateDirectory "$SMPROGRAMS\$AppStartMenuFolder"
     CreateShortcut "$SMPROGRAMS\$AppStartMenuFolder\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
+    ${If} ${Errors}
+      StrCpy $PetalockSc "failed"
+    ${EndIf}
     !insertmacro SetLnkAppUserModelId "$SMPROGRAMS\$AppStartMenuFolder\${PRODUCTNAME}.lnk"
   !else
+    ${If} ${FileExists} "$SMPROGRAMS\${PRODUCTNAME}.lnk"
+      StrCpy $PetalockSc "kept"
+    ${Else}
+      StrCpy $PetalockSc "added"
+    ${EndIf}
+    ClearErrors
     CreateShortcut "$SMPROGRAMS\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
+    ${If} ${Errors}
+      StrCpy $PetalockSc "failed"
+    ${EndIf}
     !insertmacro SetLnkAppUserModelId "$SMPROGRAMS\${PRODUCTNAME}.lnk"
   !endif
 FunctionEnd
