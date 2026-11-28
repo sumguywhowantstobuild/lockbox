@@ -154,9 +154,11 @@ test("fix_17_layout_follows_the_text_size_the_display_and_gives_the_state_its_ow
   const setup = fn(ui(), "PetalockGuiSetup");
   assert.match(setup, /SystemParametersInfoForDpi\(i 0x29/);
   assert.match(setup, /IntOp \$PetalockDpi \$\d \* 8/, "the layout scale comes from the real message font: 12 px is 96");
-  const paint = code(ui()).join("\n").match(/!macro PETALOCK_PAINT N Y\n([\s\S]*?)\n!macroend/)?.[1] ?? "";
-  assert.match(paint, /PETALOCK_MOVE \$PetalockHT\$\{N\} 44 \$\{Y\} 330 20/, "a row with a state word keeps clear of its column");
-  assert.match(paint, /PETALOCK_MOVE \$PetalockHT\$\{N\} 44 \$\{Y\} 432 20/, "a row without one may use the width");
+  const paint = code(ui()).join("\n").match(/!macro PETALOCK_PAINT N Y H\n([\s\S]*?)\n!macroend/)?.[1] ?? "";
+  // (Task 9h: the width a row's words get is what its state word's own column leaves, not a fixed 330; the room is tested in
+  // installer-render.test.mjs, fault 5.)
+  assert.match(paint, /PETALOCK_MOVEU \$PetalockHT\$\{N\} 44 \$\{Y\} \$PetalockTW \$\{H\}/, "a row with a state word keeps clear of its column");
+  assert.match(paint, /PETALOCK_MOVEU \$PetalockHT\$\{N\} 44 \$\{Y\} 432 \$\{H\}/, "a row without one may use the width");
   assert.ok(!/^ManifestDPIAwareness PerMonitorV2/m.test(template()), "Windows scales the window itself when it is moved between monitors");
   assert.match(template(), /^ManifestDPIAware true/m);
   assert.match(template(), /system-DPI|system DPI/i);
@@ -249,7 +251,7 @@ function readsAfterRepaint(body, call) {
 }
 
 test("fix2_1_a_completed_step_keeps_its_outcome_words_through_the_repaint", () => {
-  const paint = code(ui()).join("\n").match(/!macro PETALOCK_PAINT N Y\n([\s\S]*?)\n!macroend/)?.[1] ?? "";
+  const paint = code(ui()).join("\n").match(/!macro PETALOCK_PAINT N Y H\n([\s\S]*?)\n!macroend/)?.[1] ?? "";
   // The reason: the repaint puts a window handle in $PetalockA (the colour helper takes its control there).
   assert.match(paint, new RegExp(`StrCpy \\$PetalockA \\$PetalockHS\\$\\{N\\}`));
   const done = fn(ui(), "PetalockStepDone");
@@ -454,7 +456,7 @@ test("fix2_3_the_added_file_refusal_gives_each_control_its_own_space_and_unticki
     // the "Petalock is open" words in a slot too short for them
     ui().replace(/(\$\{ElseIf\} \$PetalockProblem == "running"\n(?:\s*;[^\n]*\n)*\s*!insertmacro PETALOCK_MOVE \$PetalockHSlot1 24 236 452 )\d+/, (_, head) => `${head}32`),
     // the folder label as tall as it was (it runs into the folder field)
-    ui().replace(/(PETALOCK_LABEL \$PetalockHFLab \$PetalockInner 24 258 452 )\d+/, (_, head) => `${head}20`),
+    ui().replace(/(PETALOCK_LABEL \$PetalockHFLab \$PetalockInner 24 257 452 )\d+/, (_, head) => `${head}22`),
   ];
   for (const mutant of mutants) {
     assert.notEqual(mutant, ui(), "the mutant differs");

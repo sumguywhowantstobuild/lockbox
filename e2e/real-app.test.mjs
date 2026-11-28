@@ -120,6 +120,7 @@ test("shipped_grants_and_config_allow_only_the_listed_commands", { skip: SKIP, t
         installerIcon: "icons/icon.ico",
         uninstallerIcon: "icons/icon.ico",
         headerImage: "windows/band.bmp",
+        sidebarImage: "windows/sidebar.bmp",
         template: "windows/installer.nsi",
         installerHooks: "windows/hooks.nsh",
       },

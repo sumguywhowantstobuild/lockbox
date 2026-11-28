@@ -193,7 +193,8 @@ test("receipt_rows_follow_real_outcomes", () => {
   // The receipt is built from outcomes, never from the plan's own text: its rows ask the same words function the progress uses,
   // in the "done" state, and that function reads what happened ($PetalockWv, $PetalockSc).
   const receipt = fn(ui(), "PetalockReceiptRows");
-  assert.match(receipt, /StrCpy \$PetalockB "done"\n\s*Call PetalockStepText/);
+  assert.match(receipt, /StrCpy \$PetalockB "done"\n\s*StrCpy \$PetalockStep "webview2"\n\s*Call PetalockRowAs/);
+  assert.match(fn(ui(), "PetalockRowAs"), /Call PetalockStepText/, "each row's words come from the same words function the progress uses");
   assert.match(receipt, /\$PetalockSc == "failed"/);
   assert.ok(!/Call PetalockPlanRows/.test(receipt), "the receipt does not use the plan");
   const stepText = fn(ui(), "PetalockStepText");

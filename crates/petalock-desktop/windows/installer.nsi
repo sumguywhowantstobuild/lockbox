@@ -177,8 +177,12 @@ VIAddVersionKey "ProductVersion" "${VERSION}"
 !endif
 
 ; Installer sidebar image
+; Petalock: the installer has no welcome or finish page of the stock kind (its one screen and its receipt are custom pages), so the
+; build's sidebar image (bundle.windows.nsis.sidebarImage, Petalock's own engraved art, a 328 x 628 bitmap the page stretches to its
+; 164 x 314 control at every scale) is shown by the UNINSTALLER's finish page, which showed NSIS's stock blue "computer" picture.
 !if "${SIDEBARIMAGE}" != ""
   !define MUI_WELCOMEFINISHPAGE_BITMAP "${SIDEBARIMAGE}"
+  !define MUI_UNWELCOMEFINISHPAGE_BITMAP "${SIDEBARIMAGE}"
 !endif
 
 ; Petalock: the installer's header image (bundle.windows.nsis.headerImage) is the engraved band of the one screen (a 952 x 104
