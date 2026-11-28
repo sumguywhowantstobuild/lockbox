@@ -13,19 +13,21 @@
 <svg class="ht" viewBox="0 0 1280 300" preserveAspectRatio="xMaxYMid slice" aria-hidden="true">{{{picture_guide}}}</svg>
 <nav class="top" aria-label="Main"><a class="brand" href="/">{{{icon_menu}}}Petalock</a><a href="/">Download</a><a href="/guide/" aria-current="page">Guide</a><a class="hide-s" href="{{repo_url}}">Source code</a></nav>
 <h1>Guide</h1>
-<p><span>Installing, checking, updating and removing Petalock, and what happens to your vaults.</span></p>
+<p><span>Installing and checking Petalock, using it day to day, and what happens to your vaults.</span></p>
 </header>
 <main id="main"><div class="wrap gl">
 <nav class="toc" aria-label="On this page"><p>On this page</p>
-<ol><li><a href="#install">Install</a></li><li><a href="#check-the-file">Check the file</a></li><li><a href="#the-warnings">The warnings</a></li><li><a href="#internet-and-webview2">Internet and WebView2</a></li><li><a href="#update">Update</a></li><li><a href="#uninstall">Uninstall</a></li><li><a href="#going-back">Going back</a></li><li><a href="#delete-a-vault">Delete a vault</a></li><li><a href="#if-petalock-won-t-start">If Petalock won't start</a></li></ol></nav>
+<ol><li><a href="#install">Install</a></li><li><a href="#check-the-file">Check the file</a></li><li><a href="#the-warnings">The warnings</a></li><li><a href="#internet-and-webview2">Internet and WebView2</a></li><li><a href="#first-steps">First steps</a></li><li><a href="#the-recovery-key">The recovery key</a></li><li><a href="#backups">Backups</a></li><li><a href="#the-trash">The trash</a></li><li><a href="#exporting-a-vault">Exporting a vault</a></li><li><a href="#what-petalock-can-t-protect-against">What Petalock can't protect against</a></li><li><a href="#update">Update</a></li><li><a href="#uninstall">Uninstall</a></li><li><a href="#going-back">Going back</a></li><li><a href="#delete-a-vault">Delete a vault</a></li><li><a href="#if-petalock-won-t-start">If Petalock won't start</a></li></ol></nav>
 <article>
 <div class="intro">
-<p>Petalock is an early preview: it is unsigned and has not been independently audited.</p>
+<p>Petalock keeps your passwords, keys, notes and files on your own PC, in an encrypted folder called a vault. There is no account and no server. This guide is short on purpose; the exact version of what Petalock can and can't protect is in its security policy, linked at the foot of this page.</p>
+<p>Petalock is an early preview: it is unsigned and has not been independently audited. Please don't keep your real passwords in it yet.</p>
 <p>Get Petalock only from petalock.arielmaningas.com or github.com/sumguywhowantstobuild/petalock.</p>
 <p>Windows 11, 64-bit is the only tested setup. Windows 10 (64-bit) should work but hasn't been tested.</p>
 </div>
 <section id="install"><h2>Install</h2>
-<p>Get the installer from the <a href="/">download page</a>, check its fingerprint (the next section), then open it. No administrator password is needed: Petalock goes into your own user folder. If Petalock is running, setup asks you to quit it from its icon by the clock, with Retry and Cancel; it never closes Petalock itself.</p></section>
+<p>Get the installer from the <a href="/">download page</a>, check its fingerprint (the next section), then open it. No administrator password is needed: Petalock goes into your own user folder. If Petalock is running, setup asks you to quit it from its icon by the clock, with Retry and Cancel; it never closes Petalock itself.</p>
+<p>Setup shows what it will do on one screen. Choose Install; to put Petalock in another folder, open Options first. When it has finished, you can open Petalock from that screen or from the Start menu.</p></section>
 <section id="check-the-file"><h2>Check the file</h2>
 <p>Every release lists the file's fingerprint. Paste the PowerShell line from the download page; it prints True when the file is ours.</p>
 <label class="ps-label" for="ps-line"><!--if:release-->PowerShell line to check the file, for version {{version}}<!--/if--><!--if:soon-->PowerShell line to check the file, for the first release<!--/if--></label>
@@ -48,6 +50,34 @@
 <section id="internet-and-webview2"><h2>Internet and WebView2</h2>
 <p>Setup goes online only when Microsoft Edge WebView2 is missing, to get it from Microsoft. Windows 11 includes it. Microsoft installs a shared WebView2 Runtime that other apps use too; Petalock’s uninstall leaves it installed. If setup’s download fails, install Microsoft’s official “Evergreen Standalone” WebView2 Runtime from Microsoft’s website, then run setup again. What the WebView2 installer itself changes on the PC is Microsoft’s, not Petalock’s.</p>
 <p>Petalock has no online features: it sends nothing about you or your vaults anywhere.</p></section>
+<section id="first-steps"><h2>First steps</h2>
+<p>Open Petalock and choose Create a vault. Give the vault a name. The name isn't encrypted, so don't put anything secret in it.</p>
+<p>Choose a password and type it twice. Use at least 12 characters. A password that is easy to guess is still easy to guess, however well Petalock protects it.</p>
+<p>Petalock shows your recovery key once. Save it before you go on (see the next part). Then Petalock asks you to pick the right word for three of the numbers, to show you saved it. Your vault is then open and empty: add a login, a key, a note or a file, or paste a whole <code>.env</code>.</p>
+<p>Petalock locks your vaults by itself after 5 minutes with no keyboard or mouse use on this PC (you can change this in Settings), so working in other apps keeps them open; it also locks them when Windows locks or goes to sleep. It clears a password you copied from the clipboard after 30 seconds.</p></section>
+<section id="the-recovery-key"><h2>The recovery key</h2>
+<p>The recovery key is 24 numbered words. It is the only way back in if you forget your password.</p>
+<p><strong>If you lose both your password and your recovery key, nobody can get your data back.</strong></p>
+<p>Print it or save it as a PDF, and keep it somewhere that isn't this PC. Writing it down by hand is fine.</p>
+<p>Don't take a screenshot or a recording of it, and don't share your screen while it is showing. Petalock asks Windows to show its window blank in screenshots, recordings and screen sharing, but Windows doesn't guarantee that, so anyone who captures the key could open a copy of your vault.</p>
+<p>Forgot your password? On the lock screen choose Forgot password? and type your recovery key. To get a new recovery key, use New recovery key in Settings. The old key stops working for that vault, but a backup made earlier still needs the old one.</p></section>
+<section id="backups"><h2>Backups, on another drive</h2>
+<p>A backup is one encrypted file with a copy of a vault. Make one once the vault holds things you'd miss. In Settings, choose Back up, and keep the backup on another drive.</p>
+<p>A backup opens with the password or recovery key the vault had on the day the backup was made. Changing your password later doesn't change what an old backup needs.</p>
+<p>Check a backup works with Test a backup in Settings. It changes nothing. To bring a vault back, or to move to a new PC, use Restore a backup, or I already have a vault or a backup on the first screen of Petalock on the new PC.</p></section>
+<section id="the-trash"><h2>The trash</h2>
+<p>Items you delete go to the Trash, and you can restore them from there. Petalock never empties the trash by itself. Empty trash (or Delete for good on one item) deletes them for good and can't be undone, though a backup made earlier still holds them.</p></section>
+<section id="exporting-a-vault"><h2>Exporting a vault</h2>
+<p>Export in Settings writes your logins, keys and notes to a file that other programs can read. <strong>That file isn't protected: anyone who gets it can read every password in it.</strong> Petalock warns you first.</p>
+<p>When you are done with the file, delete it, then empty the Recycle Bin. A deleted file can also stay behind on an SSD, or in a cloud service's older versions. Don't open the file in a spreadsheet: a value that starts with <code>=</code> can be run as a formula. Don't save it in a folder that a cloud service syncs: it would be uploaded unprotected, and Petalock asks first if you do. Stored files and earlier passwords aren't in an export.</p></section>
+<section id="what-petalock-can-t-protect-against"><h2>What Petalock can't protect against</h2>
+<p>Petalock protects a copy of your vault folder: without your password or recovery key nobody can read your items, though the vault's name, how many files it has, their sizes and dates can be seen. It can't help with these:</p>
+<p><strong>Malware on your PC while a vault is open.</strong> It can see what Petalock can see.</p>
+<p><strong>Someone who has your password or recovery key.</strong></p>
+<p><strong>A weak password.</strong> Each guess against a copied vault is made slow, but a guessable password is still guessable. Petalock doesn't lock anyone out after wrong passwords, because someone with a copy of the folder doesn't need Petalock.</p>
+<p><strong>Old copies of a vault.</strong> Changing your password, or making a new recovery key, doesn't change the vault's main key. Someone who has an old copy of the vault (an old backup, for example) and the old password or recovery key can open that copy. They can open your newer items too, if they also get copies of them.</p>
+<p><strong>Copies Windows makes.</strong> Windows may write secrets to its own files, such as the pagefile, the hibernation file, crash dumps and the print queue. Turn on full-disk encryption (BitLocker on Windows Pro and above, or Device encryption on PCs that have it).</p>
+<p><strong>Other programs.</strong> Any program running as you can read the clipboard while a copy is on it. A file you open with another program may be copied by that program.</p></section>
 <section id="update"><h2>Update</h2>
 <p>Install the new version over the old one. Your vaults, settings and “start with Windows” stay as they are. Petalock doesn’t update itself or tell you about new versions: check the <a href="/">download page</a> or the <a href="{{releases_url}}">releases list</a>.</p></section>
 <section id="uninstall"><h2>Uninstall</h2>
@@ -61,9 +91,12 @@
 <p>Older versions stay on the <a href="{{releases_url}}">releases list</a>. Each release lists its own installer and its own fingerprint (the .sha256 file on its page). Check the exact file you will open against that release's fingerprint, not against this page's: the PowerShell line above is for <!--if:release-->version {{version}}<!--/if--><!--if:soon-->the first release<!--/if--> only.</p>
 <p>Setup lets you install one over a newer version, but going back hasn’t been tested: an older version may not open vaults or settings a newer one has changed, so keep a tested backup before you try. If a release is withdrawn, the download page goes back to the last good one and the withdrawn release’s notes say why.</p></section>
 <section id="delete-a-vault"><h2>Delete a vault</h2>
-<p>First note the vault's exact folder (in Petalock, choose Show in File Explorer). If you might want the vault back, make sure you have a tested backup you can restore. Then remove the vault from Petalock's list, then delete that folder in File Explorer. It usually goes to the Recycle Bin; a very large folder or some drives delete it for good, so if Windows says it will delete it permanently and you didn't expect that, cancel. If the deleted folder appears in the Recycle Bin, you can select that entry only and delete it permanently.</p></section>
+<p>Petalock can't delete a vault for you yet. First note the vault's exact folder (in Petalock, choose Show in File Explorer). If you might want the vault back, make sure you have a tested backup you can restore. Then remove the vault from Petalock's list, then delete that folder in File Explorer. It usually goes to the Recycle Bin; a very large folder or some drives delete it for good, so if Windows says it will delete it permanently and you didn't expect that, cancel. If the deleted folder appears in the Recycle Bin, you can select that entry only and delete it permanently.</p>
+<p>In Petalock, the two choices are in the menu under your vault's name:</p>
+<ol class="steps"><li>Show (the vault's name) in Explorer opens the vault's folder. Note which folder it is.</li><li>Remove (the vault's name) from this list takes the vault off the list. The folder and everything in it stay on your PC, and you can add the vault back with Add existing vault folder.</li></ol></section>
 <section id="if-petalock-won-t-start"><h2>If Petalock won't start</h2>
-<p>Restart your PC and try again. Look for Petalock's icon by the clock. Check that Microsoft Edge WebView2 Runtime is installed. Your vaults stay safe in their folders either way.</p></section>
+<p>If Petalock says “Petalock can't start. Your vaults aren't affected.”, or doesn't open, try these in order. Your vaults stay safe in their folders either way, and your backups still open on another PC.</p>
+<ol class="steps"><li>Restart your PC and try again.</li><li>Look for Petalock's icon by the clock. If Petalock is already running, opening it again brings that one forward.</li><li>Check that Microsoft Edge WebView2 Runtime is installed. Petalock draws its window with it, and it comes with Windows 11. Petalock won't start if it can't confirm that its safety settings are on.</li><li>Petalock also won't start if it can't listen for Windows locking and sleeping.</li></ol></section>
 </article></div></main>
 <footer><div class="wrap"><span class="f">{{{icon_foot}}}Petalock</span>
 <ul class="links"><li><a href="{{notes_url}}">Release notes</a></li><li><span aria-hidden="true">·</span> <a href="{{releases_url}}">Older versions</a></li><li><span aria-hidden="true">·</span> <a href="{{repo_url}}">Source code</a></li><li><span aria-hidden="true">·</span> <a href="{{security_url}}">Security policy</a></li></ul>

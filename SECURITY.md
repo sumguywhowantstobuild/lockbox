@@ -1,6 +1,7 @@
 # Security
 
-Petalock is a work in progress and **has not been independently audited**. Don't store real passwords in it yet. This
+Petalock is an early preview: its installer is unsigned, and it **has not been independently audited**. Don't store real
+passwords in it yet. This
 file says what Petalock is built to protect, what it does not protect, how it encrypts, and every limit we know about.
 The requirements R1–R7 are defined in the
 [design spec](docs/design/2026-10-07-lockbox-design.md#security-requirements-v1).
@@ -9,7 +10,9 @@ The requirements R1–R7 are defined in the
 
 Please report it privately, not in a public issue: on this repository's **Security** tab choose **Report a
 vulnerability** (GitHub private vulnerability reporting). Say what you found and how to reproduce it. Petalock is a
-one-person project, so there is no promised response time. There is no release yet; reports apply to the latest code.
+one-person project, so there is no promised response time. Reports apply to the latest release and to the latest code
+on `main`. A release with a security problem is withdrawn as [RELEASING.md](RELEASING.md#withdrawing-a-release) says,
+and a GitHub security advisory names the versions it affects.
 
 ## What Petalock protects against
 
@@ -64,6 +67,102 @@ Petalock keeps everything on your own PC, in one folder per vault. It is built s
   another program may be copied by that program (autosaves, recent-file lists, temp files).
 - **Programs that read the clipboard while a copy is on it.** Copied passwords stay out of Windows clipboard history
   and cloud clipboard, but any program running as you can read the clipboard until it is cleared.
+
+## Downloading, installing and uninstalling
+
+### Verifying a download
+
+Get Petalock only from `petalock.arielmaningas.com` or this repository's releases on GitHub. Each release has one
+installer, `Petalock_<version>_x64-setup.exe`, built by GitHub from a protected tag on `main` after every CI job passed
+on that commit ([RELEASING.md](RELEASING.md)). Check the file before you open it, in either or both of two ways.
+
+**The fingerprint (SHA-256).** The download page shows it, and each release lists it in the file
+`Petalock_<version>_x64-setup.exe.sha256`. The page's value is not typed by anyone: the page is built from the release's
+real installer, downloaded and hashed, and the build refuses to deploy if that hash and the release's `.sha256` disagree.
+The page gives a PowerShell line that prints `True` when the file matches:
+
+```
+(Get-FileHash -LiteralPath "$HOME\Downloads\Petalock_<version>_x64-setup.exe").Hash -eq "<fingerprint>"
+```
+
+If it prints `False`, don't open the file: delete it. A matching fingerprint shows the file is the one published; on its
+own it can't show who published it, because the page and the release are both run by the same owner.
+
+**GitHub's build record (artifact attestation).** When the release workflow builds an installer, GitHub signs a record of
+it: which repository, which workflow file on which branch, and the file's digest. With GitHub's command-line tool:
+
+```
+gh attestation verify "$HOME\Downloads\Petalock_<version>_x64-setup.exe" --repo sumguywhowantstobuild/petalock --cert-identity "https://github.com/sumguywhowantstobuild/petalock/.github/workflows/release.yml@refs/heads/main" --source-ref refs/heads/main
+```
+
+It should report the release workflow on `main`. If it reports anything else or fails, delete the file. The workflow also
+signs a second statement that binds the release's tag, the commit it was built from and the installer's digest together.
+To read it, add `--predicate-type https://github.com/sumguywhowantstobuild/petalock/release-binding/v1 --format json` to
+the same line: the statement's `tag`, `sourceCommit` and `installer.sha256` should be the release's. Both bundles are also
+attached to each release (`.provenance.sigstore.json` and `.release-binding.sigstore.json`) for a check with `--bundle`.
+Before any release is made public, both statements are verified on the draft's own downloaded installer, and the result is
+written in that release's record ([docs/releases/](docs/releases/)).
+
+### The unsigned preview and SmartScreen
+
+The installer has no code signature (Authenticode), and the project publishes no PGP signature. So Windows can't tell
+who made the file, and a new file has no download history. Expect two warnings, worded differently on some PCs:
+
+- **Your browser** may say the file isn't commonly downloaded. That is a reputation notice, not a finding. Keep the file
+  for that notice only, then check it as above.
+- **Microsoft Defender SmartScreen** may show "Windows protected your PC" when you open it. Only after the fingerprint
+  check printed `True`, choose More info, then Run anyway, for that screen only.
+
+A fake copy would bring the same two warnings, which is why the check matters. Stop and delete the file if your browser
+or a security product says it found malware or a virus, or if Windows asks for administrator permission in any form (a
+password or a Yes/No prompt): setup never needs it. With Smart App Control on, Windows may block Petalock with no Run
+anyway option; this preview can't run on that PC until Petalock is signed, and we don't suggest turning Smart App
+Control off for it. Code signing and automatic updates are planned for Phase 2 ([PRD](docs/PRD.md#phases)).
+
+### What install and uninstall touch
+
+Setup installs for your Windows account only, without administrator rights. It writes:
+
+- its program folder, by default `%LOCALAPPDATA%\Programs\Petalock` (another folder can be chosen under Options, or with
+  `/D`);
+- its uninstall entry, `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Petalock`, which also remembers the
+  program folder for the next upgrade;
+- its Start menu shortcut, and a desktop shortcut only for a silent or passive install (`/S` or `/P`);
+- nothing else. It writes nothing under `HKEY_LOCAL_MACHINE`, makes no vault, and doesn't create Petalock's own folder
+  `%LOCALAPPDATA%\Petalock` (the app makes that when it first runs).
+
+If Microsoft Edge WebView2 is missing (Windows 11 includes it), setup runs Microsoft's WebView2 installer, which is inside
+setup and is checked at build time by Microsoft's own signature. It installs Microsoft's shared WebView2 Runtime, which
+other apps use too; what it changes on the PC is Microsoft's, and uninstalling Petalock leaves it.
+
+Setup refuses a program folder that is Petalock's own folder or inside it, either of the two folders named after the app's
+identifier (`%APPDATA%\io.github.sumguywhowantstobuild.petalock` and
+`%LOCALAPPDATA%\io.github.sumguywhowantstobuild.petalock`, where the app's web view keeps its data), a vault folder or a
+folder inside one, or any folder that already holds files and isn't Petalock's own installation. It checks the folder,
+through any junction or link on the way, before each install, upgrade and uninstall, before its first write or removal.
+With Petalock running, an interactive setup or uninstall asks you to quit it from its icon by the clock, with Retry and
+Cancel; it never ends Petalock itself, and Cancel leaves everything as it was. A silent one exits with an error before
+changing anything.
+
+An upgrade installs over the same folder and keeps your vaults, the list of vaults, settings, Petalock's records and the
+"start with Windows" entry.
+
+Uninstalling (Windows Settings, Apps, Installed apps) removes, in this order:
+
+1. The temporary copies of opened files, in `%LOCALAPPDATA%\Petalock\open\`. If any can't be removed (a program still
+   holds one), the uninstall stops before it removes the program or its uninstall entry, says so, and offers Retry and
+   Cancel; a silent uninstall exits with an error. Cancel leaves Petalock installed, though some copies may already be
+   gone.
+2. The files setup installed, each by name, never the whole folder: a file you added to the program folder stays, and so
+   does the folder then.
+3. The uninstall entry, the shortcuts that point at the program, and the "start with Windows" value
+   `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Petalock`.
+4. Only if you tick "Delete the application data": the two identifier folders above. Nothing else.
+
+It never removes a vault, the list of vaults (`vaults.json`), the settings, the restore and output records or anything
+else in `%LOCALAPPDATA%\Petalock`, and no removal follows a junction or symbolic link, at a folder or inside it. Its last
+page says where the vaults stayed. To remove Petalock's records too, or to delete a vault on purpose, follow the
+[guide](https://petalock.arielmaningas.com/guide/#uninstall).
 
 ## Where each requirement stands today
 
@@ -250,7 +349,36 @@ in the code with a `shortcut:` comment.
 
 - **Not independently audited.** No independent security expert has audited Petalock, and none is planned (spec 11).
   *Accepted:* the project's answer is tests, a written walk-through of this file against the code before each release,
-  and honesty about what is not covered.
+  and honesty about what is not covered. Each release has a record of that evidence ([docs/releases/](docs/releases/)).
+
+### Downloads and the installer
+
+- **The installer is unsigned.** Windows can't tell who made it, warns before it runs, and Smart App Control may block it
+  outright. *Accepted for the preview:* the fingerprint and GitHub's build record are the checks offered instead
+  ("Verifying a download"); signing is Phase 2.
+- **The fingerprint and the build record both rest on the GitHub account.** Someone who took over the owner's GitHub
+  account could publish a different file with a matching `.sha256`, and could run the release workflow. The build record
+  still shows it came from `release.yml` on `main`, and the tag ruleset and the `release` environment's approval stand
+  in the way, but whoever holds the owner's account holds those too. *Accepted:* the owner's account is outside what the
+  code can protect; each release's record reads the live settings back from GitHub before it is made public.
+- **Setup without WebView2 is not tested.** Windows 11 always has it, and no PC without it was available. Where it is
+  missing, setup needs the internet to get it from Microsoft; if that fails, setup stops with Microsoft's error and
+  nothing of yours is changed. Whether Microsoft's own WebView2 installer ever asks Windows for administrator permission
+  on such a PC is untested too; Petalock's setup itself never does. *Accepted:* the guide says what to do (install
+  Microsoft's Evergreen Standalone runtime).
+- **The WebView2 installer inside setup is accepted by Microsoft's signature, not by a fixed digest.** Microsoft replaces
+  that file at the same address with each new build, so a pinned digest broke every build. The build checks that its
+  Authenticode signature is valid, from Microsoft Corporation, with a chain to a Microsoft root, logs the digest of the file
+  it checked, and checks the digest again after the build. *Accepted:* it is Microsoft's own check of Microsoft's file.
+- **Going back to an older version is allowed but not tested.** Setup installs an older version over a newer one, but an
+  older Petalock may not open vaults or settings a newer one changed. *Accepted:* the guide says to keep a tested backup
+  first.
+- **An uninstall leaves Petalock's records on purpose.** The settings, the list of vaults and the restore and output
+  records stay in `%LOCALAPPDATA%\Petalock` (no vault is ever in that folder), so a reinstall finds your vaults again.
+  *Accepted:* the guide shows how to delete the folder afterwards.
+- **Setup knows a vault folder by its header files** (`vault.json` or `vault.json.bak`, in the folder or any folder above it). A
+  vault folder that has lost both would not be recognised as one, but setup still refuses it unless it is empty, since it
+  refuses any folder that holds files and isn't Petalock's own installation.
 
 ### The desktop app
 
@@ -680,8 +808,9 @@ Petalock defends.
 
 ### Not built yet
 
-These are described in the spec but do not exist, so nothing here should be relied on yet: the installer, updates and
-uninstalling (Plan 5). Plans 4A to 4D are built (export, emptying the trash and the list of items in the trash
+These are described in the spec but do not exist, so nothing here should be relied on yet: automatic updates and an
+update notice, and code signing (both Phase 2). The installer, upgrading by installing over the old version, and
+uninstalling are built (Plan 5; "Downloading, installing and uninstalling" above). Plans 4A to 4D are built (export, emptying the trash and the list of items in the trash
 for 30 days or more, the list of leftover files with no item that uses them and Delete them all, which asks first and
 sends no file name or path, Help and the guide, the notice when Petalock can't start, and end-to-end tests on the running app,
 besides first-time setup and the recovery key, unlock, the list, search and signing in, adding and editing logins, keys and notes,
@@ -727,5 +856,12 @@ Every push runs formatting, lint, the test suite (the engine on Windows and Linu
 tests and build; the three slow checks that are run on purpose are left out) and a security scan (gitleaks for secrets, semgrep for risky code, osv-scanner for vulnerable
 dependencies). A separate job drives the real release app on Windows end to end (setup, unlock, saving a copied key,
 backup and restore, signing in to a site) and checks that a normal launch opens no debugging port and that the shipped
-app grants only its listed commands. Per the spec, a release only counts as "reviewed" when a written walk-through of this file against the
-code is signed off first; none has been done because there is no release.
+app grants only its listed commands. Another job builds the installer from the same commit and runs its smoke checks on
+those exact bytes on a clean runner: the default, a chosen and each refused folder, a list of everything setup wrote, an
+upgrade between two versions and a downgrade, the uninstall with and without the app-data box, junctions, held and
+read-only copies, and Petalock running during each. The site's tests check the download page's and the guide's words,
+links and headers, and that a page loads nothing from another site. A release is built only by the release workflow,
+from a protected tag on `main`, after every one of those jobs passed on that commit ([RELEASING.md](RELEASING.md)).
+Per the spec, a release only counts as "reviewed" when a written walk-through of this file against the code is signed
+off first. That walk-through is done for each release candidate, against its exact commit, and kept in its record in
+[docs/releases/](docs/releases/); none has been done yet, because there is no release yet.

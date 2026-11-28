@@ -32,8 +32,8 @@ other password managers (see "Not in v1" under [Scope](#scope)).
 
 | Phase | Ships | Design choice made now |
 |---|---|---|
-| **1 (v1)** | Windows app for Ariel | Rust core is a separate library with no Windows or Tauri code\* |
-| 2 | Share with friends: download website, code-signed installer, auto-updates | Vault format is versioned; app refuses vaults newer than itself |
+| **1 (v1)** | Windows app, offered as an unsigned public preview: a per-user installer, a download page with the file's fingerprint and how to check it, and a guide | Rust core is a separate library with no Windows or Tauri code\* |
+| 2 | Code-signed installer, auto-updates | Vault format is versioned; app refuses vaults newer than itself |
 | 3 | Android app + sync between devices without a server | Vault = folder of small independent files, a reasonable base for sync |
 
 \* The core has one small Windows-only file-system module (`fsio/windows.rs`) behind a platform switch, with a portable
@@ -45,7 +45,10 @@ conflict handling, deletion tombstones and an authenticated manifest; the contai
 path.
 
 **Who the screens are for.** They are designed for strangers who download Petalock, not only for Ariel (Ariel,
-2026-11-04). When downloads happen, in v1 or in Phase 2, is still open, and with it the installer's signing and updates.
+2026-11-04). Downloads come in v1, as an unsigned preview at petalock.arielmaningas.com (Ariel, 2026-11-24): the page
+and the guide say plainly that the installer is unsigned and the code not independently audited. Signing the installer
+and automatic updates stay in Phase 2. Until then, a new version is installed by hand over the old one, and the vaults
+stay.
 
 ## Scope
 
