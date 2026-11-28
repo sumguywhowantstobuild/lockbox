@@ -1,0 +1,31 @@
+name: Installer pictures (throwaway)
+on:
+  push:
+    branches: ['ci-trial/pictures-9h*']
+permissions:
+  actions: read
+  contents: read
+jobs:
+  pictures:
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 80
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Download the installer under test
+        shell: cmd
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INSTALLER_RUN: '46104464653'
+        run: gh run download %INSTALLER_RUN% -n petalock-installer -R ${{ github.repository }} -D "%RUNNER_TEMP%\installer"
+      - name: Capture the installer's states
+        timeout-minutes: 70
+        shell: cmd
+        run: '"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts\installer-pictures.ps1 -InstallerDir "%RUNNER_TEMP%\installer"'
+      - name: Pictures and log
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: installer-pictures
+          path: ${{ runner.temp }}/pictures
