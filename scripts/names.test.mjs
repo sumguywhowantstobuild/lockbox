@@ -1,8 +1,8 @@
 // Plan 5, Task 0e, `no_lockbox_outside_the_format_labels`: the product, its code and its repository are Petalock. The old
 // name Lockbox is left only where changing it would break something or rewrite history, each listed below with the reason:
-// the vault and backup format labels (inside every vault and backup ever made), the old backup extension the app still
-// opens, the marker files of a test-state swap left mid-way, the dated design notes and links to them, and two lines of
-// SECURITY.md about a test run while the app had its old name. Every tracked file and path is read; a new `lockbox`
+// the vault and backup format labels (inside every vault and backup ever made), the old backup extension (which opens
+// once renamed), the dated design notes and links to them, and two lines of SECURITY.md about a test run while the app
+// had its old name. Every tracked file and path is read; a new `lockbox`
 // anywhere else fails this test until someone decides it belongs on the list.
 
 import assert from "node:assert/strict";

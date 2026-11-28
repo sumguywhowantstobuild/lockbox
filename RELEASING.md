@@ -15,7 +15,7 @@ The rules behind it:
   on by their SHA-256. Each later job checks the digest.
 - **Signing and publishing need the owner.** The `attest` and `draft` jobs run in the GitHub environment `release`, which
   allows only `main` and waits for the owner's approval, so each release asks for approval twice. Only the owner can
-  create a `v*` tag, and nobody can move or delete one (a tag ruleset).
+  create a `v*` tag, and nobody can move or delete one without first changing the tag rulesets (two, below).
 - **Making a draft public is the owner's click,** only after the draft's own files have been checked (step 6).
 - **Candidates are plain versions** (0.1.1, 0.1.2 and so on), each published as a pre-release. The first candidate whose
   walk-through is clean is promoted to the release as the same file, never rebuilt.
@@ -30,7 +30,8 @@ section 5):
 
 - Two tag rulesets on `refs/tags/v*`, because a ruleset's bypass applies to every rule in it: "release tags" restricts
   creation, and only the repository admin role bypasses it (so only the owner can make a release tag); "release tags
-  fixed" restricts update and deletion with no bypass at all, so nobody, the owner included, can move or delete one.
+  fixed" restricts update and deletion with no bypass at all, so nobody, the owner included, can move or delete one
+  without first changing that ruleset in the repository's settings.
 - The environment `release`: the owner as required reviewer; deployment branches: `main` only.
 - The environment `site`: deployment branches `main` only; the Cloudflare token as its only secret; the repository
   variable `SITE_DEPLOY` set to `on` only once the site is ready to go live (`.github/workflows/site.yml`).
